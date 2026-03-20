@@ -34,31 +34,24 @@ class ClobPricesClient:
         data = self.get_spread_raw(token_id)
         return data.get("spread")
 
-    @staticmethod
-    def _extract_price(level: Any) -> str | None:
-        if isinstance(level, dict):
-            value = level.get("price")
-            return str(value) if value is not None else None
-        return None
-
     def get_best_bid_ask(self, token_id: str) -> tuple[str | None, str | None]:
-    book = self.get_book_raw(token_id)
+        book = self.get_book_raw(token_id)
 
-    bids = book.get("bids", []) if isinstance(book, dict) else []
-    asks = book.get("asks", []) if isinstance(book, dict) else []
+        bids = book.get("bids", []) if isinstance(book, dict) else []
+        asks = book.get("asks", []) if isinstance(book, dict) else []
 
-    bid_prices = [
-        float(level["price"])
-        for level in bids
-        if isinstance(level, dict) and level.get("price") is not None
-    ]
-    ask_prices = [
-        float(level["price"])
-        for level in asks
-        if isinstance(level, dict) and level.get("price") is not None
-    ]
+        bid_prices = [
+            float(level["price"])
+            for level in bids
+            if isinstance(level, dict) and level.get("price") is not None
+        ]
+        ask_prices = [
+            float(level["price"])
+            for level in asks
+            if isinstance(level, dict) and level.get("price") is not None
+        ]
 
-    best_bid = str(max(bid_prices)) if bid_prices else None
-    best_ask = str(min(ask_prices)) if ask_prices else None
+        best_bid = str(max(bid_prices)) if bid_prices else None
+        best_ask = str(min(ask_prices)) if ask_prices else None
 
-    return best_bid, best_ask
+        return best_bid, best_ask
