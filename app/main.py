@@ -1,9 +1,6 @@
 from collectors.gamma_markets import GammaMarketsClient
 from collectors.clob_prices import ClobPricesClient
 
-print("RAW clobTokenIds:", market.get("clobTokenIds"))
-print("RAW outcomes:", market.get("outcomes"))
-print("RAW enableOrderBook:", market.get("enableOrderBook"))
 
 def main() -> None:
     gamma = GammaMarketsClient()
@@ -13,11 +10,10 @@ def main() -> None:
     print(f"Loaded {len(markets)} markets\n")
 
     for idx, market in enumerate(markets, start=1):
-        
         print("RAW clobTokenIds:", market.get("clobTokenIds"))
         print("RAW outcomes:", market.get("outcomes"))
         print("RAW enableOrderBook:", market.get("enableOrderBook"))
-        
+
         item = gamma.normalize_market(market)
 
         yes_token_id = item["yes_token_id"]
@@ -37,6 +33,7 @@ def main() -> None:
 
         print(f"{idx}. {item['question']}")
         print(f"   market_id: {item['id']}")
+        print(f"   enable_order_book: {item['enable_order_book']}")
         print(f"   yes_token_id: {item['yes_token_id']}")
         print(f"   no_token_id:  {item['no_token_id']}")
         print(f"   active: {item['active']} | closed: {item['closed']}")
