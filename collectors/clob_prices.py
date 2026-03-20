@@ -42,12 +42,23 @@ class ClobPricesClient:
         return None
 
     def get_best_bid_ask(self, token_id: str) -> tuple[str | None, str | None]:
-        book = self.get_book_raw(token_id)
+    book = self.get_book_raw(token_id)
 
-        bids = book.get("bids", []) if isinstance(book, dict) else []
-        asks = book.get("asks", []) if isinstance(book, dict) else []
+    bids = book.get("bids", []) if isinstance(book, dict) else []
+    asks = book.get("asks", []) if isinstance(book, dict) else []
 
-        best_bid = self._extract_price(bids[0]) if bids else None
-        best_ask = self._extract_price(asks[0]) if asks else None
+    bid_prices = [
+        float(level["price"])
+        for level in bids
+        if isinstance(level, dict) and level.get("price") is not None
+    ]
+    ask_prices = [
+        float(level["price"])
+        for level in asks
+        if isinstance(level, dict) and level.get("price") is not None
+    ]
 
-        return best_bid, best_ask
+    best_bid = str(max(bid_prices)) if bid_prices else None
+    best_ask = str(min(ask_prices)) if ask_prices else None
+
+    return best_bid, best_ask
