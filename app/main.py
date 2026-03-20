@@ -1,6 +1,9 @@
 from collectors.gamma_markets import GammaMarketsClient
 from collectors.clob_prices import ClobPricesClient
 
+print("RAW clobTokenIds:", market.get("clobTokenIds"))
+print("RAW outcomes:", market.get("outcomes"))
+print("RAW enableOrderBook:", market.get("enableOrderBook"))
 
 def main() -> None:
     gamma = GammaMarketsClient()
