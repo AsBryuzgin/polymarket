@@ -23,6 +23,9 @@ class ClobPricesClient:
     def get_spread_raw(self, token_id: str) -> dict[str, Any]:
         return self._get("/spread", token_id)
 
+    def get_book_raw(self, token_id: str) -> dict[str, Any]:
+        return self._get("/book", token_id)
+
     def get_midpoint(self, token_id: str) -> str | None:
         data = self.get_midpoint_raw(token_id)
         return data.get("mid")
@@ -30,3 +33,21 @@ class ClobPricesClient:
     def get_spread(self, token_id: str) -> str | None:
         data = self.get_spread_raw(token_id)
         return data.get("spread")
+
+    @staticmethod
+    def _extract_price(level: Any) -> str | None:
+        if isinstance(level, dict):
+            value = level.get("price")
+            return str(value) if value is not None else None
+        return None
+
+    def get_best_bid_ask(self, token_id: str) -> tuple[str | None, str | None]:
+        book = self.get_book_raw(token_id)
+
+        bids = book.get("bids", []) if isinstance(book, dict) else []
+        asks = book.get("asks", []) if isinstance(book, dict) else []
+
+        best_bid = self._extract_price(bids[0]) if bids else None
+        best_ask = self._extract_price(asks[0]) if asks else None
+
+        return best_bid, best_ask
