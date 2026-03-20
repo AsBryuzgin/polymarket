@@ -19,7 +19,7 @@ class ClobPricesClient:
 
     def get_midpoint(self, token_id: str) -> str | None:
         data = self._get("/midpoint", token_id)
-        return data.get("midpoint")
+        return data.get("mid_price")
 
     def get_spread(self, token_id: str) -> str | None:
         data = self._get("/spread", token_id)
