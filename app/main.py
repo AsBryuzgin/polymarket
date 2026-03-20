@@ -13,6 +13,11 @@ def main() -> None:
     print(f"Loaded {len(markets)} markets\n")
 
     for idx, market in enumerate(markets, start=1):
+        
+        print("RAW clobTokenIds:", market.get("clobTokenIds"))
+        print("RAW outcomes:", market.get("outcomes"))
+        print("RAW enableOrderBook:", market.get("enableOrderBook"))
+        
         item = gamma.normalize_market(market)
 
         yes_token_id = item["yes_token_id"]
