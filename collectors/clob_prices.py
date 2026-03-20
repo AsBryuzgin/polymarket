@@ -17,10 +17,16 @@ class ClobPricesClient:
         response.raise_for_status()
         return response.json()
 
+    def get_midpoint_raw(self, token_id: str) -> dict[str, Any]:
+        return self._get("/midpoint", token_id)
+
+    def get_spread_raw(self, token_id: str) -> dict[str, Any]:
+        return self._get("/spread", token_id)
+
     def get_midpoint(self, token_id: str) -> str | None:
-        data = self._get("/midpoint", token_id)
-        return data.get("mid_price")
+        data = self.get_midpoint_raw(token_id)
+        return data.get("mid_price") or data.get("midpoint")
 
     def get_spread(self, token_id: str) -> str | None:
-        data = self._get("/spread", token_id)
+        data = self.get_spread_raw(token_id)
         return data.get("spread")
