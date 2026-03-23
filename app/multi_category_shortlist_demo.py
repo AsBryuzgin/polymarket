@@ -27,7 +27,7 @@ EXPERIMENTAL_CATEGORIES = [
 ]
 
 TIME_PERIOD = "MONTH"
-CANDIDATE_LIMIT = 15
+CANDIDATE_LIMIT = 20
 
 
 def score_wallet_from_category_entry(
