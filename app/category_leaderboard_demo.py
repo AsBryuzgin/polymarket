@@ -1,7 +1,7 @@
 from collectors.leaderboard import LeaderboardClient
 
 
-def print_category(category: str, time_period: str = "MONTH", limit: int = 5) -> None:
+def print_category(category: str, time_period: str = "MONTH", limit: int = 15) -> None:
     client = LeaderboardClient()
     rows = client.get_leaderboard(
         category=category,
@@ -30,7 +30,7 @@ def print_category(category: str, time_period: str = "MONTH", limit: int = 5) ->
 
 def main() -> None:
     for category in ["SPORTS", "POLITICS", "FINANCE", "WEATHER"]:
-        print_category(category=category, time_period="MONTH", limit=5)
+        print_category(category=category, time_period="MONTH", limit=15)
 
 
 if __name__ == "__main__":
