@@ -57,7 +57,7 @@ class WalletProfilesClient:
     def get_closed_positions(
         self,
         user: str,
-        limit: int = 50,
+        limit: int = 100,
         offset: int = 0,
         sort_by: str = "REALIZEDPNL",
         sort_direction: str = "DESC",
@@ -90,6 +90,77 @@ class WalletProfilesClient:
             },
         )
 
+    def paginate_current_positions(
+        self,
+        user: str,
+        page_size: int = 100,
+        max_pages: int = 20,
+    ) -> list[dict[str, Any]]:
+        all_items: list[dict[str, Any]] = []
+
+        for page in range(max_pages):
+            offset = page * page_size
+            items = self.get_current_positions(user=user, limit=page_size, offset=offset)
+            if not items:
+                break
+            all_items.extend(items)
+            if len(items) < page_size:
+                break
+
+        return all_items
+
+    def paginate_closed_positions(
+        self,
+        user: str,
+        page_size: int = 100,
+        max_pages: int = 20,
+        sort_by: str = "REALIZEDPNL",
+        sort_direction: str = "DESC",
+    ) -> list[dict[str, Any]]:
+        all_items: list[dict[str, Any]] = []
+
+        for page in range(max_pages):
+            offset = page * page_size
+            items = self.get_closed_positions(
+                user=user,
+                limit=page_size,
+                offset=offset,
+                sort_by=sort_by,
+                sort_direction=sort_direction,
+            )
+            if not items:
+                break
+            all_items.extend(items)
+            if len(items) < page_size:
+                break
+
+        return all_items
+
+    def paginate_trades(
+        self,
+        user: str,
+        page_size: int = 100,
+        max_pages: int = 20,
+        taker_only: bool = True,
+    ) -> list[dict[str, Any]]:
+        all_items: list[dict[str, Any]] = []
+
+        for page in range(max_pages):
+            offset = page * page_size
+            items = self.get_trades(
+                user=user,
+                limit=page_size,
+                offset=offset,
+                taker_only=taker_only,
+            )
+            if not items:
+                break
+            all_items.extend(items)
+            if len(items) < page_size:
+                break
+
+        return all_items
+
     @staticmethod
     def summarize_profile(profile: dict[str, Any]) -> dict[str, Any]:
         return {
@@ -106,40 +177,61 @@ class WalletProfilesClient:
         return int(payload.get("traded", 0) or 0)
 
     @staticmethod
-    def summarize_positions(positions: list[dict[str, Any]]) -> dict[str, Any]:
+    def _market_key(item: dict[str, Any]) -> str | None:
+        for key in ("slug", "conditionId", "eventSlug", "asset"):
+            value = item.get(key)
+            if value is not None:
+                return str(value)
+        return None
+
+    @classmethod
+    def summarize_positions(cls, positions: list[dict[str, Any]]) -> dict[str, Any]:
         total_current_value = 0.0
         total_cash_pnl = 0.0
+        unique_markets = set()
 
         for item in positions:
             total_current_value += float(item.get("currentValue", 0) or 0)
             total_cash_pnl += float(item.get("cashPnl", 0) or 0)
 
+            market_key = cls._market_key(item)
+            if market_key:
+                unique_markets.add(market_key)
+
         return {
             "open_positions_count": len(positions),
             "open_current_value": round(total_current_value, 2),
             "open_cash_pnl": round(total_cash_pnl, 2),
+            "open_unique_markets": len(unique_markets),
         }
 
-    @staticmethod
-    def summarize_closed_positions(positions: list[dict[str, Any]]) -> dict[str, Any]:
+    @classmethod
+    def summarize_closed_positions(cls, positions: list[dict[str, Any]]) -> dict[str, Any]:
         total_realized_pnl = 0.0
         total_bought = 0.0
+        unique_markets = set()
 
         for item in positions:
             total_realized_pnl += float(item.get("realizedPnl", 0) or 0)
             total_bought += float(item.get("totalBought", 0) or 0)
 
+            market_key = cls._market_key(item)
+            if market_key:
+                unique_markets.add(market_key)
+
         return {
             "closed_positions_count": len(positions),
             "closed_realized_pnl_sum": round(total_realized_pnl, 2),
             "closed_total_bought_sum": round(total_bought, 2),
+            "closed_unique_markets": len(unique_markets),
         }
 
-    @staticmethod
-    def summarize_trades(trades: list[dict[str, Any]]) -> dict[str, Any]:
+    @classmethod
+    def summarize_trades(cls, trades: list[dict[str, Any]]) -> dict[str, Any]:
         total_notional = 0.0
         buy_count = 0
         sell_count = 0
+        unique_markets = set()
 
         for item in trades:
             size = float(item.get("size", 0) or 0)
@@ -152,9 +244,14 @@ class WalletProfilesClient:
             elif side == "SELL":
                 sell_count += 1
 
+            market_key = cls._market_key(item)
+            if market_key:
+                unique_markets.add(market_key)
+
         return {
             "trade_count": len(trades),
             "buy_count": buy_count,
             "sell_count": sell_count,
             "trade_notional_sum": round(total_notional, 2),
+            "trade_unique_markets": len(unique_markets),
         }
