@@ -1,0 +1,30 @@
+[global]
+simulation = true
+preview_mode = true
+poll_interval_sec = 2
+
+[risk]
+max_per_trade_usd = 2.0
+min_order_size_usd = 1.0
+slippage_tolerance = 0.02
+skip_if_spread_gt = 0.02
+skip_if_minutes_to_resolve_lt = 30
+
+[filters]
+buy_min_price = 0.05
+buy_max_price = 0.95
+
+[portfolio]
+max_wallet_weight = 0.12
+max_category_weight = 0.25
+max_experimental_weight = 0.08
+
+[sizing]
+target_trade_fraction = 0.20
+
+[signal_freshness]
+preferred_signal_age_sec = 30
+max_recent_trades = 3
+max_signal_age_sec = 90
+max_price_drift_abs = 0.01
+max_price_drift_rel = 0.02

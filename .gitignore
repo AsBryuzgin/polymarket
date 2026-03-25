@@ -6,3 +6,9 @@ __pycache__/
 logs/
 data/
 .env
+
+# runtime
+.env
+data/executor_state.db
+__pycache__/
+*.pyc
