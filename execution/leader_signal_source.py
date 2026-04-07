@@ -9,7 +9,7 @@ from execution.builder_auth import load_executor_config
 from execution.copy_worker import LeaderSignal
 from execution.order_policy import evaluate_order_policy
 from execution.polymarket_executor import fetch_market_snapshot
-from execution.state_store import has_signal
+from execution.state_store import has_signal, get_open_position
 
 
 @dataclass
@@ -100,12 +100,17 @@ def latest_fresh_copyable_signal_from_wallet(
     risk = config.get("risk", {})
     filters = config.get("filters", {})
     freshness = config.get("signal_freshness", {})
+    exit_cfg = config.get("exit", {})
 
     preferred_signal_age_sec = int(freshness.get("preferred_signal_age_sec", 30))
     max_recent_trades = int(freshness.get("max_recent_trades", 3))
     max_signal_age_sec = int(freshness.get("max_signal_age_sec", 90))
     max_price_drift_abs = float(freshness.get("max_price_drift_abs", 0.01))
     max_price_drift_rel = float(freshness.get("max_price_drift_rel", 0.02))
+
+    follow_exit_even_if_stale = bool(exit_cfg.get("follow_exit_even_if_stale", True))
+    ignore_exit_drift = bool(exit_cfg.get("ignore_exit_drift", True))
+    exit_max_spread = float(exit_cfg.get("exit_max_spread", 0.05))
 
     trades = client.get_trades(
         user=wallet,
@@ -131,10 +136,13 @@ def latest_fresh_copyable_signal_from_wallet(
         "selected_trade_age_sec": None,
         "selected_status": None,
         "selected_reason": None,
+        "selected_has_open_position": None,
     }
 
     for idx, trade in enumerate(normalized):
         age_sec = now_ts - trade.timestamp
+        open_position = get_open_position(wallet, trade.asset) if trade.asset else None
+        has_open_position = open_position is not None
 
         if idx == 0:
             summary["latest_trade_side"] = trade.side
@@ -159,13 +167,27 @@ def latest_fresh_copyable_signal_from_wallet(
                 summary["latest_reason"] = "already processed"
             continue
 
-        if age_sec > max_signal_age_sec:
+        if trade.side == "SELL" and not has_open_position:
+            if idx == 0:
+                summary["latest_status"] = "SKIPPED_NO_POSITION"
+                summary["latest_reason"] = "sell signal but no copied open position"
+            continue
+
+        age_allowed = max_signal_age_sec
+        if trade.side == "SELL" and has_open_position and follow_exit_even_if_stale:
+            age_allowed = 10**9
+
+        if age_sec > age_allowed:
             if idx == 0:
                 summary["latest_status"] = "TOO_OLD"
-                summary["latest_reason"] = f"signal too old: {age_sec}s > {max_signal_age_sec}s"
+                summary["latest_reason"] = f"signal too old: {age_sec}s > {age_allowed}s"
             break
 
         snapshot = fetch_market_snapshot(token_id=trade.asset, side=trade.side)
+
+        max_spread = float(risk.get("skip_if_spread_gt", 0.02))
+        if trade.side == "SELL" and has_open_position:
+            max_spread = exit_max_spread
 
         policy = evaluate_order_policy(
             side=trade.side,
@@ -176,7 +198,7 @@ def latest_fresh_copyable_signal_from_wallet(
             buy_max_price=float(filters.get("buy_max_price", 0.95)),
             sell_min_price=0.0,
             sell_max_price=1.0,
-            max_spread=float(risk.get("skip_if_spread_gt", 0.02)),
+            max_spread=max_spread,
             min_order_size_usd=float(risk.get("min_order_size_usd", 1.0)),
         )
 
@@ -193,13 +215,17 @@ def latest_fresh_copyable_signal_from_wallet(
                 summary["latest_reason"] = "missing current price quote"
             continue
 
-        drift_ok, drift_reason = _price_drift_ok(
-            leader_price=trade.price,
-            current_price=float(current_price),
-            side=trade.side,
-            max_abs=max_price_drift_abs,
-            max_rel=max_price_drift_rel,
-        )
+        drift_ok = True
+        drift_reason = "ok"
+
+        if not (trade.side == "SELL" and has_open_position and ignore_exit_drift):
+            drift_ok, drift_reason = _price_drift_ok(
+                leader_price=trade.price,
+                current_price=float(current_price),
+                side=trade.side,
+                max_abs=max_price_drift_abs,
+                max_rel=max_price_drift_rel,
+            )
 
         if not drift_ok:
             if idx == 0:
@@ -207,7 +233,10 @@ def latest_fresh_copyable_signal_from_wallet(
                 summary["latest_reason"] = drift_reason
             continue
 
-        selected_status = "FRESH_COPYABLE" if age_sec <= preferred_signal_age_sec else "LATE_BUT_COPYABLE"
+        if trade.side == "SELL" and has_open_position:
+            selected_status = "EXIT_FOLLOW_STALE" if age_sec > preferred_signal_age_sec else "EXIT_FOLLOW"
+        else:
+            selected_status = "FRESH_COPYABLE" if age_sec <= preferred_signal_age_sec else "LATE_BUT_COPYABLE"
 
         if idx == 0:
             summary["latest_status"] = selected_status
@@ -217,6 +246,7 @@ def latest_fresh_copyable_signal_from_wallet(
         summary["selected_trade_age_sec"] = age_sec
         summary["selected_status"] = selected_status
         summary["selected_reason"] = "copyable"
+        summary["selected_has_open_position"] = has_open_position
 
         signal = LeaderSignal(
             signal_id=trade.transaction_hash,

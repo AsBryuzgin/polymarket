@@ -6,7 +6,13 @@ from execution.builder_auth import load_executor_config
 from execution.copy_sizer import compute_copy_size
 from execution.order_policy import evaluate_order_policy
 from execution.polymarket_executor import fetch_market_snapshot, preview_market_order
-from execution.state_store import has_signal, record_signal
+from execution.state_store import (
+    has_signal,
+    record_signal,
+    get_open_position,
+    upsert_buy_position,
+    close_position,
+)
 
 
 @dataclass
@@ -30,8 +36,112 @@ def process_signal(signal: LeaderSignal) -> dict:
     risk = config.get("risk", {})
     filters = config.get("filters", {})
     sizing = config.get("sizing", {})
+    exit_cfg = config.get("exit", {})
 
     snapshot = fetch_market_snapshot(token_id=signal.token_id, side=signal.side)
+
+    if signal.side.upper() == "SELL":
+        open_position = get_open_position(signal.leader_wallet, signal.token_id)
+
+        if open_position is None:
+            record_signal(
+                signal_id=signal.signal_id,
+                leader_wallet=signal.leader_wallet,
+                token_id=signal.token_id,
+                side=signal.side,
+                leader_budget_usd=signal.leader_budget_usd,
+                suggested_amount_usd=None,
+                status="SKIPPED_NO_POSITION",
+                reason="sell signal but no copied open position",
+            )
+            return {
+                "signal": asdict(signal),
+                "market_snapshot": snapshot,
+                "status": "SKIPPED_NO_POSITION",
+                "reason": "sell signal but no copied open position",
+            }
+
+        policy = evaluate_order_policy(
+            side=signal.side,
+            midpoint=snapshot["midpoint"],
+            spread=snapshot["spread"],
+            leader_budget_usd=signal.leader_budget_usd,
+            buy_min_price=float(filters.get("buy_min_price", 0.05)),
+            buy_max_price=float(filters.get("buy_max_price", 0.95)),
+            sell_min_price=0.0,
+            sell_max_price=1.0,
+            max_spread=float(exit_cfg.get("exit_max_spread", 0.05)),
+            min_order_size_usd=0.0,
+        )
+
+        if not policy.allowed:
+            record_signal(
+                signal_id=signal.signal_id,
+                leader_wallet=signal.leader_wallet,
+                token_id=signal.token_id,
+                side=signal.side,
+                leader_budget_usd=signal.leader_budget_usd,
+                suggested_amount_usd=None,
+                status="SKIPPED_POLICY",
+                reason=policy.reason,
+            )
+            return {
+                "signal": asdict(signal),
+                "market_snapshot": snapshot,
+                "status": "SKIPPED_POLICY",
+                "reason": policy.reason,
+            }
+
+        position_usd = float(open_position["position_usd"])
+        if position_usd <= 0:
+            record_signal(
+                signal_id=signal.signal_id,
+                leader_wallet=signal.leader_wallet,
+                token_id=signal.token_id,
+                side=signal.side,
+                leader_budget_usd=signal.leader_budget_usd,
+                suggested_amount_usd=None,
+                status="SKIPPED_NO_POSITION",
+                reason="open position has zero size",
+            )
+            return {
+                "signal": asdict(signal),
+                "market_snapshot": snapshot,
+                "status": "SKIPPED_NO_POSITION",
+                "reason": "open position has zero size",
+            }
+
+        preview = preview_market_order(
+            token_id=signal.token_id,
+            amount_usd=round(position_usd, 2),
+            side=signal.side,
+        )
+
+        close_position(
+            leader_wallet=signal.leader_wallet,
+            token_id=signal.token_id,
+            signal_id=signal.signal_id,
+        )
+
+        record_signal(
+            signal_id=signal.signal_id,
+            leader_wallet=signal.leader_wallet,
+            token_id=signal.token_id,
+            side=signal.side,
+            leader_budget_usd=signal.leader_budget_usd,
+            suggested_amount_usd=round(position_usd, 2),
+            status="PREVIEW_READY_EXIT",
+            reason="ok",
+        )
+
+        return {
+            "signal": asdict(signal),
+            "market_snapshot": snapshot,
+            "status": "PREVIEW_READY_EXIT",
+            "reason": "ok",
+            "suggested_amount_usd": round(position_usd, 2),
+            "preview_order": preview,
+        }
 
     policy = evaluate_order_policy(
         side=signal.side,
@@ -95,6 +205,14 @@ def process_signal(signal: LeaderSignal) -> dict:
         side=signal.side,
     )
 
+    upsert_buy_position(
+        leader_wallet=signal.leader_wallet,
+        token_id=signal.token_id,
+        amount_usd=size.amount_usd,
+        entry_price=snapshot["price_quote"],
+        signal_id=signal.signal_id,
+    )
+
     record_signal(
         signal_id=signal.signal_id,
         leader_wallet=signal.leader_wallet,
@@ -102,14 +220,14 @@ def process_signal(signal: LeaderSignal) -> dict:
         side=signal.side,
         leader_budget_usd=signal.leader_budget_usd,
         suggested_amount_usd=size.amount_usd,
-        status="PREVIEW_READY",
+        status="PREVIEW_READY_ENTRY",
         reason="ok",
     )
 
     return {
         "signal": asdict(signal),
         "market_snapshot": snapshot,
-        "status": "PREVIEW_READY",
+        "status": "PREVIEW_READY_ENTRY",
         "reason": "ok",
         "suggested_amount_usd": size.amount_usd,
         "preview_order": preview,

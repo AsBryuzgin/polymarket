@@ -1,0 +1,10 @@
+[rebalance]
+exclude_categories = ["MENTIONS"]
+
+# incumbent stays if still competitive
+incumbent_max_rank = 2
+hold_gap_abs = 4.0
+hold_gap_rel = 0.05
+
+# challenger must win repeatedly before replacement
+confirmation_cycles = 2

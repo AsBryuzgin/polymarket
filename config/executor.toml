@@ -14,6 +14,11 @@ skip_if_minutes_to_resolve_lt = 30
 buy_min_price = 0.05
 buy_max_price = 0.95
 
+[exit]
+follow_exit_even_if_stale = true
+ignore_exit_drift = true
+exit_max_spread = 0.05
+
 [portfolio]
 max_wallet_weight = 0.12
 max_category_weight = 0.25
