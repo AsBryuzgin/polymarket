@@ -37,3 +37,7 @@ data/replay_trade_history_report.csv
 data/signal_observation_summary_by_leader.csv
 data/signal_observation_summary_by_category.csv
 data/signal_observation_summary_by_status.csv
+
+data/signal_observation_summary_by_leader.csv
+data/signal_observation_summary_by_category.csv
+data/signal_observation_summary_by_status.csv
