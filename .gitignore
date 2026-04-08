@@ -19,3 +19,7 @@ data/executor_state.db
 data/trade_history.csv
 data/trade_history_summary_by_leader.csv
 data/trade_history_summary_by_category.csv
+
+data/open_positions_mtm.csv
+data/open_positions_mtm_by_leader.csv
+data/open_positions_mtm_by_category.csv
