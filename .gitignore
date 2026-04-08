@@ -12,3 +12,10 @@ data/
 data/executor_state.db
 __pycache__/
 *.pyc
+
+# runtime data
+.env
+data/executor_state.db
+data/trade_history.csv
+data/trade_history_summary_by_leader.csv
+data/trade_history_summary_by_category.csv
