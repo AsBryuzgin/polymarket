@@ -24,7 +24,7 @@ max_category_weight = 0.25
 max_experimental_weight = 0.08
 
 [sizing]
-target_trade_fraction = 0.20
+leader_trade_notional_copy_fraction = 0.20
 
 [signal_freshness]
 preferred_signal_age_sec = 30

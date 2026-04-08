@@ -4,7 +4,6 @@ from dataclasses import dataclass, asdict
 from datetime import datetime
 
 from execution.builder_auth import load_executor_config
-from execution.copy_sizer import compute_copy_size
 from execution.order_policy import evaluate_order_policy
 from execution.polymarket_executor import fetch_market_snapshot, preview_market_order
 from execution.state_store import (
@@ -12,7 +11,7 @@ from execution.state_store import (
     record_signal,
     get_open_position,
     upsert_buy_position,
-    close_position,
+    reduce_or_close_position,
     get_leader_registry,
     log_trade_event,
 )
@@ -25,6 +24,9 @@ class LeaderSignal:
     token_id: str
     side: str
     leader_budget_usd: float
+    leader_trade_size: float | None = None
+    leader_trade_price: float | None = None
+    leader_trade_notional_usd: float | None = None
 
 
 def _parse_opened_at_to_minutes(opened_at: str | None) -> float | None:
@@ -36,6 +38,26 @@ def _parse_opened_at_to_minutes(opened_at: str | None) -> float | None:
         return round((now - dt).total_seconds() / 60.0, 2)
     except Exception:
         return None
+
+
+def _compute_signal_copy_amount(
+    signal: LeaderSignal,
+    *,
+    min_order_size_usd: float,
+    max_per_trade_usd: float,
+    leader_trade_notional_copy_fraction: float,
+) -> tuple[float, str]:
+    notional = float(signal.leader_trade_notional_usd or 0.0)
+
+    if notional > 0:
+        amount = notional * leader_trade_notional_copy_fraction
+        amount = max(min_order_size_usd, amount)
+        amount = min(max_per_trade_usd, amount, float(signal.leader_budget_usd))
+        return round(amount, 2), "leader_trade_notional"
+
+    fallback = min(max_per_trade_usd, float(signal.leader_budget_usd))
+    fallback = max(min_order_size_usd, fallback)
+    return round(fallback, 2), "fallback_budget"
 
 
 def process_signal(signal: LeaderSignal) -> dict:
@@ -59,6 +81,12 @@ def process_signal(signal: LeaderSignal) -> dict:
 
     snapshot = fetch_market_snapshot(token_id=signal.token_id, side=signal.side)
     current_price = snapshot["price_quote"]
+
+    min_order_size_usd = float(risk.get("min_order_size_usd", 1.0))
+    max_per_trade_usd = float(risk.get("max_per_trade_usd", 2.0))
+    leader_trade_notional_copy_fraction = float(
+        sizing.get("leader_trade_notional_copy_fraction", 0.20)
+    )
 
     if signal.side.upper() == "SELL":
         open_position = get_open_position(signal.leader_wallet, signal.token_id)
@@ -131,29 +159,42 @@ def process_signal(signal: LeaderSignal) -> dict:
                 "reason": "open position has zero size",
             }
 
+        suggested_sell_amount, sizing_source = _compute_signal_copy_amount(
+            signal,
+            min_order_size_usd=min_order_size_usd,
+            max_per_trade_usd=max_per_trade_usd,
+            leader_trade_notional_copy_fraction=leader_trade_notional_copy_fraction,
+        )
+        sell_amount = min(position_usd, suggested_sell_amount)
+
         preview = preview_market_order(
             token_id=signal.token_id,
-            amount_usd=round(position_usd, 2),
+            amount_usd=round(sell_amount, 2),
             side=signal.side,
         )
 
-        closed = close_position(
+        reduced = reduce_or_close_position(
             leader_wallet=signal.leader_wallet,
             token_id=signal.token_id,
             signal_id=signal.signal_id,
+            amount_usd=sell_amount,
         )
 
-        entry_avg_price = closed["entry_avg_price"] if closed else None
-        position_before_usd = closed["position_before_usd"] if closed else position_usd
-        position_after_usd = closed["position_after_usd"] if closed else 0.0
-        holding_minutes = _parse_opened_at_to_minutes(closed["opened_at"] if closed else None)
+        entry_avg_price = reduced["entry_avg_price"] if reduced else None
+        position_before_usd = reduced["position_before_usd"] if reduced else position_usd
+        position_after_usd = reduced["position_after_usd"] if reduced else 0.0
+        actual_sell_amount = reduced["sell_amount_usd"] if reduced else sell_amount
+        holding_minutes = _parse_opened_at_to_minutes(reduced["opened_at"] if reduced else None)
+        closed_fully = bool(reduced["closed_fully"]) if reduced else True
 
         realized_pnl_usd = None
         realized_pnl_pct = None
 
         if entry_avg_price is not None and current_price is not None:
             realized_pnl_pct = round((float(current_price) - float(entry_avg_price)) / float(entry_avg_price), 6)
-            realized_pnl_usd = round(position_before_usd * realized_pnl_pct, 4)
+            realized_pnl_usd = round(actual_sell_amount * realized_pnl_pct, 4)
+
+        notes = f"preview {'full' if closed_fully else 'partial'} exit generated | sizing={sizing_source}"
 
         log_trade_event(
             signal_id=signal.signal_id,
@@ -164,9 +205,9 @@ def process_signal(signal: LeaderSignal) -> dict:
             token_id=signal.token_id,
             side=signal.side,
             event_type="EXIT",
-            amount_usd=round(position_before_usd, 2),
+            amount_usd=round(actual_sell_amount, 2),
             price=current_price,
-            gross_value_usd=round(position_before_usd, 2),
+            gross_value_usd=round(actual_sell_amount, 2),
             position_before_usd=position_before_usd,
             position_after_usd=position_after_usd,
             entry_avg_price=entry_avg_price,
@@ -174,8 +215,10 @@ def process_signal(signal: LeaderSignal) -> dict:
             realized_pnl_usd=realized_pnl_usd,
             realized_pnl_pct=realized_pnl_pct,
             holding_minutes=holding_minutes,
-            notes="preview exit generated",
+            notes=notes,
         )
+
+        status = "PREVIEW_READY_EXIT" if closed_fully else "PREVIEW_READY_PARTIAL_EXIT"
 
         record_signal(
             signal_id=signal.signal_id,
@@ -183,21 +226,22 @@ def process_signal(signal: LeaderSignal) -> dict:
             token_id=signal.token_id,
             side=signal.side,
             leader_budget_usd=signal.leader_budget_usd,
-            suggested_amount_usd=round(position_usd, 2),
-            status="PREVIEW_READY_EXIT",
+            suggested_amount_usd=round(actual_sell_amount, 2),
+            status=status,
             reason="ok",
         )
 
         return {
             "signal": asdict(signal),
             "market_snapshot": snapshot,
-            "status": "PREVIEW_READY_EXIT",
+            "status": status,
             "reason": "ok",
-            "suggested_amount_usd": round(position_usd, 2),
+            "suggested_amount_usd": round(actual_sell_amount, 2),
             "preview_order": preview,
             "realized_pnl_usd": realized_pnl_usd,
             "realized_pnl_pct": realized_pnl_pct,
             "holding_minutes": holding_minutes,
+            "position_after_usd": position_after_usd,
         }
 
     policy = evaluate_order_policy(
@@ -210,7 +254,7 @@ def process_signal(signal: LeaderSignal) -> dict:
         sell_min_price=0.0,
         sell_max_price=1.0,
         max_spread=float(risk.get("skip_if_spread_gt", 0.02)),
-        min_order_size_usd=float(risk.get("min_order_size_usd", 1.0)),
+        min_order_size_usd=min_order_size_usd,
     )
 
     if not policy.allowed:
@@ -231,41 +275,23 @@ def process_signal(signal: LeaderSignal) -> dict:
             "reason": policy.reason,
         }
 
-    size = compute_copy_size(
-        leader_budget_usd=signal.leader_budget_usd,
-        target_trade_fraction=float(sizing.get("target_trade_fraction", 0.20)),
-        min_order_size_usd=float(risk.get("min_order_size_usd", 1.0)),
-        max_per_trade_usd=float(risk.get("max_per_trade_usd", 2.0)),
+    amount_usd, sizing_source = _compute_signal_copy_amount(
+        signal,
+        min_order_size_usd=min_order_size_usd,
+        max_per_trade_usd=max_per_trade_usd,
+        leader_trade_notional_copy_fraction=leader_trade_notional_copy_fraction,
     )
-
-    if not size.allowed:
-        record_signal(
-            signal_id=signal.signal_id,
-            leader_wallet=signal.leader_wallet,
-            token_id=signal.token_id,
-            side=signal.side,
-            leader_budget_usd=signal.leader_budget_usd,
-            suggested_amount_usd=None,
-            status="SKIPPED_SIZING",
-            reason=size.reason,
-        )
-        return {
-            "signal": asdict(signal),
-            "market_snapshot": snapshot,
-            "status": "SKIPPED_SIZING",
-            "reason": size.reason,
-        }
 
     preview = preview_market_order(
         token_id=signal.token_id,
-        amount_usd=size.amount_usd,
+        amount_usd=amount_usd,
         side=signal.side,
     )
 
     pos_update = upsert_buy_position(
         leader_wallet=signal.leader_wallet,
         token_id=signal.token_id,
-        amount_usd=size.amount_usd,
+        amount_usd=amount_usd,
         entry_price=current_price,
         signal_id=signal.signal_id,
     )
@@ -279,9 +305,9 @@ def process_signal(signal: LeaderSignal) -> dict:
         token_id=signal.token_id,
         side=signal.side,
         event_type="ENTRY",
-        amount_usd=size.amount_usd,
+        amount_usd=amount_usd,
         price=current_price,
-        gross_value_usd=size.amount_usd,
+        gross_value_usd=amount_usd,
         position_before_usd=pos_update["position_before_usd"],
         position_after_usd=pos_update["position_after_usd"],
         entry_avg_price=pos_update["entry_avg_price_after"],
@@ -289,7 +315,7 @@ def process_signal(signal: LeaderSignal) -> dict:
         realized_pnl_usd=None,
         realized_pnl_pct=None,
         holding_minutes=None,
-        notes="preview entry generated",
+        notes=f"preview entry generated | sizing={sizing_source}",
     )
 
     record_signal(
@@ -298,7 +324,7 @@ def process_signal(signal: LeaderSignal) -> dict:
         token_id=signal.token_id,
         side=signal.side,
         leader_budget_usd=signal.leader_budget_usd,
-        suggested_amount_usd=size.amount_usd,
+        suggested_amount_usd=amount_usd,
         status="PREVIEW_READY_ENTRY",
         reason="ok",
     )
@@ -308,6 +334,6 @@ def process_signal(signal: LeaderSignal) -> dict:
         "market_snapshot": snapshot,
         "status": "PREVIEW_READY_ENTRY",
         "reason": "ok",
-        "suggested_amount_usd": size.amount_usd,
+        "suggested_amount_usd": amount_usd,
         "preview_order": preview,
     }
