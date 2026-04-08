@@ -177,6 +177,27 @@ def get_open_position(leader_wallet: str, token_id: str) -> dict[str, Any] | Non
     return dict(row) if row else None
 
 
+def get_position_any_status(leader_wallet: str, token_id: str) -> dict[str, Any] | None:
+    conn = get_connection()
+    cur = conn.cursor()
+
+    cur.execute(
+        """
+        SELECT *
+        FROM copied_positions
+        WHERE leader_wallet = ?
+          AND token_id = ?
+        LIMIT 1
+        """,
+        (leader_wallet, token_id),
+    )
+
+    row = cur.fetchone()
+    conn.close()
+
+    return dict(row) if row else None
+
+
 def upsert_buy_position(
     leader_wallet: str,
     token_id: str,
@@ -184,7 +205,8 @@ def upsert_buy_position(
     entry_price: float | None,
     signal_id: str,
 ) -> dict[str, Any]:
-    existing = get_open_position(leader_wallet, token_id)
+    existing_open = get_open_position(leader_wallet, token_id)
+    existing_any = get_position_any_status(leader_wallet, token_id)
 
     conn = get_connection()
     cur = conn.cursor()
@@ -192,7 +214,7 @@ def upsert_buy_position(
     old_amount = 0.0
     old_avg = None
 
-    if existing is None:
+    if existing_open is None and existing_any is None:
         cur.execute(
             """
             INSERT INTO copied_positions (
@@ -201,8 +223,10 @@ def upsert_buy_position(
                 position_usd,
                 avg_entry_price,
                 status,
-                last_signal_id
-            ) VALUES (?, ?, ?, ?, 'OPEN', ?)
+                last_signal_id,
+                opened_at,
+                updated_at
+            ) VALUES (?, ?, ?, ?, 'OPEN', ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
             """,
             (
                 leader_wallet,
@@ -214,9 +238,35 @@ def upsert_buy_position(
         )
         new_amount = amount_usd
         new_avg = entry_price
+
+    elif existing_open is None and existing_any is not None:
+        # Re-open previously closed position row instead of INSERT, so PK is not violated.
+        cur.execute(
+            """
+            UPDATE copied_positions
+            SET position_usd = ?,
+                avg_entry_price = ?,
+                status = 'OPEN',
+                last_signal_id = ?,
+                opened_at = CURRENT_TIMESTAMP,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE leader_wallet = ?
+              AND token_id = ?
+            """,
+            (
+                amount_usd,
+                entry_price,
+                signal_id,
+                leader_wallet,
+                token_id,
+            ),
+        )
+        new_amount = amount_usd
+        new_avg = entry_price
+
     else:
-        old_amount = float(existing["position_usd"])
-        old_avg = existing["avg_entry_price"]
+        old_amount = float(existing_open["position_usd"])
+        old_avg = existing_open["avg_entry_price"]
         old_avg = float(old_avg) if old_avg is not None else None
 
         new_amount = old_amount + amount_usd
