@@ -155,13 +155,11 @@ def score_wallet(metrics: WalletMetrics) -> WalletScoreBreakdown:
     k = copyability_score(metrics)
     r = return_quality_score(metrics)
 
-    # NOTE:
-    # copyability_score is kept as a diagnostic metric, but is NOT included in raw_wss
-    # until we wire real per-wallet inputs instead of constants.
     raw_wss = (
-        0.40 * c
-        + 0.30 * d
+        0.35 * c
+        + 0.25 * d
         + 0.20 * s
+        + 0.10 * k
         + 0.10 * r
     )
 

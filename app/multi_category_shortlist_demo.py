@@ -7,7 +7,10 @@ from collectors.leaderboard import LeaderboardClient
 from collectors.wallet_profiles import WalletProfilesClient
 from signals.wallet_metrics_builder import build_wallet_metrics
 from signals.wallet_scoring import score_wallet
-
+from signals.shortlist_helpers import (
+    paginate_recent_closed_positions,
+    estimate_copyability_inputs,
+)
 
 OUTPUT_DIR = Path("data/shortlists")
 
@@ -41,8 +44,18 @@ def score_wallet_from_category_entry(
     traded_count = wallet_client.summarize_total_markets_traded(traded_payload)
 
     current_positions = wallet_client.paginate_current_positions(wallet, page_size=100, max_pages=3)
-    closed_positions = wallet_client.paginate_closed_positions(wallet, page_size=100, max_pages=3)
+    closed_positions = paginate_recent_closed_positions(
+        wallet_client=wallet_client,
+        wallet=wallet,
+        page_size=100,
+        max_pages=10,
+    )
     trades = wallet_client.paginate_trades(wallet, page_size=100, max_pages=3, taker_only=True)
+
+    median_spread, median_liquidity, slippage_proxy, delay_sec = estimate_copyability_inputs(
+        current_positions=current_positions,
+        trades=trades,
+    )
 
     metrics = build_wallet_metrics(
         profile=profile,
@@ -50,10 +63,10 @@ def score_wallet_from_category_entry(
         current_positions=current_positions,
         closed_positions=closed_positions,
         trades=trades,
-        median_spread=0.015,
-        median_liquidity=10000.0,
-        slippage_proxy=0.01,
-        delay_sec=60.0,
+        median_spread=median_spread,
+        median_liquidity=median_liquidity,
+        slippage_proxy=slippage_proxy,
+        delay_sec=delay_sec,
     )
 
     score = score_wallet(metrics)
@@ -70,6 +83,10 @@ def score_wallet_from_category_entry(
         "final_wss": score.final_wss,
         "raw_wss": score.raw_wss,
         "filter_reasons": "; ".join(score.filter_reasons),
+        "median_spread": median_spread,
+        "median_liquidity": median_liquidity,
+        "slippage_proxy": slippage_proxy,
+        "closed_positions_used": len(closed_positions),
     }
 
 
@@ -98,6 +115,7 @@ def run_category(
     for idx, entry in enumerate(candidates, start=1):
         wallet = entry["proxy_wallet"]
         user_name = entry["user_name"]
+
         print(f"[{idx}/{len(candidates)}] {category} | {user_name} | {wallet}")
 
         try:
@@ -117,6 +135,10 @@ def run_category(
                     "final_wss": -1.0,
                     "raw_wss": -1.0,
                     "filter_reasons": f"error: {e}",
+                    "median_spread": None,
+                    "median_liquidity": None,
+                    "slippage_proxy": None,
+                    "closed_positions_used": 0,
                 }
             )
 
@@ -146,6 +168,10 @@ def save_csv(rows: list[dict], path: Path) -> None:
         "final_wss",
         "raw_wss",
         "filter_reasons",
+        "median_spread",
+        "median_liquidity",
+        "slippage_proxy",
+        "closed_positions_used",
     ]
 
     with path.open("w", newline="", encoding="utf-8") as f:
@@ -161,11 +187,13 @@ def print_top(rows: list[dict], top_n: int = 5) -> None:
             f"user={row['user_name']} | "
             f"wss={row['final_wss']:>6} | "
             f"eligible={row['eligible']} | "
+            f"spread={row['median_spread']} | "
+            f"slip={row['slippage_proxy']} | "
             f"pnl={round(row['leaderboard_pnl'], 2)} | "
             f"wallet={row['wallet']}"
         )
         if row["filter_reasons"]:
-            print(f"   reasons={row['filter_reasons']}")
+            print(f" reasons={row['filter_reasons']}")
 
 
 def run_group(
