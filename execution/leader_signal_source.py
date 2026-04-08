@@ -104,11 +104,9 @@ def latest_fresh_copyable_signal_from_wallet(
 
     preferred_signal_age_sec = int(freshness.get("preferred_signal_age_sec", 30))
     max_recent_trades = int(freshness.get("max_recent_trades", 3))
-    max_signal_age_sec = int(freshness.get("max_signal_age_sec", 90))
     max_price_drift_abs = float(freshness.get("max_price_drift_abs", 0.01))
     max_price_drift_rel = float(freshness.get("max_price_drift_rel", 0.02))
 
-    follow_exit_even_if_stale = bool(exit_cfg.get("follow_exit_even_if_stale", True))
     ignore_exit_drift = bool(exit_cfg.get("ignore_exit_drift", True))
     exit_max_spread = float(exit_cfg.get("exit_max_spread", 0.05))
 
@@ -182,16 +180,6 @@ def latest_fresh_copyable_signal_from_wallet(
                 summary["latest_status"] = "SKIPPED_NO_POSITION"
                 summary["latest_reason"] = "sell signal but no copied open position"
             continue
-
-        age_allowed = max_signal_age_sec
-        if trade.side == "SELL" and has_open_position and follow_exit_even_if_stale:
-            age_allowed = 10**9
-
-        if age_sec > age_allowed:
-            if idx == 0:
-                summary["latest_status"] = "TOO_OLD"
-                summary["latest_reason"] = f"signal too old: {age_sec}s > {age_allowed}s"
-            break
 
         snapshot = fetch_market_snapshot(token_id=trade.asset, side=trade.side)
 
