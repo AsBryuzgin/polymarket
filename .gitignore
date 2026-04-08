@@ -23,3 +23,11 @@ data/trade_history_summary_by_category.csv
 data/open_positions_mtm.csv
 data/open_positions_mtm_by_leader.csv
 data/open_positions_mtm_by_category.csv
+
+data/portfolio_summary_overview.csv
+data/portfolio_summary_by_leader.csv
+data/portfolio_summary_by_category.csv
+
+data/grace_unwind_candidates.csv
+
+data/force_unwind_preview.csv
