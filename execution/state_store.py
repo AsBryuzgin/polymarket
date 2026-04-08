@@ -6,6 +6,7 @@ from typing import Any
 
 
 DB_PATH = Path("data/executor_state.db")
+EPS = 1e-12
 
 
 def get_connection() -> sqlite3.Connection:
@@ -240,7 +241,6 @@ def upsert_buy_position(
         new_avg = entry_price
 
     elif existing_open is None and existing_any is not None:
-        # Re-open previously closed position row instead of INSERT, so PK is not violated.
         cur.execute(
             """
             UPDATE copied_positions
@@ -310,14 +310,25 @@ def upsert_buy_position(
     }
 
 
-def close_position(
+def reduce_or_close_position(
     leader_wallet: str,
     token_id: str,
     signal_id: str,
+    amount_usd: float,
 ) -> dict[str, Any] | None:
     existing = get_open_position(leader_wallet, token_id)
     if existing is None:
         return None
+
+    old_position = float(existing["position_usd"])
+    sell_amount = min(max(float(amount_usd), 0.0), old_position)
+    new_position = old_position - sell_amount
+
+    if new_position <= EPS:
+        new_position = 0.0
+        new_status = "CLOSED"
+    else:
+        new_status = "OPEN"
 
     conn = get_connection()
     cur = conn.cursor()
@@ -325,8 +336,8 @@ def close_position(
     cur.execute(
         """
         UPDATE copied_positions
-        SET position_usd = 0,
-            status = 'CLOSED',
+        SET position_usd = ?,
+            status = ?,
             last_signal_id = ?,
             updated_at = CURRENT_TIMESTAMP
         WHERE leader_wallet = ?
@@ -334,6 +345,8 @@ def close_position(
           AND status = 'OPEN'
         """,
         (
+            new_position,
+            new_status,
             signal_id,
             leader_wallet,
             token_id,
@@ -344,11 +357,30 @@ def close_position(
     conn.close()
 
     return {
-        "position_before_usd": float(existing["position_usd"]),
-        "position_after_usd": 0.0,
+        "position_before_usd": old_position,
+        "sell_amount_usd": sell_amount,
+        "position_after_usd": new_position,
         "entry_avg_price": float(existing["avg_entry_price"]) if existing["avg_entry_price"] is not None else None,
         "opened_at": existing["opened_at"],
+        "closed_fully": new_status == "CLOSED",
     }
+
+
+def close_position(
+    leader_wallet: str,
+    token_id: str,
+    signal_id: str,
+) -> dict[str, Any] | None:
+    existing = get_open_position(leader_wallet, token_id)
+    if existing is None:
+        return None
+
+    return reduce_or_close_position(
+        leader_wallet=leader_wallet,
+        token_id=token_id,
+        signal_id=signal_id,
+        amount_usd=float(existing["position_usd"]),
+    )
 
 
 def log_trade_event(

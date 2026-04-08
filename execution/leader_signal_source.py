@@ -139,6 +139,7 @@ def latest_fresh_copyable_signal_from_wallet(
         "selected_status": None,
         "selected_reason": None,
         "selected_has_open_position": None,
+        "selected_trade_notional_usd": None,
     }
 
     for idx, trade in enumerate(normalized):
@@ -247,6 +248,10 @@ def latest_fresh_copyable_signal_from_wallet(
         else:
             selected_status = "FRESH_COPYABLE" if age_sec <= preferred_signal_age_sec else "LATE_BUT_COPYABLE"
 
+        trade_notional_usd = None
+        if trade.size > 0 and trade.price > 0:
+            trade_notional_usd = trade.size * trade.price
+
         if idx == 0:
             summary["latest_status"] = selected_status
             summary["latest_reason"] = "copyable"
@@ -256,6 +261,7 @@ def latest_fresh_copyable_signal_from_wallet(
         summary["selected_status"] = selected_status
         summary["selected_reason"] = "copyable"
         summary["selected_has_open_position"] = has_open_position
+        summary["selected_trade_notional_usd"] = trade_notional_usd
 
         signal = LeaderSignal(
             signal_id=trade.transaction_hash,
@@ -263,6 +269,9 @@ def latest_fresh_copyable_signal_from_wallet(
             token_id=trade.asset,
             side=trade.side,
             leader_budget_usd=leader_budget_usd,
+            leader_trade_size=trade.size,
+            leader_trade_price=trade.price,
+            leader_trade_notional_usd=trade_notional_usd,
         )
 
         return signal, snapshot, summary

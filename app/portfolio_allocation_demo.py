@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import csv
-from pathlib import Path
 from collections import defaultdict
+from pathlib import Path
 
 
 INPUT_FILE = Path("data/shortlists/final_portfolio_candidates.csv")
@@ -11,8 +11,9 @@ OUTPUT_FILE = Path("data/shortlists/final_portfolio_allocation.csv")
 MAX_WALLET_WEIGHT = 0.12
 MAX_CATEGORY_WEIGHT = 0.25
 MAX_EXPERIMENTAL_WEIGHT = 0.08
-
 EXPERIMENTAL_CATEGORIES = {"MENTIONS"}
+
+EPS = 1e-12
 
 
 def load_csv(path: Path) -> list[dict]:
@@ -28,53 +29,84 @@ def load_csv(path: Path) -> list[dict]:
     return rows
 
 
-def normalize_weights(rows: list[dict]) -> None:
-    total_score = sum(row["final_wss"] for row in rows)
+def normalize_raw_weights(rows: list[dict]) -> None:
+    total_score = sum(max(row["final_wss"], 0.0) for row in rows)
+
     if total_score <= 0:
         for row in rows:
             row["raw_weight"] = 0.0
         return
 
     for row in rows:
-        row["raw_weight"] = row["final_wss"] / total_score
+        row["raw_weight"] = max(row["final_wss"], 0.0) / total_score
 
 
-def apply_wallet_caps(rows: list[dict]) -> None:
+def category_cap(category: str) -> float:
+    return MAX_EXPERIMENTAL_WEIGHT if category in EXPERIMENTAL_CATEGORIES else MAX_CATEGORY_WEIGHT
+
+
+def allocate_with_hard_caps(rows: list[dict]) -> tuple[float, bool]:
     for row in rows:
-        row["weight"] = min(row["raw_weight"], MAX_WALLET_WEIGHT)
+        row["weight"] = 0.0
 
+    category_used = defaultdict(float)
+    remaining_total = 1.0
 
-def renormalize(rows: list[dict]) -> None:
-    total_weight = sum(row["weight"] for row in rows)
-    if total_weight <= 0:
-        return
+    # Precompute feasibility upper bound
+    max_possible = 0.0
+    by_category = defaultdict(list)
     for row in rows:
-        row["weight"] /= total_weight
+        by_category[row["category"]].append(row)
 
+    for category, items in by_category.items():
+        max_possible += min(
+            category_cap(category),
+            sum(MAX_WALLET_WEIGHT for _ in items),
+        )
 
-def apply_category_caps(rows: list[dict]) -> None:
-    grouped = defaultdict(list)
-    for row in rows:
-        grouped[row["category"]].append(row)
+    if max_possible + EPS < 1.0:
+        return remaining_total, False
 
-    for category, items in grouped.items():
-        category_weight = sum(row["weight"] for row in items)
-        category_cap = MAX_EXPERIMENTAL_WEIGHT if category in EXPERIMENTAL_CATEGORIES else MAX_CATEGORY_WEIGHT
+    # Progressive allocation:
+    # repeatedly distribute remaining weight proportional to raw_weight,
+    # while respecting wallet and category residual capacities.
+    for _ in range(1000):
+        if remaining_total <= EPS:
+            return 0.0, True
 
-        if category_weight <= category_cap:
-            continue
+        eligible = []
+        for row in rows:
+            wallet_remaining = MAX_WALLET_WEIGHT - row["weight"]
+            cat_remaining = category_cap(row["category"]) - category_used[row["category"]]
+            if wallet_remaining > EPS and cat_remaining > EPS and row["raw_weight"] > 0:
+                eligible.append((row, wallet_remaining, cat_remaining))
 
-        scale = category_cap / category_weight
-        for row in items:
-            row["weight"] *= scale
+        if not eligible:
+            break
 
+        total_raw = sum(row["raw_weight"] for row, _, _ in eligible)
+        if total_raw <= EPS:
+            break
 
-def final_rescale(rows: list[dict]) -> None:
-    total_weight = sum(row["weight"] for row in rows)
-    if total_weight <= 0:
-        return
-    for row in rows:
-        row["weight"] /= total_weight
+        progress = 0.0
+
+        for row, wallet_remaining, cat_remaining in eligible:
+            target_share = remaining_total * (row["raw_weight"] / total_raw)
+            alloc = min(target_share, wallet_remaining, cat_remaining)
+
+            if alloc <= EPS:
+                continue
+
+            row["weight"] += alloc
+            category_used[row["category"]] += alloc
+            progress += alloc
+
+        remaining_total -= progress
+
+        if progress <= EPS:
+            break
+
+    return remaining_total, remaining_total <= 1e-8
 
 
 def save_csv(rows: list[dict], path: Path) -> None:
@@ -93,6 +125,7 @@ def save_csv(rows: list[dict], path: Path) -> None:
     with path.open("w", encoding="utf-8", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
+
         for row in rows:
             writer.writerow(
                 {
@@ -109,13 +142,12 @@ def save_csv(rows: list[dict], path: Path) -> None:
             )
 
 
-def print_summary(rows: list[dict]) -> None:
+def print_summary(rows: list[dict], remaining_total: float, feasible: bool) -> None:
     print("=" * 120)
     print("FINAL PORTFOLIO ALLOCATION")
     print("=" * 120)
 
     category_totals = defaultdict(float)
-
     for row in rows:
         category_totals[row["category"]] += row["weight"]
         print(
@@ -128,21 +160,28 @@ def print_summary(rows: list[dict]) -> None:
 
     print("\nCATEGORY TOTALS")
     for category, total in sorted(category_totals.items(), key=lambda x: x[1], reverse=True):
-        print(f"{category}: {total:.4f}")
+        cap = category_cap(category)
+        print(f"{category}: {total:.4f} (cap={cap:.4f})")
+
+    max_wallet = max((row["weight"] for row in rows), default=0.0)
+    total_weight = sum(row["weight"] for row in rows)
+
+    print("\nCHECKS")
+    print(f"total_weight={total_weight:.6f}")
+    print(f"max_wallet_weight_observed={max_wallet:.6f}")
+    print(f"feasible={feasible}")
+    print(f"unallocated_weight={remaining_total:.10f}")
 
 
 def main() -> None:
     rows = load_csv(INPUT_FILE)
+    normalize_raw_weights(rows)
 
-    normalize_weights(rows)
-    apply_wallet_caps(rows)
-    renormalize(rows)
-    apply_category_caps(rows)
-    final_rescale(rows)
+    remaining_total, feasible = allocate_with_hard_caps(rows)
 
     rows.sort(key=lambda x: x["weight"], reverse=True)
 
-    print_summary(rows)
+    print_summary(rows, remaining_total, feasible)
     save_csv(rows, OUTPUT_FILE)
     print(f"\nSaved: {OUTPUT_FILE}")
 
