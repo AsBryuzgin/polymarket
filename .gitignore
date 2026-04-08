@@ -41,3 +41,8 @@ data/signal_observation_summary_by_status.csv
 data/signal_observation_summary_by_leader.csv
 data/signal_observation_summary_by_category.csv
 data/signal_observation_summary_by_status.csv
+
+data/signal_observation_rolling_overview.csv
+data/signal_observation_rolling_by_leader.csv
+data/signal_observation_rolling_by_category.csv
+data/signal_observation_rolling_by_status.csv
