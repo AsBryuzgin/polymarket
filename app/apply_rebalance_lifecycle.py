@@ -7,10 +7,9 @@ from pathlib import Path
 from pprint import pprint
 
 from execution.state_store import (
-    get_open_position,
-    get_leader_registry,
     init_db,
     list_leader_registry,
+    list_open_positions,
     upsert_leader_registry_row,
 )
 
@@ -50,6 +49,9 @@ def main() -> None:
 
     desired_wallets = {row["wallet"] for row in live_rows}
     current_registry = {row["wallet"]: row for row in list_leader_registry(limit=500)}
+    open_positions = list_open_positions(limit=100000)
+
+    open_position_wallets = {row["leader_wallet"] for row in open_positions}
 
     report = []
 
@@ -82,6 +84,7 @@ def main() -> None:
             "previous_status": previous_status,
             "new_status": "ACTIVE",
             "reason": "present in live universe",
+            "has_open_position": wallet in open_position_wallets,
         })
 
     # Step 2: mark dropped leaders as EXIT_ONLY if we know them already
@@ -104,13 +107,6 @@ def main() -> None:
             source_tag="rebalanced_out",
         )
 
-        has_any_position = False
-        # lightweight check: any open position for this leader?
-        # we only know exact rows per token, so use stored registry transition
-        # position presence will be enforced later by copy_worker on SELL
-        # still useful in report
-        has_any_position = get_open_position(wallet, "__dummy__") is not None
-
         report.append({
             "wallet": wallet,
             "category": row["category"],
@@ -118,7 +114,7 @@ def main() -> None:
             "previous_status": previous_status,
             "new_status": "EXIT_ONLY",
             "reason": f"removed from live universe; grace until {grace_until}",
-            "has_position_hint": has_any_position,
+            "has_open_position": wallet in open_position_wallets,
         })
 
     print("=== APPLY REBALANCE LIFECYCLE ===")
