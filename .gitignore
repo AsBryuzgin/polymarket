@@ -33,3 +33,7 @@ data/grace_unwind_candidates.csv
 data/force_unwind_preview.csv
 
 data/replay_trade_history_report.csv
+
+data/signal_observation_summary_by_leader.csv
+data/signal_observation_summary_by_category.csv
+data/signal_observation_summary_by_status.csv
