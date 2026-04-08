@@ -15,7 +15,6 @@ buy_min_price = 0.05
 buy_max_price = 0.95
 
 [exit]
-follow_exit_even_if_stale = true
 ignore_exit_drift = true
 exit_max_spread = 0.05
 
@@ -30,6 +29,5 @@ target_trade_fraction = 0.20
 [signal_freshness]
 preferred_signal_age_sec = 30
 max_recent_trades = 3
-max_signal_age_sec = 90
 max_price_drift_abs = 0.01
 max_price_drift_rel = 0.02

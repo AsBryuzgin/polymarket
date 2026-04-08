@@ -181,7 +181,18 @@ def latest_fresh_copyable_signal_from_wallet(
                 summary["latest_reason"] = "sell signal but no copied open position"
             continue
 
-        snapshot = fetch_market_snapshot(token_id=trade.asset, side=trade.side)
+        try:
+            snapshot = fetch_market_snapshot(token_id=trade.asset, side=trade.side)
+        except Exception as e:
+            msg = str(e)
+            if idx == 0:
+                if "No orderbook exists" in msg or "404" in msg:
+                    summary["latest_status"] = "NO_ORDERBOOK"
+                    summary["latest_reason"] = "no orderbook for token"
+                else:
+                    summary["latest_status"] = "SNAPSHOT_ERROR"
+                    summary["latest_reason"] = msg
+            continue
 
         max_spread = float(risk.get("skip_if_spread_gt", 0.02))
         if trade.side == "SELL" and has_open_position:
@@ -232,7 +243,7 @@ def latest_fresh_copyable_signal_from_wallet(
             continue
 
         if trade.side == "SELL" and has_open_position:
-            selected_status = "EXIT_FOLLOW_STALE" if age_sec > preferred_signal_age_sec else "EXIT_FOLLOW"
+            selected_status = "EXIT_FOLLOW" if age_sec <= preferred_signal_age_sec else "EXIT_FOLLOW_STALE"
         else:
             selected_status = "FRESH_COPYABLE" if age_sec <= preferred_signal_age_sec else "LATE_BUT_COPYABLE"
 
