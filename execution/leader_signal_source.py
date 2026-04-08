@@ -9,7 +9,7 @@ from execution.builder_auth import load_executor_config
 from execution.copy_worker import LeaderSignal
 from execution.order_policy import evaluate_order_policy
 from execution.polymarket_executor import fetch_market_snapshot
-from execution.state_store import has_signal, get_open_position
+from execution.state_store import has_signal, get_open_position, get_leader_registry
 
 
 @dataclass
@@ -112,6 +112,9 @@ def latest_fresh_copyable_signal_from_wallet(
     ignore_exit_drift = bool(exit_cfg.get("ignore_exit_drift", True))
     exit_max_spread = float(exit_cfg.get("exit_max_spread", 0.05))
 
+    leader_registry = get_leader_registry(wallet)
+    leader_status = leader_registry["leader_status"] if leader_registry else "ACTIVE"
+
     trades = client.get_trades(
         user=wallet,
         limit=max_recent_trades,
@@ -126,6 +129,7 @@ def latest_fresh_copyable_signal_from_wallet(
 
     summary = {
         "wallet": wallet,
+        "leader_status": leader_status,
         "checked_trades": len(normalized),
         "latest_trade_side": None,
         "latest_trade_age_sec": None,
@@ -165,6 +169,12 @@ def latest_fresh_copyable_signal_from_wallet(
             if idx == 0:
                 summary["latest_status"] = "ALREADY_PROCESSED"
                 summary["latest_reason"] = "already processed"
+            continue
+
+        if leader_status == "EXIT_ONLY" and trade.side == "BUY":
+            if idx == 0:
+                summary["latest_status"] = "EXIT_ONLY_BUY_BLOCKED"
+                summary["latest_reason"] = "leader is EXIT_ONLY; new buys blocked"
             continue
 
         if trade.side == "SELL" and not has_open_position:

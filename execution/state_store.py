@@ -51,6 +51,50 @@ def init_db() -> None:
         """
     )
 
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS leader_registry (
+            wallet TEXT PRIMARY KEY,
+            category TEXT NOT NULL,
+            user_name TEXT,
+            leader_status TEXT NOT NULL,
+            target_weight REAL,
+            target_budget_usd REAL,
+            grace_until TEXT,
+            source_tag TEXT,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        """
+    )
+
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS trade_history (
+            event_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            event_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            signal_id TEXT,
+            leader_wallet TEXT NOT NULL,
+            leader_user_name TEXT,
+            category TEXT,
+            leader_status TEXT,
+            token_id TEXT NOT NULL,
+            side TEXT NOT NULL,
+            event_type TEXT NOT NULL,
+            amount_usd REAL,
+            price REAL,
+            gross_value_usd REAL,
+            position_before_usd REAL,
+            position_after_usd REAL,
+            entry_avg_price REAL,
+            exit_price REAL,
+            realized_pnl_usd REAL,
+            realized_pnl_pct REAL,
+            holding_minutes REAL,
+            notes TEXT
+        )
+        """
+    )
+
     conn.commit()
     conn.close()
 
@@ -139,11 +183,14 @@ def upsert_buy_position(
     amount_usd: float,
     entry_price: float | None,
     signal_id: str,
-) -> None:
+) -> dict[str, Any]:
     existing = get_open_position(leader_wallet, token_id)
 
     conn = get_connection()
     cur = conn.cursor()
+
+    old_amount = 0.0
+    old_avg = None
 
     if existing is None:
         cur.execute(
@@ -165,6 +212,8 @@ def upsert_buy_position(
                 signal_id,
             ),
         )
+        new_amount = amount_usd
+        new_avg = entry_price
     else:
         old_amount = float(existing["position_usd"])
         old_avg = existing["avg_entry_price"]
@@ -203,12 +252,23 @@ def upsert_buy_position(
     conn.commit()
     conn.close()
 
+    return {
+        "position_before_usd": old_amount,
+        "position_after_usd": new_amount,
+        "entry_avg_price_before": old_avg,
+        "entry_avg_price_after": new_avg,
+    }
+
 
 def close_position(
     leader_wallet: str,
     token_id: str,
     signal_id: str,
-) -> None:
+) -> dict[str, Any] | None:
+    existing = get_open_position(leader_wallet, token_id)
+    if existing is None:
+        return None
+
     conn = get_connection()
     cur = conn.cursor()
 
@@ -232,6 +292,172 @@ def close_position(
 
     conn.commit()
     conn.close()
+
+    return {
+        "position_before_usd": float(existing["position_usd"]),
+        "position_after_usd": 0.0,
+        "entry_avg_price": float(existing["avg_entry_price"]) if existing["avg_entry_price"] is not None else None,
+        "opened_at": existing["opened_at"],
+    }
+
+
+def log_trade_event(
+    signal_id: str | None,
+    leader_wallet: str,
+    leader_user_name: str | None,
+    category: str | None,
+    leader_status: str | None,
+    token_id: str,
+    side: str,
+    event_type: str,
+    amount_usd: float | None,
+    price: float | None,
+    gross_value_usd: float | None,
+    position_before_usd: float | None,
+    position_after_usd: float | None,
+    entry_avg_price: float | None,
+    exit_price: float | None,
+    realized_pnl_usd: float | None,
+    realized_pnl_pct: float | None,
+    holding_minutes: float | None,
+    notes: str | None,
+) -> None:
+    conn = get_connection()
+    cur = conn.cursor()
+
+    cur.execute(
+        """
+        INSERT INTO trade_history (
+            signal_id,
+            leader_wallet,
+            leader_user_name,
+            category,
+            leader_status,
+            token_id,
+            side,
+            event_type,
+            amount_usd,
+            price,
+            gross_value_usd,
+            position_before_usd,
+            position_after_usd,
+            entry_avg_price,
+            exit_price,
+            realized_pnl_usd,
+            realized_pnl_pct,
+            holding_minutes,
+            notes
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            signal_id,
+            leader_wallet,
+            leader_user_name,
+            category,
+            leader_status,
+            token_id,
+            side,
+            event_type,
+            amount_usd,
+            price,
+            gross_value_usd,
+            position_before_usd,
+            position_after_usd,
+            entry_avg_price,
+            exit_price,
+            realized_pnl_usd,
+            realized_pnl_pct,
+            holding_minutes,
+            notes,
+        ),
+    )
+
+    conn.commit()
+    conn.close()
+
+
+def upsert_leader_registry_row(
+    wallet: str,
+    category: str,
+    user_name: str,
+    leader_status: str,
+    target_weight: float,
+    target_budget_usd: float,
+    grace_until: str | None,
+    source_tag: str,
+) -> None:
+    conn = get_connection()
+    cur = conn.cursor()
+
+    cur.execute(
+        """
+        INSERT INTO leader_registry (
+            wallet,
+            category,
+            user_name,
+            leader_status,
+            target_weight,
+            target_budget_usd,
+            grace_until,
+            source_tag
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(wallet) DO UPDATE SET
+            category = excluded.category,
+            user_name = excluded.user_name,
+            leader_status = excluded.leader_status,
+            target_weight = excluded.target_weight,
+            target_budget_usd = excluded.target_budget_usd,
+            grace_until = excluded.grace_until,
+            source_tag = excluded.source_tag,
+            updated_at = CURRENT_TIMESTAMP
+        """,
+        (
+            wallet,
+            category,
+            user_name,
+            leader_status,
+            target_weight,
+            target_budget_usd,
+            grace_until,
+            source_tag,
+        ),
+    )
+
+    conn.commit()
+    conn.close()
+
+
+def get_leader_registry(wallet: str) -> dict[str, Any] | None:
+    conn = get_connection()
+    cur = conn.cursor()
+
+    cur.execute(
+        "SELECT * FROM leader_registry WHERE wallet = ? LIMIT 1",
+        (wallet,),
+    )
+    row = cur.fetchone()
+    conn.close()
+
+    return dict(row) if row else None
+
+
+def list_leader_registry(limit: int = 100) -> list[dict[str, Any]]:
+    conn = get_connection()
+    cur = conn.cursor()
+
+    cur.execute(
+        """
+        SELECT *
+        FROM leader_registry
+        ORDER BY category ASC, wallet ASC
+        LIMIT ?
+        """,
+        (limit,),
+    )
+
+    rows = [dict(row) for row in cur.fetchall()]
+    conn.close()
+    return rows
 
 
 def list_open_positions(limit: int = 50) -> list[dict[str, Any]]:
@@ -263,6 +489,25 @@ def list_recent_signals(limit: int = 20) -> list[dict[str, Any]]:
         SELECT *
         FROM processed_signals
         ORDER BY created_at DESC
+        LIMIT ?
+        """,
+        (limit,),
+    )
+
+    rows = [dict(row) for row in cur.fetchall()]
+    conn.close()
+    return rows
+
+
+def list_trade_history(limit: int = 200) -> list[dict[str, Any]]:
+    conn = get_connection()
+    cur = conn.cursor()
+
+    cur.execute(
+        """
+        SELECT *
+        FROM trade_history
+        ORDER BY event_id DESC
         LIMIT ?
         """,
         (limit,),

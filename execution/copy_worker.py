@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, asdict
+from datetime import datetime
 
 from execution.builder_auth import load_executor_config
 from execution.copy_sizer import compute_copy_size
@@ -12,6 +13,8 @@ from execution.state_store import (
     get_open_position,
     upsert_buy_position,
     close_position,
+    get_leader_registry,
+    log_trade_event,
 )
 
 
@@ -22,6 +25,17 @@ class LeaderSignal:
     token_id: str
     side: str
     leader_budget_usd: float
+
+
+def _parse_opened_at_to_minutes(opened_at: str | None) -> float | None:
+    if not opened_at:
+        return None
+    try:
+        dt = datetime.fromisoformat(opened_at.replace(" ", "T"))
+        now = datetime.utcnow()
+        return round((now - dt).total_seconds() / 60.0, 2)
+    except Exception:
+        return None
 
 
 def process_signal(signal: LeaderSignal) -> dict:
@@ -38,7 +52,13 @@ def process_signal(signal: LeaderSignal) -> dict:
     sizing = config.get("sizing", {})
     exit_cfg = config.get("exit", {})
 
+    registry = get_leader_registry(signal.leader_wallet)
+    leader_user_name = registry["user_name"] if registry else None
+    category = registry["category"] if registry else None
+    leader_status = registry["leader_status"] if registry else None
+
     snapshot = fetch_market_snapshot(token_id=signal.token_id, side=signal.side)
+    current_price = snapshot["price_quote"]
 
     if signal.side.upper() == "SELL":
         open_position = get_open_position(signal.leader_wallet, signal.token_id)
@@ -117,10 +137,44 @@ def process_signal(signal: LeaderSignal) -> dict:
             side=signal.side,
         )
 
-        close_position(
+        closed = close_position(
             leader_wallet=signal.leader_wallet,
             token_id=signal.token_id,
             signal_id=signal.signal_id,
+        )
+
+        entry_avg_price = closed["entry_avg_price"] if closed else None
+        position_before_usd = closed["position_before_usd"] if closed else position_usd
+        position_after_usd = closed["position_after_usd"] if closed else 0.0
+        holding_minutes = _parse_opened_at_to_minutes(closed["opened_at"] if closed else None)
+
+        realized_pnl_usd = None
+        realized_pnl_pct = None
+
+        if entry_avg_price is not None and current_price is not None:
+            realized_pnl_pct = round((float(current_price) - float(entry_avg_price)) / float(entry_avg_price), 6)
+            realized_pnl_usd = round(position_before_usd * realized_pnl_pct, 4)
+
+        log_trade_event(
+            signal_id=signal.signal_id,
+            leader_wallet=signal.leader_wallet,
+            leader_user_name=leader_user_name,
+            category=category,
+            leader_status=leader_status,
+            token_id=signal.token_id,
+            side=signal.side,
+            event_type="EXIT",
+            amount_usd=round(position_before_usd, 2),
+            price=current_price,
+            gross_value_usd=round(position_before_usd, 2),
+            position_before_usd=position_before_usd,
+            position_after_usd=position_after_usd,
+            entry_avg_price=entry_avg_price,
+            exit_price=current_price,
+            realized_pnl_usd=realized_pnl_usd,
+            realized_pnl_pct=realized_pnl_pct,
+            holding_minutes=holding_minutes,
+            notes="preview exit generated",
         )
 
         record_signal(
@@ -141,6 +195,9 @@ def process_signal(signal: LeaderSignal) -> dict:
             "reason": "ok",
             "suggested_amount_usd": round(position_usd, 2),
             "preview_order": preview,
+            "realized_pnl_usd": realized_pnl_usd,
+            "realized_pnl_pct": realized_pnl_pct,
+            "holding_minutes": holding_minutes,
         }
 
     policy = evaluate_order_policy(
@@ -205,12 +262,34 @@ def process_signal(signal: LeaderSignal) -> dict:
         side=signal.side,
     )
 
-    upsert_buy_position(
+    pos_update = upsert_buy_position(
         leader_wallet=signal.leader_wallet,
         token_id=signal.token_id,
         amount_usd=size.amount_usd,
-        entry_price=snapshot["price_quote"],
+        entry_price=current_price,
         signal_id=signal.signal_id,
+    )
+
+    log_trade_event(
+        signal_id=signal.signal_id,
+        leader_wallet=signal.leader_wallet,
+        leader_user_name=leader_user_name,
+        category=category,
+        leader_status=leader_status,
+        token_id=signal.token_id,
+        side=signal.side,
+        event_type="ENTRY",
+        amount_usd=size.amount_usd,
+        price=current_price,
+        gross_value_usd=size.amount_usd,
+        position_before_usd=pos_update["position_before_usd"],
+        position_after_usd=pos_update["position_after_usd"],
+        entry_avg_price=pos_update["entry_avg_price_after"],
+        exit_price=None,
+        realized_pnl_usd=None,
+        realized_pnl_pct=None,
+        holding_minutes=None,
+        notes="preview entry generated",
     )
 
     record_signal(

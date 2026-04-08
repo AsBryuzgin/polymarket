@@ -8,3 +8,6 @@ hold_gap_rel = 0.05
 
 # challenger must win repeatedly before replacement
 confirmation_cycles = 2
+
+[lifecycle]
+exit_grace_days = 14
