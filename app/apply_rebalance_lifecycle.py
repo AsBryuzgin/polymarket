@@ -1,11 +1,18 @@
 from __future__ import annotations
 
 import csv
+import sys
 import tomllib
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from pprint import pprint
 
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from app.allocation_runtime import resolve_leader_budget_usd, resolve_total_capital_usd
+from execution.builder_auth import load_executor_config
 from execution.state_store import (
     init_db,
     list_leader_registry,
@@ -16,7 +23,6 @@ from execution.state_store import (
 
 LIVE_FILE = Path("data/shortlists/live_portfolio_allocation.csv")
 REBALANCE_CONFIG = Path("config/rebalance.toml")
-TOTAL_CAPITAL_USD = 100.0
 
 
 def load_live_rows(path: Path) -> list[dict]:
@@ -30,19 +36,32 @@ def load_live_rows(path: Path) -> list[dict]:
     return rows
 
 
-def load_grace_days(path: Path) -> int:
+def load_rebalance_config(path: Path) -> dict:
     if not path.exists():
-        return 14
+        return {}
     with path.open("rb") as f:
-        cfg = tomllib.load(f)
+        return tomllib.load(f)
+
+
+def load_grace_days(cfg: dict) -> int:
     return int(cfg.get("lifecycle", {}).get("exit_grace_days", 14))
+
+
+def load_total_capital_usd(cfg: dict) -> float:
+    return float(cfg.get("capital", {}).get("total_capital_usd", 0.0))
 
 
 def main() -> None:
     init_db()
 
     live_rows = load_live_rows(LIVE_FILE)
-    grace_days = load_grace_days(REBALANCE_CONFIG)
+    executor_cfg = load_executor_config()
+    rebalance_cfg = load_rebalance_config(REBALANCE_CONFIG)
+    grace_days = load_grace_days(rebalance_cfg)
+    total_capital_usd = resolve_total_capital_usd(
+        executor_config=executor_cfg,
+        rebalance_config=rebalance_cfg,
+    )
 
     now = datetime.now(timezone.utc)
     grace_until = (now + timedelta(days=grace_days)).isoformat()
@@ -61,7 +80,7 @@ def main() -> None:
         category = row["category"]
         user_name = row["user_name"]
         weight = float(row["weight"])
-        budget = round(TOTAL_CAPITAL_USD * weight, 2)
+        budget = resolve_leader_budget_usd(row, total_capital_usd=total_capital_usd)
 
         previous = current_registry.get(wallet)
         previous_status = previous["leader_status"] if previous else None

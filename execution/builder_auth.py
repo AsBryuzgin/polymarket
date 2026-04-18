@@ -10,6 +10,8 @@ from py_clob_client.client import ClobClient
 
 load_dotenv()
 
+EXECUTOR_CONFIG_ENV_VAR = "POLY_EXECUTOR_CONFIG_PATH"
+
 
 @dataclass
 class ExecutorEnv:
@@ -39,7 +41,7 @@ def load_executor_env() -> ExecutorEnv:
 
 
 def load_executor_config(path: str = "config/executor.toml") -> dict:
-    p = Path(path)
+    p = Path(os.getenv(EXECUTOR_CONFIG_ENV_VAR, path) if path == "config/executor.toml" else path)
     if not p.exists():
         return {}
     with p.open("rb") as f:
@@ -82,6 +84,7 @@ def health_snapshot() -> dict:
     snapshot = {
         "env_ok": len(missing) == 0,
         "missing_env": missing,
+        "executor_config_path": os.getenv(EXECUTOR_CONFIG_ENV_VAR, "config/executor.toml"),
         "clob_host": env.clob_host,
         "relayer_url": env.relayer_url,
         "chain_id": env.chain_id,

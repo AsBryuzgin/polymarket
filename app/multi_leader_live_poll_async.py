@@ -2,14 +2,21 @@ from __future__ import annotations
 
 import asyncio
 import csv
+import sys
 import time
 from pathlib import Path
 from pprint import pprint
 
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from app.allocation_runtime import resolve_leader_budget_usd, resolve_total_capital_usd
 from collectors.wallet_profiles import WalletProfilesClient
 from execution.builder_auth import load_executor_config
 from execution.copy_worker import process_signal
 from execution.leader_signal_source import latest_fresh_copyable_signal_from_wallet
+from execution.state_backup import backup_state_db
 from execution.state_store import init_db
 
 
@@ -109,12 +116,14 @@ async def main_async() -> None:
     poll_interval_sec = float(config.get("global", {}).get("poll_interval_sec", 2))
     preferred_signal_age_sec = int(config.get("signal_freshness", {}).get("preferred_signal_age_sec", 30))
     max_signal_age_sec = int(config.get("signal_freshness", {}).get("max_signal_age_sec", 90))
+    total_capital_usd = resolve_total_capital_usd(executor_config=config)
 
     rows = load_allocation(INPUT_FILE)
     last_seen_by_wallet, first_seen_by_tx = await bootstrap_last_seen(rows)
 
     print("=== Multi-Leader Live Poll (async prescan) ===")
     print(f"leaders={len(rows)} | poll_interval_sec={poll_interval_sec}")
+    pprint({"startup_backup": backup_state_db(config=config, label="startup")})
     print("Press Ctrl+C to stop.\n")
 
     try:
@@ -129,7 +138,10 @@ async def main_async() -> None:
                 wallet = row["wallet"]
                 user_name = row["user_name"]
                 category = row["category"]
-                leader_budget_usd = round(100.0 * row["weight"], 2)
+                leader_budget_usd = resolve_leader_budget_usd(
+                    row,
+                    total_capital_usd=total_capital_usd,
+                )
 
                 print(f"[{idx}/{len(rows)}] {user_name} | {category} | budget=${leader_budget_usd} | {wallet}")
 
@@ -215,6 +227,7 @@ async def main_async() -> None:
                 except Exception as e:
                     print(f"  process_error: {e}")
 
+            pprint({"cycle_backup": backup_state_db(config=config, label="after_cycle")})
             await asyncio.sleep(poll_interval_sec)
 
     except KeyboardInterrupt:

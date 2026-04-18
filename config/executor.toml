@@ -1,7 +1,20 @@
 [global]
 simulation = true
 preview_mode = true
+execution_mode = "preview"
+live_trading_enabled = false
+live_trading_ack = ""
 poll_interval_sec = 2
+
+[state]
+db_path = "data/executor_state.db"
+
+[runtime_guard]
+require_isolated_db_for_paper = true
+require_isolated_db_for_live = true
+
+[capital]
+total_capital_usd = 0.0
 
 [risk]
 max_per_trade_usd = 2.0
@@ -9,6 +22,69 @@ min_order_size_usd = 1.0
 slippage_tolerance = 0.02
 skip_if_spread_gt = 0.02
 skip_if_minutes_to_resolve_lt = 30
+trading_disabled = false
+enforce_leader_budget_cap = true
+max_position_usd = 6.0
+max_wallet_exposure_usd = 12.0
+max_category_exposure_usd = 25.0
+max_portfolio_exposure_usd = 0.0
+max_daily_realized_loss_usd = 10.0
+
+[funding]
+require_balance_allowance = true
+cash_reserve_usd = 1.0
+collateral_decimals = 6
+
+[live_execution]
+require_verified_fill = true
+post_submit_poll_attempts = 5
+post_submit_poll_interval_sec = 1.0
+
+[live_safety]
+enable_stop_buy_on_critical = true
+
+[runtime_lock]
+enabled = true
+activate_on_critical_alerts = true
+path = "data/runtime_trading.lock"
+
+[alerts]
+include_warnings = true
+processing_warning_minutes = 2.0
+processing_critical_minutes = 10.0
+
+[alert_delivery]
+enabled = false
+title = "Polymarket bot alert"
+timeout_sec = 5.0
+telegram_bot_token_env = "POLY_ALERT_TELEGRAM_BOT_TOKEN"
+telegram_chat_id_env = "POLY_ALERT_TELEGRAM_CHAT_ID"
+discord_webhook_url_env = "POLY_ALERT_DISCORD_WEBHOOK_URL"
+email_webhook_url_env = "POLY_ALERT_EMAIL_WEBHOOK_URL"
+generic_webhook_url_env = "POLY_ALERT_GENERIC_WEBHOOK_URL"
+
+[state_backup]
+enabled = false
+dir = "data/backups"
+
+[paper_soak]
+required_mode = "PAPER"
+min_hours = 24.0
+max_last_event_age_minutes = 60.0
+max_event_gap_minutes = 120.0
+min_order_attempts = 10
+min_processed_signals = 10
+min_signal_observations = 50
+max_error_attempts = 0
+max_unknown_attempts = 0
+max_error_signals = 0
+require_live_readiness = true
+require_isolated_db = true
+
+[reconciliation]
+fetch_exchange_positions = false
+fetch_exchange_open_orders = false
+position_qty_tolerance = 0.000001
 
 [filters]
 buy_min_price = 0.05

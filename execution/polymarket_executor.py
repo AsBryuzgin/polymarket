@@ -135,3 +135,40 @@ def preview_market_order(
         "signed_order_type": type(signed).__name__,
         "signed_order_preview": str(signed)[:500],
     }
+
+
+def submit_live_market_order(
+    token_id: str,
+    amount_usd: float,
+    side: str = "BUY",
+) -> dict:
+    client = build_authenticated_client()
+
+    market_order = MarketOrderArgs(
+        token_id=token_id,
+        amount=amount_usd,
+        side=_side_constant(side),
+        order_type=OrderType.FOK,
+    )
+
+    signed = client.create_market_order(market_order)
+    response = client.post_order(signed, OrderType.FOK)
+    if not isinstance(response, dict):
+        response = {"raw_response": response}
+
+    return {
+        "token_id": token_id,
+        "amount_usd": amount_usd,
+        "side": side,
+        "order_type": "FOK",
+        "signed_order_type": type(signed).__name__,
+        "post_order_response": response,
+    }
+
+
+def fetch_live_order_status(order_id: str) -> dict:
+    client = build_authenticated_client()
+    response = client.get_order(order_id)
+    if not isinstance(response, dict):
+        response = {"raw_response": response}
+    return response

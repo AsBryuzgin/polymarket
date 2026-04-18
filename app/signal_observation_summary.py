@@ -7,7 +7,7 @@ from pathlib import Path
 from statistics import median
 from pprint import pprint
 
-from execution.state_store import DB_PATH
+import execution.state_store as state_store
 
 
 OUT_LEADER = Path("data/signal_observation_summary_by_leader.csv")
@@ -16,7 +16,7 @@ OUT_STATUS = Path("data/signal_observation_summary_by_status.csv")
 
 
 def get_connection() -> sqlite3.Connection:
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(state_store.DB_PATH)
     conn.row_factory = sqlite3.Row
     return conn
 
