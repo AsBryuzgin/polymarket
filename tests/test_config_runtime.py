@@ -61,6 +61,16 @@ class ConfigRuntimeTests(unittest.TestCase):
 
         self.assertEqual(capital, 73.42)
 
+    def test_capital_source_can_allow_zero_balance_for_bootstrap(self) -> None:
+        capital = resolve_total_capital_usd(
+            executor_config={"capital": {"source": "collateral_balance"}},
+            rebalance_config={},
+            balance_loader=lambda _config: 0.0,
+            allow_zero_collateral_balance=True,
+        )
+
+        self.assertEqual(capital, 0.0)
+
 
 if __name__ == "__main__":
     unittest.main()

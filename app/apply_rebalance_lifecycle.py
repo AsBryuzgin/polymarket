@@ -61,7 +61,14 @@ def main() -> None:
     total_capital_usd = resolve_total_capital_usd(
         executor_config=executor_cfg,
         rebalance_config=rebalance_cfg,
+        allow_zero_collateral_balance=True,
     )
+    if total_capital_usd <= 0:
+        print(
+            "WARNING: account collateral balance is zero; leader registry will be "
+            "bootstrapped with target_budget_usd=0.0. Re-run this command after funding "
+            "to refresh live budgets from the real account balance."
+        )
 
     now = datetime.now(timezone.utc)
     grace_until = (now + timedelta(days=grace_days)).isoformat()

@@ -28,6 +28,7 @@ def resolve_total_capital_usd(
     rebalance_config: dict[str, Any] | None = None,
     balance_loader: Callable[[dict[str, Any]], float] | None = None,
     default: float = 0.0,
+    allow_zero_collateral_balance: bool = False,
 ) -> float:
     executor_config = executor_config or {}
     rebalance_config = rebalance_config if rebalance_config is not None else load_rebalance_config()
@@ -42,6 +43,8 @@ def resolve_total_capital_usd(
         balance = _safe_float(balance_loader(executor_config), 0.0)
         if balance > 0:
             return round(balance, 2)
+        if allow_zero_collateral_balance:
+            return 0.0
         raise RuntimeError("capital.source requires a positive collateral balance")
 
     executor_capital = _safe_float(
