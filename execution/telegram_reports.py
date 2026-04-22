@@ -410,8 +410,16 @@ def build_activity_report(*, now: datetime | None = None) -> str:
             "latest_trade_hash",
         )
     selected_count = sum(1 for row in observations if row.get("selected_signal_id"))
-    selected_unique_count = _unique_count(observations, "selected_signal_id")
-    by_leader: dict[str, dict[str, Any]] = defaultdict(lambda: {"observations": 0, "selected": 0, "name": "UNKNOWN", "category": "UNKNOWN"})
+    by_leader: dict[str, dict[str, Any]] = defaultdict(
+        lambda: {
+            "observations": 0,
+            "selected": 0,
+            "entries": 0,
+            "exits": 0,
+            "name": "UNKNOWN",
+            "category": "UNKNOWN",
+        }
+    )
     for row in observations:
         wallet = str(row.get("leader_wallet") or "")
         item = by_leader[wallet]
@@ -424,6 +432,15 @@ def build_activity_report(*, now: datetime | None = None) -> str:
     entries = sum(1 for row in history if row.get("event_type") == "ENTRY")
     exits = sum(1 for row in history if row.get("event_type") == "EXIT")
     realized = sum(_safe_float(row.get("realized_pnl_usd")) for row in history if row.get("event_type") == "EXIT")
+    for row in history:
+        wallet = str(row.get("leader_wallet") or "")
+        item = by_leader[wallet]
+        item["name"] = _leader_name(row)
+        item["category"] = row.get("category") or item["category"]
+        if row.get("event_type") == "ENTRY":
+            item["entries"] += 1
+        if row.get("event_type") == "EXIT":
+            item["exits"] += 1
 
     lines = [
         "Активность за 24ч",
@@ -431,17 +448,18 @@ def build_activity_report(*, now: datetime | None = None) -> str:
             f"проверки: {len(observations)} | "
             f"уникальные latest-сделки: {_unique_count(observations, 'latest_trade_hash')}"
         ),
-        f"выбранные сигналы: {selected_count} проверок / {selected_unique_count} unique",
+        f"выбранные сигналы: {selected_count} проверок",
         f"сделки бота: BUY {entries} | SELL {exits} | realized {_money(realized, signed=True)}",
         "",
         "Пояснение: проверки = каждый polling-цикл. Unique = разные сделки лидеров.",
+        "Selected = лучший пригодный сигнал-кандидат; он не всегда превращается в BUY/SELL.",
     ]
 
     if status_counts:
         lines.append("")
-        lines.append("Статусы, проверки/unique:")
+        lines.append("Статусы, unique:")
         for status, count in status_counts.most_common(6):
-            lines.append(f"{status}: {count}/{unique_by_status.get(status, 0)}")
+            lines.append(f"{status}: {unique_by_status.get(status, 0)}")
             lines.append(f"  {_status_hint(status)}")
 
     leaders = sorted(by_leader.values(), key=lambda x: (x["selected"], x["observations"]), reverse=True)
@@ -449,7 +467,13 @@ def build_activity_report(*, now: datetime | None = None) -> str:
         lines.append("")
         lines.append("Топ лидеров:")
         for idx, row in enumerate(leaders[:5], start=1):
-            lines.append(f"{idx}. {row['name']} | {row['category']} | checks {row['observations']} | selected {row['selected']}")
+            lines.append(
+                (
+                    f"{idx}. {row['name']} | {row['category']} | "
+                    f"checks {row['observations']} | selected {row['selected']} | "
+                    f"BUY {row['entries']} | SELL {row['exits']}"
+                )
+            )
 
     return "\n".join(lines)
 

@@ -4,10 +4,17 @@ import tempfile
 import unittest
 from pathlib import Path
 
+import execution.state_store as state_store
 from execution.state_store import DEFAULT_DB_PATH, resolve_state_db_path
 
 
 class StateStoreRuntimeTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self._original_db_path = state_store.DB_PATH
+
+    def tearDown(self) -> None:
+        state_store.DB_PATH = self._original_db_path
+
     def test_env_db_path_overrides_config(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             config_path = Path(tmp) / "executor.toml"
@@ -42,6 +49,27 @@ class StateStoreRuntimeTests(unittest.TestCase):
         )
 
         self.assertEqual(db_path, DEFAULT_DB_PATH)
+
+    def test_delete_leader_registry_row_removes_flat_leader(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            state_store.DB_PATH = Path(tmp) / "executor_state.db"
+            state_store.init_db()
+            state_store.upsert_leader_registry_row(
+                wallet="wallet1",
+                category="CRYPTO",
+                user_name="Leader",
+                leader_status="EXIT_ONLY",
+                target_weight=0.0,
+                target_budget_usd=0.0,
+                grace_until=None,
+                source_tag="test",
+            )
+
+            self.assertIsNotNone(state_store.get_leader_registry("wallet1"))
+
+            state_store.delete_leader_registry_row("wallet1")
+
+            self.assertIsNone(state_store.get_leader_registry("wallet1"))
 
 
 if __name__ == "__main__":

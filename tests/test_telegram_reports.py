@@ -116,6 +116,9 @@ class TelegramReportTests(unittest.TestCase):
             history.return_value = [
                 {
                     "event_time": "2026-04-21 13:00:00",
+                    "leader_wallet": "wallet1",
+                    "leader_user_name": "Leader",
+                    "category": "CRYPTO",
                     "event_type": "EXIT",
                     "realized_pnl_usd": 0.25,
                 }
@@ -124,10 +127,11 @@ class TelegramReportTests(unittest.TestCase):
             report = build_activity_report(now=now)
 
         self.assertIn("проверки: 1 | уникальные latest-сделки: 1", report)
-        self.assertIn("выбранные сигналы: 1 проверок / 1 unique", report)
-        self.assertIn("FRESH_COPYABLE: 1/1", report)
+        self.assertIn("выбранные сигналы: 1 проверок", report)
+        self.assertIn("FRESH_COPYABLE: 1", report)
         self.assertIn("realized +$0.25", report)
         self.assertIn("Leader", report)
+        self.assertIn("BUY 0 | SELL 1", report)
 
     def test_leaders_report_handles_registry_map(self) -> None:
         with (

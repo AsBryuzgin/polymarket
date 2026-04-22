@@ -14,6 +14,7 @@ if str(ROOT) not in sys.path:
 from app.allocation_runtime import resolve_leader_budget_usd, resolve_total_capital_usd
 from execution.builder_auth import load_executor_config
 from execution.state_store import (
+    delete_leader_registry_row,
     init_db,
     list_leader_registry,
     list_open_positions,
@@ -113,13 +114,27 @@ def main() -> None:
             "has_open_position": wallet in open_position_wallets,
         })
 
-    # Step 2: mark dropped leaders as EXIT_ONLY if we know them already
+    # Step 2: dropped leaders only need EXIT_ONLY if there is something to unwind.
     for wallet, row in current_registry.items():
         if wallet in desired_wallets:
             continue
 
         previous_status = row["leader_status"]
         if previous_status not in {"ACTIVE", "EXIT_ONLY"}:
+            continue
+
+        has_open_position = wallet in open_position_wallets
+        if not has_open_position:
+            delete_leader_registry_row(wallet)
+            report.append({
+                "wallet": wallet,
+                "category": row["category"],
+                "user_name": row.get("user_name") or "",
+                "previous_status": previous_status,
+                "new_status": "REMOVED",
+                "reason": "removed from live universe; no open copied positions",
+                "has_open_position": False,
+            })
             continue
 
         upsert_leader_registry_row(
@@ -140,7 +155,7 @@ def main() -> None:
             "previous_status": previous_status,
             "new_status": "EXIT_ONLY",
             "reason": f"removed from live universe; grace until {grace_until}",
-            "has_open_position": wallet in open_position_wallets,
+            "has_open_position": has_open_position,
         })
 
     print("=== APPLY REBALANCE LIFECYCLE ===")

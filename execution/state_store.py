@@ -765,6 +765,16 @@ def get_leader_registry(wallet: str) -> dict[str, Any] | None:
     return dict(row) if row else None
 
 
+def delete_leader_registry_row(wallet: str) -> None:
+    conn = get_connection()
+    cur = conn.cursor()
+
+    cur.execute("DELETE FROM leader_registry WHERE wallet = ?", (wallet,))
+
+    conn.commit()
+    conn.close()
+
+
 def list_leader_registry(limit: int = 100) -> list[dict[str, Any]]:
     conn = get_connection()
     cur = conn.cursor()
