@@ -89,16 +89,24 @@ def save_csv(rows: list[dict], path: Path) -> None:
         "all_categories",
         "final_wss",
         "raw_wss",
+        "activity_score",
         "leaderboard_pnl",
         "leaderboard_volume",
         "rank",
         "time_period",
         "eligible",
         "filter_reasons",
+        "median_spread",
+        "median_liquidity",
+        "slippage_proxy",
+        "trades_30d",
+        "trades_90d",
+        "days_since_last_trade",
+        "closed_positions_used",
     ]
 
     with path.open("w", encoding="utf-8", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
         writer.writeheader()
         writer.writerows(rows)
 

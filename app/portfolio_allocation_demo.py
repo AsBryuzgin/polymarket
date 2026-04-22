@@ -179,10 +179,16 @@ def save_csv(rows: list[dict], path: Path) -> None:
         "category",
         "all_categories",
         "final_wss",
+        "activity_score",
         "leaderboard_pnl",
         "leaderboard_volume",
         "raw_weight",
         "weight",
+        "trades_30d",
+        "trades_90d",
+        "days_since_last_trade",
+        "median_spread",
+        "slippage_proxy",
     ]
 
     with path.open("w", encoding="utf-8", newline="") as f:
@@ -197,10 +203,16 @@ def save_csv(rows: list[dict], path: Path) -> None:
                     "category": row["category"],
                     "all_categories": row["all_categories"],
                     "final_wss": round(row["final_wss"], 2),
+                    "activity_score": row.get("activity_score", ""),
                     "leaderboard_pnl": round(row["leaderboard_pnl"], 2),
                     "leaderboard_volume": round(row["leaderboard_volume"], 2),
                     "raw_weight": round(row["raw_weight"], 6),
                     "weight": round(row["weight"], 6),
+                    "trades_30d": row.get("trades_30d", ""),
+                    "trades_90d": row.get("trades_90d", ""),
+                    "days_since_last_trade": row.get("days_since_last_trade", ""),
+                    "median_spread": row.get("median_spread", ""),
+                    "slippage_proxy": row.get("slippage_proxy", ""),
                 }
             )
 
