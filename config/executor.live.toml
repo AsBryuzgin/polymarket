@@ -25,7 +25,7 @@ trading_disabled = false
 enforce_leader_budget_cap = true
 max_per_trade_pct = 0.05
 max_position_pct = 0.08
-max_wallet_exposure_pct = 0.12
+max_wallet_exposure_pct = 0.25
 max_category_exposure_pct = 0.25
 max_portfolio_exposure_pct = 0.90
 max_daily_realized_loss_pct = 0.075
@@ -97,7 +97,7 @@ ignore_exit_drift = true
 exit_max_spread = 0.05
 
 [portfolio]
-max_wallet_weight = 0.12
+max_wallet_weight = 0.25
 max_category_weight = 0.25
 max_experimental_weight = 0.08
 
