@@ -5,7 +5,12 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from unittest.mock import patch
 
-from execution.telegram_reports import build_activity_report, build_status_report
+from execution.telegram_reports import (
+    build_activity_report,
+    build_blocks_report,
+    build_leaders_report,
+    build_status_report,
+)
 
 
 @dataclass
@@ -104,6 +109,7 @@ class TelegramReportTests(unittest.TestCase):
                     "leader_user_name": "Leader",
                     "category": "CRYPTO",
                     "latest_status": "FRESH_COPYABLE",
+                    "latest_trade_hash": "hash1",
                     "selected_signal_id": "sig1",
                 }
             ]
@@ -117,9 +123,74 @@ class TelegramReportTests(unittest.TestCase):
 
             report = build_activity_report(now=now)
 
-        self.assertIn("observations: 1 | selected: 1", report)
+        self.assertIn("observations: 1 | latest trades: 1 | selected unique: 1", report)
+        self.assertIn("FRESH_COPYABLE: 1/1", report)
         self.assertIn("realized: +$0.25", report)
         self.assertIn("Leader", report)
+
+    def test_leaders_report_handles_registry_map(self) -> None:
+        with (
+            patch("execution.telegram_reports.init_db"),
+            patch("execution.telegram_reports.list_trade_history") as history,
+            patch("execution.telegram_reports.list_open_positions") as positions,
+            patch("execution.telegram_reports.list_leader_registry") as registry,
+        ):
+            history.return_value = [
+                {
+                    "leader_wallet": "wallet1",
+                    "leader_user_name": "Leader",
+                    "category": "ECONOMICS",
+                    "event_type": "ENTRY",
+                }
+            ]
+            positions.return_value = []
+            registry.return_value = [
+                {
+                    "wallet": "wallet1",
+                    "user_name": "Leader",
+                    "category": "ECONOMICS",
+                    "leader_status": "ACTIVE",
+                }
+            ]
+
+            report = build_leaders_report(snapshot_loader=lambda _token_id, _side: {})
+
+        self.assertIn("Leaders by bot PnL", report)
+        self.assertIn("Leader", report)
+
+    def test_blocks_report_shows_observation_and_unique_counts(self) -> None:
+        now = datetime(2026, 4, 22, tzinfo=timezone.utc)
+        with (
+            patch("execution.telegram_reports.init_db"),
+            patch("execution.telegram_reports.init_signal_observation_table"),
+            patch("execution.telegram_reports.list_signal_observations") as observations,
+        ):
+            observations.return_value = [
+                {
+                    "observed_at": "2026-04-21 12:30:00",
+                    "leader_wallet": "wallet1",
+                    "leader_user_name": "Leader",
+                    "category": "TECH",
+                    "latest_status": "DRIFT_BLOCKED",
+                    "latest_reason": "buy price drift abs too high: 0.0910 > 0.0100",
+                    "latest_trade_hash": "hash1",
+                },
+                {
+                    "observed_at": "2026-04-21 12:31:00",
+                    "leader_wallet": "wallet1",
+                    "leader_user_name": "Leader",
+                    "category": "TECH",
+                    "latest_status": "DRIFT_BLOCKED",
+                    "latest_reason": "buy price drift abs too high: 0.0910 > 0.0100",
+                    "latest_trade_hash": "hash1",
+                },
+            ]
+
+            report = build_blocks_report(now=now)
+
+        self.assertIn("DRIFT_BLOCKED: obs 2 | unique 1", report)
+        self.assertIn("Leader", report)
+        self.assertIn("2/1", report)
 
 
 if __name__ == "__main__":

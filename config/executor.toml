@@ -110,6 +110,8 @@ max_leader_trade_budget_fraction = 0.25
 
 [signal_freshness]
 preferred_signal_age_sec = 30
+max_buy_signal_age_sec = 600
+max_exit_signal_age_sec = 86400
 max_recent_trades = 3
 leader_position_context_max_pages = 20
 max_price_drift_abs = 0.01

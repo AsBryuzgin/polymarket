@@ -52,6 +52,7 @@ class SignalNotionalPassthroughTests(unittest.TestCase):
             "filters": {"buy_min_price": 0.05, "buy_max_price": 0.95},
             "signal_freshness": {
                 "preferred_signal_age_sec": 30,
+                "max_buy_signal_age_sec": 10_000_000_000,
                 "max_recent_trades": 3,
                 "max_price_drift_abs": 1.0,
                 "max_price_drift_rel": 1.0,
@@ -84,6 +85,53 @@ class SignalNotionalPassthroughTests(unittest.TestCase):
         self.assertAlmostEqual(signal.leader_portfolio_value_usd, 1000.0, places=6)
         self.assertAlmostEqual(summary["selected_trade_notional_usd"], 244.2, places=6)
         self.assertAlmostEqual(summary["selected_leader_portfolio_value_usd"], 1000.0, places=6)
+
+    def test_source_blocks_stale_buy_signal(self) -> None:
+        fake_trades = [
+            {
+                "proxyWallet": "walletA",
+                "side": "BUY",
+                "asset": "tokenA",
+                "conditionId": "condA",
+                "size": 10.0,
+                "price": 0.50,
+                "timestamp": 1700000000,
+                "title": "title",
+                "slug": "slug",
+                "eventSlug": "event-slug",
+                "outcome": "YES",
+                "transactionHash": "tx-stale",
+            }
+        ]
+
+        fake_config = {
+            "risk": {"skip_if_spread_gt": 0.02, "min_order_size_usd": 1.0},
+            "filters": {"buy_min_price": 0.05, "buy_max_price": 0.95},
+            "signal_freshness": {
+                "preferred_signal_age_sec": 30,
+                "max_buy_signal_age_sec": 600,
+                "max_recent_trades": 3,
+                "max_price_drift_abs": 1.0,
+                "max_price_drift_rel": 1.0,
+            },
+            "exit": {"ignore_exit_drift": True, "exit_max_spread": 0.05},
+        }
+
+        with patch("execution.leader_signal_source.load_executor_config", return_value=fake_config), \
+             patch("execution.leader_signal_source.WalletProfilesClient") as MockClient, \
+             patch("execution.leader_signal_source.get_leader_registry", return_value={"leader_status": "ACTIVE"}), \
+             patch("execution.leader_signal_source.time.time", return_value=1700001001):
+            MockClient.return_value.get_trades.return_value = fake_trades
+
+            signal, snapshot, summary = latest_fresh_copyable_signal_from_wallet(
+                wallet="walletA",
+                leader_budget_usd=12.84,
+            )
+
+        self.assertIsNone(signal)
+        self.assertIsNone(snapshot)
+        self.assertEqual(summary["latest_status"], "TOO_OLD")
+        self.assertIn("max_signal_age_sec 600s", summary["latest_reason"])
 
     def test_process_signal_uses_notional_sizing_not_fallback(self) -> None:
         signal = LeaderSignal(

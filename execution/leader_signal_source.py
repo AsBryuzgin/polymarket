@@ -165,6 +165,13 @@ def latest_fresh_copyable_signal_from_wallet(
     exit_cfg = config.get("exit", {})
 
     preferred_signal_age_sec = int(freshness.get("preferred_signal_age_sec", 30))
+    max_buy_signal_age_sec = int(
+        freshness.get(
+            "max_buy_signal_age_sec",
+            freshness.get("max_copyable_signal_age_sec", 600),
+        )
+    )
+    max_exit_signal_age_sec = int(freshness.get("max_exit_signal_age_sec", 86400))
     max_recent_trades = int(freshness.get("max_recent_trades", 3))
     max_price_drift_abs = float(freshness.get("max_price_drift_abs", 0.01))
     max_price_drift_rel = float(freshness.get("max_price_drift_rel", 0.02))
@@ -242,6 +249,18 @@ def latest_fresh_copyable_signal_from_wallet(
             if idx == 0:
                 summary["latest_status"] = "EXIT_ONLY_BUY_BLOCKED"
                 summary["latest_reason"] = "leader is EXIT_ONLY; new buys blocked"
+            continue
+
+        max_signal_age_sec = (
+            max_buy_signal_age_sec if trade.side == "BUY" else max_exit_signal_age_sec
+        )
+        if max_signal_age_sec > 0 and age_sec > max_signal_age_sec:
+            if idx == 0:
+                summary["latest_status"] = "TOO_OLD"
+                summary["latest_reason"] = (
+                    f"{trade.side.lower()} signal age {age_sec}s above "
+                    f"max_signal_age_sec {max_signal_age_sec}s"
+                )
             continue
 
         if trade.side == "SELL" and not has_open_position:

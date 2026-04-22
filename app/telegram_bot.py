@@ -16,6 +16,7 @@ if str(ROOT) not in sys.path:
 from execution.builder_auth import load_executor_config
 from execution.telegram_reports import (
     build_activity_report,
+    build_blocks_report,
     build_help_report,
     build_leaders_report,
     build_positions_report,
@@ -28,6 +29,7 @@ KEYBOARD = {
     "keyboard": [
         [{"text": "Status"}, {"text": "Positions"}],
         [{"text": "Leaders"}, {"text": "Activity 24h"}],
+        [{"text": "Blocks 24h"}],
         [{"text": "Help"}],
     ],
     "resize_keyboard": True,
@@ -156,6 +158,8 @@ def _build_response(text: str, config: dict[str, Any]) -> str:
         return build_leaders_report()
     if normalized in {"/activity", "activity", "activity 24h", "активность"}:
         return build_activity_report()
+    if normalized in {"/blocks", "blocks", "blocks 24h", "блоки"}:
+        return build_blocks_report()
     return "Unknown command. Press Help or send /help."
 
 

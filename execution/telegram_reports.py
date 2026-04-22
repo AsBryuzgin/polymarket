@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from collections import Counter, defaultdict
 from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
@@ -82,6 +83,20 @@ def _short(value: str, left: int = 8, right: int = 6) -> str:
 
 def _leader_name(row: dict[str, Any]) -> str:
     return str(row.get("leader_user_name") or row.get("user_name") or _short(row.get("leader_wallet") or row.get("wallet") or "UNKNOWN"))
+
+
+def _unique_count(rows: list[dict[str, Any]], key: str) -> int:
+    return len({str(row.get(key) or "") for row in rows if row.get(key)})
+
+
+def _drift_abs(reason: Any) -> float | None:
+    match = re.search(r"([0-9]+(?:\.[0-9]+)?)\\s*>", str(reason or ""))
+    if not match:
+        return None
+    try:
+        return float(match.group(1))
+    except ValueError:
+        return None
 
 
 def _load_latest_alert_count(path: Path = Path("data/executor_alerts_latest.json")) -> int | None:
@@ -289,7 +304,11 @@ def build_leaders_report(
         item["unrealized_pnl_bid_usd"] += _safe_float(row.get("unrealized_pnl_bid_usd"))
         item["invested_open_usd"] += _safe_float(row.get("position_usd"))
 
-    active_wallets = {str(row.get("wallet")) for row in registry if row.get("leader_status") == "ACTIVE"}
+    active_wallets = {
+        str(row.get("wallet"))
+        for row in registry.values()
+        if row.get("leader_status") == "ACTIVE"
+    }
     for wallet in active_wallets:
         leader = registry.get(wallet, {})
         item = grouped[wallet]
@@ -339,7 +358,14 @@ def build_activity_report(*, now: datetime | None = None) -> str:
     ]
 
     status_counts = Counter(str(row.get("latest_status") or "UNKNOWN") for row in observations)
+    unique_by_status: dict[str, int] = {}
+    for status in status_counts:
+        unique_by_status[status] = _unique_count(
+            [row for row in observations if str(row.get("latest_status") or "UNKNOWN") == status],
+            "latest_trade_hash",
+        )
     selected_count = sum(1 for row in observations if row.get("selected_signal_id"))
+    selected_unique_count = _unique_count(observations, "selected_signal_id")
     by_leader: dict[str, dict[str, Any]] = defaultdict(lambda: {"observations": 0, "selected": 0, "name": "UNKNOWN", "category": "UNKNOWN"})
     for row in observations:
         wallet = str(row.get("leader_wallet") or "")
@@ -356,13 +382,18 @@ def build_activity_report(*, now: datetime | None = None) -> str:
 
     lines = [
         "Activity 24h",
-        f"observations: {len(observations)} | selected: {selected_count}",
+        (
+            f"observations: {len(observations)} | "
+            f"latest trades: {_unique_count(observations, 'latest_trade_hash')} | "
+            f"selected unique: {selected_unique_count}"
+        ),
         f"entries: {entries} | exits: {exits} | realized: {_money(realized, signed=True)}",
     ]
 
     if status_counts:
-        status_text = ", ".join(f"{status}={count}" for status, count in status_counts.most_common(5))
-        lines.append(f"statuses: {status_text}")
+        lines.append("statuses obs/unique:")
+        for status, count in status_counts.most_common(6):
+            lines.append(f"{status}: {count}/{unique_by_status.get(status, 0)}")
 
     leaders = sorted(by_leader.values(), key=lambda x: (x["selected"], x["observations"]), reverse=True)
     if leaders:
@@ -375,6 +406,90 @@ def build_activity_report(*, now: datetime | None = None) -> str:
     return "\n".join(lines)
 
 
+def build_blocks_report(*, now: datetime | None = None) -> str:
+    init_db()
+    init_signal_observation_table()
+    now = now or datetime.now(timezone.utc)
+    since = now - timedelta(hours=24)
+
+    observations = [
+        row
+        for row in list_signal_observations(limit=100000)
+        if (_safe_dt(row.get("observed_at")) or datetime.min.replace(tzinfo=timezone.utc)) >= since
+    ]
+    blocked = [
+        row
+        for row in observations
+        if row.get("latest_status") in {"POLICY_BLOCKED", "DRIFT_BLOCKED"}
+    ]
+
+    if not blocked:
+        return "Blocks 24h\nnone"
+
+    by_status: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    by_leader_status: dict[tuple[str, str, str], list[dict[str, Any]]] = defaultdict(list)
+    for row in blocked:
+        status = str(row.get("latest_status") or "UNKNOWN")
+        by_status[status].append(row)
+        by_leader_status[
+            (
+                _leader_name(row),
+                str(row.get("category") or "UNKNOWN"),
+                status,
+            )
+        ].append(row)
+
+    lines = ["Blocks 24h"]
+    for status in ("POLICY_BLOCKED", "DRIFT_BLOCKED"):
+        rows = by_status.get(status, [])
+        if not rows:
+            continue
+        lines.append(
+            f"{status}: obs {len(rows)} | unique {_unique_count(rows, 'latest_trade_hash')}"
+        )
+
+    lines.append("by leader:")
+    leader_rows = sorted(
+        by_leader_status.items(),
+        key=lambda item: (len(item[1]), _unique_count(item[1], "latest_trade_hash")),
+        reverse=True,
+    )
+    for (leader, category, status), rows in leader_rows[:8]:
+        lines.append(
+            (
+                f"{leader} | {category} | {status}: "
+                f"{len(rows)}/{_unique_count(rows, 'latest_trade_hash')}"
+            )
+        )
+
+    reason_counts = Counter(str(row.get("latest_reason") or "UNKNOWN") for row in blocked)
+    if reason_counts:
+        lines.append("top reasons:")
+        for reason, count in reason_counts.most_common(5):
+            unique = _unique_count(
+                [row for row in blocked if str(row.get("latest_reason") or "UNKNOWN") == reason],
+                "latest_trade_hash",
+            )
+            lines.append(f"{count}/{unique}: {reason[:92]}")
+
+    drift_abs_values = [
+        value
+        for value in (_drift_abs(row.get("latest_reason")) for row in by_status.get("DRIFT_BLOCKED", []))
+        if value is not None
+    ]
+    if drift_abs_values:
+        drift_abs_values.sort()
+        median = drift_abs_values[len(drift_abs_values) // 2]
+        lines.append(
+            (
+                "drift abs: "
+                f"median {median:.4f}, max {max(drift_abs_values):.4f}"
+            )
+        )
+
+    return "\n".join(lines)
+
+
 def build_help_report() -> str:
     return "\n".join(
         [
@@ -383,6 +498,7 @@ def build_help_report() -> str:
             "/positions - open positions and mark-to-market",
             "/leaders - leader PnL from bot history",
             "/activity - signal activity over the last 24h",
+            "/blocks - policy/drift blocks over the last 24h",
             "/help - this menu",
         ]
     )
