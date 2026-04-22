@@ -3,10 +3,24 @@ from __future__ import annotations
 import unittest
 
 from execution.copy_worker import LeaderSignal
-from execution.soak_runner import run_soak_cycle, summarize_soak_cycle
+from execution.soak_runner import filter_registry_rows_for_scan, run_soak_cycle, summarize_soak_cycle
 
 
 class SoakRunnerTests(unittest.TestCase):
+    def test_filter_registry_rows_skips_exit_only_without_open_positions(self) -> None:
+        rows = filter_registry_rows_for_scan(
+            registry_rows=[
+                {"wallet": "active", "leader_status": "ACTIVE"},
+                {"wallet": "exit-flat", "leader_status": "EXIT_ONLY"},
+                {"wallet": "exit-open", "leader_status": "EXIT_ONLY"},
+            ],
+            open_positions=[
+                {"leader_wallet": "exit-open", "token_id": "tokenA", "position_usd": 1.0},
+            ],
+        )
+
+        self.assertEqual([row["wallet"] for row in rows], ["active", "exit-open"])
+
     def test_soak_cycle_logs_observation_and_processes_selected_signal(self) -> None:
         logged_observations = []
         signal = LeaderSignal(

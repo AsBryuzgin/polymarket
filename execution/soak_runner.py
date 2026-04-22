@@ -13,6 +13,28 @@ SignalProcessor = Callable[[LeaderSignal], dict[str, Any]]
 ObservationLogger = Callable[..., None]
 
 
+def filter_registry_rows_for_scan(
+    *,
+    registry_rows: list[dict[str, Any]],
+    open_positions: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    open_position_wallets = {
+        str(row.get("leader_wallet") or "")
+        for row in open_positions
+        if row.get("leader_wallet")
+    }
+
+    rows: list[dict[str, Any]] = []
+    for row in registry_rows:
+        wallet = str(row.get("wallet") or "")
+        leader_status = str(row.get("leader_status") or "").upper()
+        if leader_status == "EXIT_ONLY" and wallet not in open_position_wallets:
+            continue
+        rows.append(row)
+
+    return rows
+
+
 def _safe_float(value: Any) -> float | None:
     try:
         return float(value) if value not in (None, "") else None

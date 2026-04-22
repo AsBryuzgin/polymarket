@@ -13,8 +13,8 @@ if str(ROOT) not in sys.path:
 from execution.builder_auth import load_executor_config
 from execution.order_router import resolve_execution_mode
 from execution.signal_observation_store import init_signal_observation_table
-from execution.soak_runner import run_soak_cycle, summarize_soak_cycle
-from execution.state_store import init_db, list_leader_registry
+from execution.soak_runner import filter_registry_rows_for_scan, run_soak_cycle, summarize_soak_cycle
+from execution.state_store import init_db, list_leader_registry, list_open_positions
 import execution.state_store as state_store
 
 
@@ -71,6 +71,13 @@ def main() -> None:
             registry_rows = list_leader_registry(limit=100000)
             if not registry_rows:
                 print("No leader registry rows found. Run the rebalance/lifecycle step first.")
+                return
+            registry_rows = filter_registry_rows_for_scan(
+                registry_rows=registry_rows,
+                open_positions=list_open_positions(limit=100000),
+            )
+            if not registry_rows:
+                print("No active leaders or exit-only open positions to scan.")
                 return
 
             started = time.strftime("%Y-%m-%d %H:%M:%S")
