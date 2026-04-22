@@ -1,8 +1,14 @@
 from __future__ import annotations
 
 import unittest
+import tempfile
+from contextlib import redirect_stdout
+from io import StringIO
+from pathlib import Path
+from unittest.mock import patch
 
-from app.build_live_universe_stable import apply_live_category_capacity
+import app.build_live_universe_stable as stable_universe
+from app.build_live_universe_stable import apply_live_category_capacity, load_csv
 from app.portfolio_allocation_demo import resolve_allocation_caps
 
 
@@ -56,6 +62,56 @@ class RebalanceCapacityTests(unittest.TestCase):
         )
 
         self.assertEqual(caps.max_wallet_weight, 0.20)
+
+    def test_stable_universe_refreshes_kept_incumbent_metrics(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            final_file = root / "final.csv"
+            current_file = root / "current.csv"
+            output_file = root / "live.csv"
+            report_file = root / "report.csv"
+            state_file = root / "state.json"
+            config_file = root / "rebalance.toml"
+
+            final_file.write_text(
+                "\n".join(
+                    [
+                        "user_name,wallet,category,final_wss,weight,leaderboard_pnl,leaderboard_volume",
+                        "FreshLeader,wallet1,ECONOMICS,70.0,0.10,1.0,2.0",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            current_file.write_text(
+                "\n".join(
+                    [
+                        "user_name,wallet,category,final_wss,weight,leaderboard_pnl,leaderboard_volume",
+                        "OldLeader,wallet1,ECONOMICS,60.0,0.90,1.0,2.0",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            config_file.write_text(
+                "[rebalance]\nmax_live_categories = 0\nconfirmation_cycles = 2\n",
+                encoding="utf-8",
+            )
+
+            with (
+                patch.object(stable_universe, "FINAL_FILE", final_file),
+                patch.object(stable_universe, "CURRENT_LIVE_FILE", current_file),
+                patch.object(stable_universe, "OUTPUT_LIVE_FILE", output_file),
+                patch.object(stable_universe, "REPORT_FILE", report_file),
+                patch.object(stable_universe, "STATE_FILE", state_file),
+                patch.object(stable_universe, "CONFIG_FILE", config_file),
+                redirect_stdout(StringIO()),
+            ):
+                stable_universe.main()
+
+            rows = load_csv(output_file)
+
+        self.assertEqual(rows[0]["user_name"], "FreshLeader")
+        self.assertEqual(rows[0]["final_wss"], 70.0)
+        self.assertEqual(rows[0]["weight"], 1.0)
 
 
 if __name__ == "__main__":

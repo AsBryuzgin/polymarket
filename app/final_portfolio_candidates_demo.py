@@ -13,6 +13,7 @@ OUTPUT_FILE = SHORTLIST_DIR / "final_portfolio_candidates.csv"
 CORE_QUOTA_PER_CATEGORY = 2
 EXPERIMENTAL_QUOTA_PER_CATEGORY = 1
 MIN_WSS = 60.0
+EPS = 1e-9
 
 
 def load_csv(path: Path) -> list[dict]:
@@ -68,7 +69,13 @@ def deduplicate_wallets(rows: list[dict]) -> list[dict]:
         existing_categories.add(row["category"])
         existing["all_categories"] = ", ".join(sorted(existing_categories))
 
-        if row["final_wss"] > existing["final_wss"]:
+        current_rank = int(row.get("rank") or 999999)
+        existing_rank = int(existing.get("rank") or 999999)
+        should_replace = row["final_wss"] > existing["final_wss"] + EPS
+        if abs(row["final_wss"] - existing["final_wss"]) <= EPS:
+            should_replace = current_rank < existing_rank
+
+        if should_replace:
             row_copy = row.copy()
             row_copy["all_categories"] = existing["all_categories"]
             best_by_wallet[wallet] = row_copy

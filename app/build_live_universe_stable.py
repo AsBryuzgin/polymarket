@@ -191,7 +191,7 @@ def main() -> None:
             cat_state["pending_challenger_count"] = 0
 
         elif top1_wallet == incumbent_wallet:
-            chosen = incumbent
+            chosen = top1
             decision = "KEEP"
             reason = "incumbent remains rank #1"
             cat_state["pending_challenger_wallet"] = None
