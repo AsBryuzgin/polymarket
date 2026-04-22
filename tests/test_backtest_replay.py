@@ -20,6 +20,7 @@ class BacktestReplayTests(unittest.TestCase):
                 "selected_side": "BUY",
                 "token_id": "tokenA",
                 "selected_trade_notional_usd": 20.0,
+                "selected_leader_portfolio_value_usd": 100.0,
                 "target_budget_usd": 10.0,
                 "snapshot_midpoint": 0.50,
                 "snapshot_best_bid": 0.49,
@@ -35,6 +36,7 @@ class BacktestReplayTests(unittest.TestCase):
                 "selected_side": "BUY",
                 "token_id": "tokenA",
                 "selected_trade_notional_usd": 20.0,
+                "selected_leader_portfolio_value_usd": 100.0,
                 "target_budget_usd": 10.0,
                 "snapshot_midpoint": 0.50,
                 "snapshot_best_bid": 0.49,
@@ -51,7 +53,7 @@ class BacktestReplayTests(unittest.TestCase):
         entries = [row for row in report.event_rows if row["replay_event_type"] == "ENTRY"]
         self.assertEqual(len(entries), 1)
         self.assertEqual(entries[0]["selected_signal_id"], "valid-buy")
-        self.assertEqual(entries[0]["amount_usd"], 4.0)
+        self.assertEqual(entries[0]["amount_usd"], 2.0)
         self.assertEqual(report.skipped_rows[0]["skip_reason"], "latest_status not replayable")
 
     def test_simulator_handles_partial_exit_and_realized_pnl(self) -> None:

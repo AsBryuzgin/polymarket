@@ -64,6 +64,13 @@ class SignalNotionalPassthroughTests(unittest.TestCase):
              patch("execution.leader_signal_source.fetch_market_snapshot", return_value=fake_snapshot), \
              patch("execution.leader_signal_source.get_leader_registry", return_value={"leader_status": "ACTIVE"}):
             MockClient.return_value.get_trades.return_value = fake_trades
+            MockClient.return_value.paginate_current_positions.return_value = [
+                {
+                    "asset": "tokenA",
+                    "size": 800.0,
+                    "currentValue": 1000.0,
+                }
+            ]
 
             signal, snapshot, summary = latest_fresh_copyable_signal_from_wallet(
                 wallet="walletA",
@@ -74,7 +81,9 @@ class SignalNotionalPassthroughTests(unittest.TestCase):
         self.assertEqual(signal.leader_trade_size, 800.0)
         self.assertEqual(signal.leader_trade_price, 0.30525)
         self.assertAlmostEqual(signal.leader_trade_notional_usd, 244.2, places=6)
+        self.assertAlmostEqual(signal.leader_portfolio_value_usd, 1000.0, places=6)
         self.assertAlmostEqual(summary["selected_trade_notional_usd"], 244.2, places=6)
+        self.assertAlmostEqual(summary["selected_leader_portfolio_value_usd"], 1000.0, places=6)
 
     def test_process_signal_uses_notional_sizing_not_fallback(self) -> None:
         signal = LeaderSignal(
@@ -86,6 +95,7 @@ class SignalNotionalPassthroughTests(unittest.TestCase):
             leader_trade_size=800.0,
             leader_trade_price=0.30525,
             leader_trade_notional_usd=244.2,
+            leader_portfolio_value_usd=1000.0,
         )
 
         fake_config = {

@@ -35,11 +35,73 @@ def _safe_float(value: Any) -> float:
         return 0.0
 
 
+def _positive_float_or_none(value: Any) -> float | None:
+    parsed = _safe_float(value)
+    return parsed if parsed > 0 else None
+
+
 def _safe_int(value: Any) -> int:
     try:
         return int(value) if value is not None else 0
     except Exception:
         return 0
+
+
+def _position_asset(item: dict[str, Any]) -> str:
+    for key in ("asset", "assetId", "token_id", "tokenId"):
+        value = item.get(key)
+        if value:
+            return str(value)
+    return ""
+
+
+def _leader_position_context(
+    *,
+    client: WalletProfilesClient,
+    wallet: str,
+    token_id: str,
+    side: str,
+    trade_size: float,
+    max_pages: int,
+) -> dict[str, Any]:
+    try:
+        positions = client.paginate_current_positions(
+            user=wallet,
+            page_size=100,
+            max_pages=max_pages,
+        )
+    except Exception as e:
+        return {
+            "leader_portfolio_value_usd": None,
+            "leader_token_position_size": None,
+            "leader_token_position_value_usd": None,
+            "leader_exit_fraction": None,
+            "leader_position_context_error": str(e),
+        }
+
+    portfolio_value = 0.0
+    token_position_size = 0.0
+    token_position_value = 0.0
+
+    for item in positions:
+        portfolio_value += _safe_float(item.get("currentValue"))
+        if _position_asset(item) == token_id:
+            token_position_size += _safe_float(item.get("size"))
+            token_position_value += _safe_float(item.get("currentValue"))
+
+    exit_fraction = None
+    if side == "SELL" and trade_size > 0:
+        pre_trade_size = token_position_size + trade_size
+        if pre_trade_size > 0:
+            exit_fraction = min(1.0, trade_size / pre_trade_size)
+
+    return {
+        "leader_portfolio_value_usd": _positive_float_or_none(portfolio_value),
+        "leader_token_position_size": _positive_float_or_none(token_position_size),
+        "leader_token_position_value_usd": _positive_float_or_none(token_position_value),
+        "leader_exit_fraction": exit_fraction,
+        "leader_position_context_error": None,
+    }
 
 
 def normalize_trade(item: dict[str, Any]) -> RawLeaderTrade:
@@ -106,6 +168,7 @@ def latest_fresh_copyable_signal_from_wallet(
     max_recent_trades = int(freshness.get("max_recent_trades", 3))
     max_price_drift_abs = float(freshness.get("max_price_drift_abs", 0.01))
     max_price_drift_rel = float(freshness.get("max_price_drift_rel", 0.02))
+    max_position_pages = int(freshness.get("leader_position_context_max_pages", 20))
 
     ignore_exit_drift = bool(exit_cfg.get("ignore_exit_drift", True))
     exit_max_spread = float(exit_cfg.get("exit_max_spread", 0.05))
@@ -140,6 +203,11 @@ def latest_fresh_copyable_signal_from_wallet(
         "selected_reason": None,
         "selected_has_open_position": None,
         "selected_trade_notional_usd": None,
+        "selected_leader_portfolio_value_usd": None,
+        "selected_leader_token_position_size": None,
+        "selected_leader_token_position_value_usd": None,
+        "selected_leader_exit_fraction": None,
+        "selected_leader_position_context_error": None,
     }
 
     for idx, trade in enumerate(normalized):
@@ -262,6 +330,27 @@ def latest_fresh_copyable_signal_from_wallet(
         summary["selected_reason"] = "copyable"
         summary["selected_has_open_position"] = has_open_position
         summary["selected_trade_notional_usd"] = trade_notional_usd
+        position_context = _leader_position_context(
+            client=client,
+            wallet=wallet,
+            token_id=trade.asset,
+            side=trade.side,
+            trade_size=trade.size,
+            max_pages=max_position_pages,
+        )
+        summary["selected_leader_portfolio_value_usd"] = position_context[
+            "leader_portfolio_value_usd"
+        ]
+        summary["selected_leader_token_position_size"] = position_context[
+            "leader_token_position_size"
+        ]
+        summary["selected_leader_token_position_value_usd"] = position_context[
+            "leader_token_position_value_usd"
+        ]
+        summary["selected_leader_exit_fraction"] = position_context["leader_exit_fraction"]
+        summary["selected_leader_position_context_error"] = position_context[
+            "leader_position_context_error"
+        ]
 
         signal = LeaderSignal(
             signal_id=trade.transaction_hash,
@@ -272,6 +361,10 @@ def latest_fresh_copyable_signal_from_wallet(
             leader_trade_size=trade.size,
             leader_trade_price=trade.price,
             leader_trade_notional_usd=trade_notional_usd,
+            leader_portfolio_value_usd=position_context["leader_portfolio_value_usd"],
+            leader_token_position_size=position_context["leader_token_position_size"],
+            leader_token_position_value_usd=position_context["leader_token_position_value_usd"],
+            leader_exit_fraction=position_context["leader_exit_fraction"],
         )
 
         return signal, snapshot, summary

@@ -58,7 +58,7 @@ class ExecutionRegressionTests(unittest.TestCase):
         self.assertEqual(float(pos["avg_entry_price"]), 0.55)
         self.assertEqual(pos["status"], "OPEN")
 
-    def test_buy_sizing_uses_leader_trade_notional(self) -> None:
+    def test_buy_sizing_uses_leader_trade_budget_fraction(self) -> None:
         signal = LeaderSignal(
             signal_id="sig-buy-1",
             leader_wallet="wallet2",
@@ -66,11 +66,12 @@ class ExecutionRegressionTests(unittest.TestCase):
             side="BUY",
             leader_budget_usd=50.0,
             leader_trade_notional_usd=15.0,
+            leader_portfolio_value_usd=250.0,
         )
 
         config = {
             "risk": {
-                "min_order_size_usd": 1.0,
+                "min_order_size_usd": 0.01,
                 "max_per_trade_usd": 100.0,
                 "skip_if_spread_gt": 0.02,
             },
@@ -114,6 +115,7 @@ class ExecutionRegressionTests(unittest.TestCase):
             side="BUY",
             leader_budget_usd=50.0,
             leader_trade_notional_usd=10.0,
+            leader_portfolio_value_usd=100.0,
         )
 
         config = {
@@ -161,6 +163,7 @@ class ExecutionRegressionTests(unittest.TestCase):
             leader_budget_usd=50.0,
             leader_trade_price=0.50,
             leader_trade_notional_usd=10.0,
+            leader_portfolio_value_usd=100.0,
         )
 
         config = {
@@ -213,6 +216,7 @@ class ExecutionRegressionTests(unittest.TestCase):
             leader_budget_usd=50.0,
             leader_trade_price=0.50,
             leader_trade_notional_usd=10.0,
+            leader_portfolio_value_usd=100.0,
         )
 
         config = {
@@ -280,6 +284,7 @@ class ExecutionRegressionTests(unittest.TestCase):
             leader_budget_usd=50.0,
             leader_trade_price=0.50,
             leader_trade_notional_usd=10.0,
+            leader_portfolio_value_usd=100.0,
         )
 
         config = {
@@ -334,6 +339,7 @@ class ExecutionRegressionTests(unittest.TestCase):
             leader_budget_usd=50.0,
             leader_trade_price=0.50,
             leader_trade_notional_usd=10.0,
+            leader_portfolio_value_usd=400.0,
         )
 
         config = {
@@ -429,6 +435,7 @@ class ExecutionRegressionTests(unittest.TestCase):
             leader_budget_usd=50.0,
             leader_trade_price=0.50,
             leader_trade_notional_usd=10.0,
+            leader_portfolio_value_usd=100.0,
         )
 
         config = {
@@ -472,7 +479,8 @@ class ExecutionRegressionTests(unittest.TestCase):
             token_id="tokenC",
             side="SELL",
             leader_budget_usd=50.0,
-            leader_trade_notional_usd=5.0,  # 20% => 1.0 sell
+            leader_trade_notional_usd=5.0,
+            leader_exit_fraction=0.5,
         )
 
         config = {

@@ -50,6 +50,19 @@ def _log_observation(
         token_id=signal.token_id if signal else None,
         selected_trade_age_sec=_safe_float(summary.get("selected_trade_age_sec")),
         selected_trade_notional_usd=_safe_float(summary.get("selected_trade_notional_usd")),
+        selected_leader_portfolio_value_usd=_safe_float(
+            summary.get("selected_leader_portfolio_value_usd")
+        ),
+        selected_leader_token_position_size=_safe_float(
+            summary.get("selected_leader_token_position_size")
+        ),
+        selected_leader_token_position_value_usd=_safe_float(
+            summary.get("selected_leader_token_position_value_usd")
+        ),
+        selected_leader_exit_fraction=_safe_float(summary.get("selected_leader_exit_fraction")),
+        selected_leader_position_context_error=summary.get(
+            "selected_leader_position_context_error"
+        ),
         snapshot_midpoint=_snapshot_float(snapshot, "midpoint"),
         snapshot_best_bid=_snapshot_float(snapshot, "best_bid"),
         snapshot_best_ask=_snapshot_float(snapshot, "best_ask"),
@@ -94,9 +107,14 @@ def run_soak_cycle(
                 "latest_trade_side": None,
                 "latest_trade_age_sec": None,
                 "latest_trade_hash": None,
-                "selected_trade_age_sec": None,
-                "selected_trade_notional_usd": None,
-            }
+                    "selected_trade_age_sec": None,
+                    "selected_trade_notional_usd": None,
+                    "selected_leader_portfolio_value_usd": None,
+                    "selected_leader_token_position_size": None,
+                    "selected_leader_token_position_value_usd": None,
+                    "selected_leader_exit_fraction": None,
+                    "selected_leader_position_context_error": None,
+                }
             _log_observation(
                 row=registry_row,
                 signal=None,
@@ -157,6 +175,12 @@ def run_soak_cycle(
                 "selected_side": signal.side,
                 "selected_trade_notional_usd": _safe_float(
                     summary.get("selected_trade_notional_usd")
+                ),
+                "selected_leader_portfolio_value_usd": _safe_float(
+                    summary.get("selected_leader_portfolio_value_usd")
+                ),
+                "selected_leader_exit_fraction": _safe_float(
+                    summary.get("selected_leader_exit_fraction")
                 ),
                 "process_status": process_status,
                 "process_reason": process_reason,

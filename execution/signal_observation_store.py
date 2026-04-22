@@ -9,6 +9,13 @@ def get_connection():
     return state_store.get_connection()
 
 
+def _ensure_column(cur, table: str, column: str, definition: str) -> None:
+    cur.execute(f"PRAGMA table_info({table})")
+    columns = {row[1] for row in cur.fetchall()}
+    if column not in columns:
+        cur.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+
+
 def init_signal_observation_table() -> None:
     conn = get_connection()
     cur = conn.cursor()
@@ -33,12 +40,48 @@ def init_signal_observation_table() -> None:
             token_id TEXT,
             selected_trade_age_sec REAL,
             selected_trade_notional_usd REAL,
+            selected_leader_portfolio_value_usd REAL,
+            selected_leader_token_position_size REAL,
+            selected_leader_token_position_value_usd REAL,
+            selected_leader_exit_fraction REAL,
+            selected_leader_position_context_error TEXT,
             snapshot_midpoint REAL,
             snapshot_best_bid REAL,
             snapshot_best_ask REAL,
             snapshot_spread REAL
         )
         """
+    )
+
+    _ensure_column(
+        cur,
+        "signal_observations",
+        "selected_leader_portfolio_value_usd",
+        "REAL",
+    )
+    _ensure_column(
+        cur,
+        "signal_observations",
+        "selected_leader_token_position_size",
+        "REAL",
+    )
+    _ensure_column(
+        cur,
+        "signal_observations",
+        "selected_leader_token_position_value_usd",
+        "REAL",
+    )
+    _ensure_column(
+        cur,
+        "signal_observations",
+        "selected_leader_exit_fraction",
+        "REAL",
+    )
+    _ensure_column(
+        cur,
+        "signal_observations",
+        "selected_leader_position_context_error",
+        "TEXT",
     )
 
     conn.commit()
@@ -62,10 +105,15 @@ def log_signal_observation(
     token_id: str | None,
     selected_trade_age_sec: float | None,
     selected_trade_notional_usd: float | None,
-    snapshot_midpoint: float | None,
-    snapshot_best_bid: float | None,
-    snapshot_best_ask: float | None,
-    snapshot_spread: float | None,
+    selected_leader_portfolio_value_usd: float | None = None,
+    selected_leader_token_position_size: float | None = None,
+    selected_leader_token_position_value_usd: float | None = None,
+    selected_leader_exit_fraction: float | None = None,
+    selected_leader_position_context_error: str | None = None,
+    snapshot_midpoint: float | None = None,
+    snapshot_best_bid: float | None = None,
+    snapshot_best_ask: float | None = None,
+    snapshot_spread: float | None = None,
 ) -> None:
     conn = get_connection()
     cur = conn.cursor()
@@ -88,11 +136,16 @@ def log_signal_observation(
             token_id,
             selected_trade_age_sec,
             selected_trade_notional_usd,
+            selected_leader_portfolio_value_usd,
+            selected_leader_token_position_size,
+            selected_leader_token_position_value_usd,
+            selected_leader_exit_fraction,
+            selected_leader_position_context_error,
             snapshot_midpoint,
             snapshot_best_bid,
             snapshot_best_ask,
             snapshot_spread
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             leader_wallet,
@@ -110,6 +163,11 @@ def log_signal_observation(
             token_id,
             selected_trade_age_sec,
             selected_trade_notional_usd,
+            selected_leader_portfolio_value_usd,
+            selected_leader_token_position_size,
+            selected_leader_token_position_value_usd,
+            selected_leader_exit_fraction,
+            selected_leader_position_context_error,
             snapshot_midpoint,
             snapshot_best_bid,
             snapshot_best_ask,

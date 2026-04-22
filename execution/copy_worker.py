@@ -24,6 +24,7 @@ from execution.state_store import (
     reduce_or_close_position,
     get_leader_registry,
     log_trade_event,
+    list_open_positions,
 )
 from risk.guards import build_runtime_risk_limits, evaluate_entry_risk
 from risk.sizing import compute_signal_copy_amount
@@ -39,6 +40,10 @@ class LeaderSignal:
     leader_trade_size: float | None = None
     leader_trade_price: float | None = None
     leader_trade_notional_usd: float | None = None
+    leader_portfolio_value_usd: float | None = None
+    leader_token_position_size: float | None = None
+    leader_token_position_value_usd: float | None = None
+    leader_exit_fraction: float | None = None
 
 
 def _parse_opened_at_to_minutes(opened_at: str | None) -> float | None:
@@ -172,6 +177,42 @@ def _positive_float_or_none(value) -> float | None:
     return parsed if parsed > 0 else None
 
 
+def _safe_bool(value, default: bool = False) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"1", "true", "yes", "on"}:
+            return True
+        if normalized in {"0", "false", "no", "off"}:
+            return False
+    return bool(value)
+
+
+def _open_wallet_exposure_usd(leader_wallet: str) -> float:
+    total = 0.0
+    for row in list_open_positions(limit=100000):
+        if str(row.get("leader_wallet") or "") != leader_wallet:
+            continue
+        try:
+            total += float(row.get("position_usd") or 0.0)
+        except (TypeError, ValueError):
+            continue
+    return round(total, 8)
+
+
+def _snapshot_min_order_size_usd(snapshot: dict, configured_min_order_usd: float) -> float:
+    snapshot_min_order = _positive_float_or_none(snapshot.get("min_order_size"))
+    if snapshot_min_order is None:
+        return configured_min_order_usd
+    price_quote = _positive_float_or_none(snapshot.get("price_quote"))
+    if price_quote is None:
+        return configured_min_order_usd
+    return max(configured_min_order_usd, snapshot_min_order * price_quote)
+
+
 def _sizing_max_per_trade_for_exit(config: dict, *, position_usd: float) -> float:
     risk = config.get("risk", {})
     explicit = _positive_float_or_none(risk.get("max_per_trade_usd"))
@@ -290,8 +331,20 @@ def process_signal(signal: LeaderSignal) -> dict:
         }
 
     min_order_size_usd = float(risk.get("min_order_size_usd", 1.0))
+    min_order_size_usd = _snapshot_min_order_size_usd(snapshot, min_order_size_usd)
     leader_trade_notional_copy_fraction = float(
         sizing.get("leader_trade_notional_copy_fraction", 0.20)
+    )
+    max_leader_trade_budget_fraction = _positive_float_or_none(
+        sizing.get("max_leader_trade_budget_fraction")
+    )
+    allow_notional_fallback = _safe_bool(
+        sizing.get("allow_notional_fallback"),
+        False,
+    )
+    allow_budget_fallback = _safe_bool(
+        sizing.get("allow_budget_fallback"),
+        False,
     )
 
     if signal.side.upper() == "SELL":
@@ -399,11 +452,16 @@ def process_signal(signal: LeaderSignal) -> dict:
             position_usd=position_usd,
         )
         size_decision = compute_signal_copy_amount(
-            leader_budget_usd=signal.leader_budget_usd,
+            leader_budget_usd=position_usd,
+            remaining_leader_budget_usd=position_usd,
             leader_trade_notional_usd=signal.leader_trade_notional_usd,
             min_order_size_usd=min_order_size_usd,
             max_per_trade_usd=max_per_trade_usd,
             leader_trade_notional_copy_fraction=leader_trade_notional_copy_fraction,
+            side=signal.side,
+            leader_exit_fraction=signal.leader_exit_fraction,
+            allow_notional_fallback=allow_notional_fallback,
+            allow_budget_fallback=allow_budget_fallback,
         )
         if not size_decision.allowed:
             record_signal(
@@ -588,12 +646,21 @@ def process_signal(signal: LeaderSignal) -> dict:
             "risk": asdict(runtime_risk_limits),
         }
 
+    wallet_exposure_usd = _open_wallet_exposure_usd(signal.leader_wallet)
+    remaining_leader_budget_usd = max(signal.leader_budget_usd - wallet_exposure_usd, 0.0)
+
     size_decision = compute_signal_copy_amount(
         leader_budget_usd=signal.leader_budget_usd,
+        remaining_leader_budget_usd=remaining_leader_budget_usd,
         leader_trade_notional_usd=signal.leader_trade_notional_usd,
         min_order_size_usd=min_order_size_usd,
         max_per_trade_usd=runtime_risk_limits.max_per_trade_usd,
         leader_trade_notional_copy_fraction=leader_trade_notional_copy_fraction,
+        side=signal.side,
+        leader_portfolio_value_usd=signal.leader_portfolio_value_usd,
+        max_leader_trade_budget_fraction=max_leader_trade_budget_fraction,
+        allow_notional_fallback=allow_notional_fallback,
+        allow_budget_fallback=allow_budget_fallback,
     )
 
     if not size_decision.allowed:

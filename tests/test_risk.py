@@ -158,13 +158,15 @@ class RiskGuardTests(unittest.TestCase):
             token_id="tokenB",
             side="BUY",
             leader_budget_usd=2.0,
-            leader_trade_notional_usd=5.0,
+            leader_trade_notional_usd=10.0,
+            leader_portfolio_value_usd=10.0,
         )
 
         config = {
             "risk": {
-                "min_order_size_usd": 1.0,
+                "min_order_size_usd": 0.01,
                 "max_per_trade_usd": 5.0,
+                "max_wallet_exposure_usd": 1.75,
                 "skip_if_spread_gt": 0.02,
                 "enforce_leader_budget_cap": True,
             },
@@ -195,7 +197,7 @@ class RiskGuardTests(unittest.TestCase):
 
         preview.assert_not_called()
         self.assertEqual(result["status"], "SKIPPED_RISK")
-        self.assertIn("above leader budget", result["reason"])
+        self.assertIn("max_wallet_exposure", result["reason"])
 
         pos_a = state_store.get_open_position("wallet3", "tokenA")
         self.assertIsNotNone(pos_a)
@@ -204,26 +206,85 @@ class RiskGuardTests(unittest.TestCase):
 
         self.assertTrue(state_store.has_signal("sig-buy-risk-block"))
 
-    def test_signal_sizing_prefers_leader_notional(self) -> None:
+    def test_signal_sizing_uses_leader_trade_budget_fraction(self) -> None:
+        decision = compute_signal_copy_amount(
+            leader_budget_usd=12.0,
+            remaining_leader_budget_usd=12.0,
+            leader_trade_notional_usd=50.0,
+            leader_trade_notional_copy_fraction=0.20,
+            leader_portfolio_value_usd=1000.0,
+            min_order_size_usd=0.01,
+            max_per_trade_usd=10.0,
+        )
+
+        self.assertTrue(decision.allowed)
+        self.assertEqual(decision.amount_usd, 0.6)
+        self.assertEqual(decision.source, "leader_trade_budget_fraction")
+
+    def test_signal_sizing_uses_remaining_leader_budget(self) -> None:
+        decision = compute_signal_copy_amount(
+            leader_budget_usd=12.0,
+            remaining_leader_budget_usd=9.0,
+            leader_trade_notional_usd=50.0,
+            leader_trade_notional_copy_fraction=0.20,
+            leader_portfolio_value_usd=1000.0,
+            min_order_size_usd=0.01,
+            max_per_trade_usd=10.0,
+        )
+
+        self.assertTrue(decision.allowed)
+        self.assertEqual(decision.amount_usd, 0.45)
+        self.assertEqual(decision.source, "leader_trade_budget_fraction")
+
+    def test_signal_sizing_does_not_round_up_to_minimum(self) -> None:
+        decision = compute_signal_copy_amount(
+            leader_budget_usd=12.0,
+            remaining_leader_budget_usd=12.0,
+            leader_trade_notional_usd=50.0,
+            leader_trade_notional_copy_fraction=0.20,
+            leader_portfolio_value_usd=1000.0,
+            min_order_size_usd=1.0,
+            max_per_trade_usd=10.0,
+        )
+
+        self.assertFalse(decision.allowed)
+        self.assertEqual(decision.source, "leader_trade_budget_fraction")
+        self.assertIn("below min order", decision.reason)
+
+    def test_signal_sizing_blocks_without_leader_portfolio_by_default(self) -> None:
+        decision = compute_signal_copy_amount(
+            leader_budget_usd=12.0,
+            leader_trade_notional_usd=50.0,
+            leader_trade_notional_copy_fraction=0.20,
+            min_order_size_usd=0.01,
+            max_per_trade_usd=10.0,
+        )
+
+        self.assertFalse(decision.allowed)
+        self.assertIn("portfolio value unavailable", decision.reason)
+
+    def test_signal_sizing_legacy_notional_fallback_is_opt_in(self) -> None:
         decision = compute_signal_copy_amount(
             leader_budget_usd=20.0,
             leader_trade_notional_usd=15.0,
             leader_trade_notional_copy_fraction=0.20,
             min_order_size_usd=1.0,
             max_per_trade_usd=10.0,
+            allow_notional_fallback=True,
         )
 
         self.assertTrue(decision.allowed)
         self.assertEqual(decision.amount_usd, 3.0)
         self.assertEqual(decision.source, "leader_trade_notional")
 
-    def test_signal_sizing_falls_back_to_budget(self) -> None:
+    def test_signal_sizing_budget_fallback_is_opt_in(self) -> None:
         decision = compute_signal_copy_amount(
             leader_budget_usd=3.5,
             leader_trade_notional_usd=None,
             leader_trade_notional_copy_fraction=0.20,
             min_order_size_usd=1.0,
             max_per_trade_usd=10.0,
+            allow_budget_fallback=True,
         )
 
         self.assertTrue(decision.allowed)
@@ -235,6 +296,7 @@ class RiskGuardTests(unittest.TestCase):
             leader_budget_usd=20.0,
             leader_trade_notional_usd=100.0,
             leader_trade_notional_copy_fraction=0.20,
+            leader_portfolio_value_usd=1000.0,
             min_order_size_usd=2.0,
             max_per_trade_usd=1.0,
         )

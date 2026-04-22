@@ -18,7 +18,7 @@ total_capital_usd = 0.0
 
 [risk]
 max_per_trade_usd = 2.0
-min_order_size_usd = 1.0
+min_order_size_usd = 0.01
 slippage_tolerance = 0.02
 skip_if_spread_gt = 0.02
 skip_if_minutes_to_resolve_lt = 30
@@ -101,9 +101,13 @@ max_experimental_weight = 0.08
 
 [sizing]
 leader_trade_notional_copy_fraction = 0.20
+allow_notional_fallback = false
+allow_budget_fallback = false
+max_leader_trade_budget_fraction = 0.25
 
 [signal_freshness]
 preferred_signal_age_sec = 30
 max_recent_trades = 3
+leader_position_context_max_pages = 20
 max_price_drift_abs = 0.01
 max_price_drift_rel = 0.02

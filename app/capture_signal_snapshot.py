@@ -72,6 +72,19 @@ def capture_once(verbose: bool = True) -> list[dict]:
             token_id=selected_token_id,
             selected_trade_age_sec=_safe_float(summary.get("selected_trade_age_sec")),
             selected_trade_notional_usd=_safe_float(summary.get("selected_trade_notional_usd")),
+            selected_leader_portfolio_value_usd=_safe_float(
+                summary.get("selected_leader_portfolio_value_usd")
+            ),
+            selected_leader_token_position_size=_safe_float(
+                summary.get("selected_leader_token_position_size")
+            ),
+            selected_leader_token_position_value_usd=_safe_float(
+                summary.get("selected_leader_token_position_value_usd")
+            ),
+            selected_leader_exit_fraction=_safe_float(summary.get("selected_leader_exit_fraction")),
+            selected_leader_position_context_error=summary.get(
+                "selected_leader_position_context_error"
+            ),
             snapshot_midpoint=snapshot_midpoint,
             snapshot_best_bid=snapshot_best_bid,
             snapshot_best_ask=snapshot_best_ask,
@@ -90,6 +103,12 @@ def capture_once(verbose: bool = True) -> list[dict]:
                 "selected_side": selected_side,
                 "token_id": selected_token_id,
                 "selected_trade_notional_usd": _safe_float(summary.get("selected_trade_notional_usd")),
+                "selected_leader_portfolio_value_usd": _safe_float(
+                    summary.get("selected_leader_portfolio_value_usd")
+                ),
+                "selected_leader_exit_fraction": _safe_float(
+                    summary.get("selected_leader_exit_fraction")
+                ),
                 "snapshot_spread": snapshot_spread,
             }
         )
