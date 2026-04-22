@@ -12,8 +12,8 @@ OUTPUT_FILE = Path("data/shortlists/final_portfolio_allocation.csv")
 REBALANCE_CONFIG = Path("config/rebalance.toml")
 EXECUTOR_CONFIG = Path("config/executor.toml")
 
-DEFAULT_MAX_WALLET_WEIGHT = 0.12
-DEFAULT_MAX_CATEGORY_WEIGHT = 0.25
+DEFAULT_MAX_WALLET_WEIGHT = 1.0
+DEFAULT_MAX_CATEGORY_WEIGHT = 1.0
 DEFAULT_MAX_EXPERIMENTAL_WEIGHT = 0.08
 EXPERIMENTAL_CATEGORIES = {"MENTIONS"}
 
@@ -52,18 +52,14 @@ def resolve_allocation_caps(
     executor_config = executor_config if executor_config is not None else load_toml(EXECUTOR_CONFIG)
 
     portfolio_cfg = executor_config.get("portfolio", {})
-    rebalance_cfg = rebalance_config.get("rebalance", {})
-    max_live_categories = int(rebalance_cfg.get("max_live_categories", 0) or 0)
-
-    if max_live_categories > 0:
-        max_wallet_weight = round(1.0 / max_live_categories, 8)
-        wallet_cap_source = f"auto_from_max_live_categories={max_live_categories}"
-    else:
-        max_wallet_weight = _positive_float(
-            portfolio_cfg.get("max_wallet_weight"),
-            DEFAULT_MAX_WALLET_WEIGHT,
-        )
-        wallet_cap_source = "executor.portfolio.max_wallet_weight"
+    # max_live_categories controls how many categories reach the live universe.
+    # It must not become a synthetic per-leader cap: a high-WSS leader can
+    # legitimately receive more than 1/N of the live book.
+    max_wallet_weight = _positive_float(
+        portfolio_cfg.get("max_wallet_weight"),
+        DEFAULT_MAX_WALLET_WEIGHT,
+    )
+    wallet_cap_source = "executor.portfolio.max_wallet_weight"
 
     return AllocationCaps(
         max_wallet_weight=max_wallet_weight,

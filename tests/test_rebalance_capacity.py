@@ -46,14 +46,14 @@ class RebalanceCapacityTests(unittest.TestCase):
         self.assertEqual(report_by_category["SPORTS"]["live_included"], "NO")
         self.assertIn("excluded", report_by_category["SPORTS"]["live_capacity_reason"])
 
-    def test_allocation_wallet_cap_tracks_live_category_capacity(self) -> None:
+    def test_allocation_wallet_cap_does_not_track_live_category_capacity(self) -> None:
         caps = resolve_allocation_caps(
             rebalance_config={"rebalance": {"max_live_categories": 8}},
-            executor_config={"portfolio": {"max_wallet_weight": 0.25}},
+            executor_config={"portfolio": {"max_wallet_weight": 1.0}},
         )
 
-        self.assertEqual(caps.max_wallet_weight, 0.125)
-        self.assertEqual(caps.wallet_cap_source, "auto_from_max_live_categories=8")
+        self.assertEqual(caps.max_wallet_weight, 1.0)
+        self.assertEqual(caps.wallet_cap_source, "executor.portfolio.max_wallet_weight")
 
     def test_allocation_wallet_cap_falls_back_to_config_without_live_capacity(self) -> None:
         caps = resolve_allocation_caps(

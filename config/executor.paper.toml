@@ -105,8 +105,8 @@ exit_max_spread_rel = 0.12
 exit_max_spread_hard = 0.08
 
 [portfolio]
-max_wallet_weight = 0.25
-max_category_weight = 0.25
+max_wallet_weight = 1.0
+max_category_weight = 1.0
 max_experimental_weight = 0.08
 
 [sizing]
