@@ -71,6 +71,7 @@ def main() -> None:
     if max_leader_trade_budget_fraction is not None:
         max_leader_trade_budget_fraction = float(max_leader_trade_budget_fraction)
     allow_notional_fallback = bool(sizing.get("allow_notional_fallback", False))
+    round_up_to_min_order = bool(sizing.get("round_up_to_min_order", False))
 
     observations = list_signal_observations(limit=100000)
     if not observations:
@@ -83,6 +84,7 @@ def main() -> None:
         min_order_size_usd=min_order_size_usd,
         max_per_trade_usd=max_per_trade_usd,
         max_leader_trade_budget_fraction=max_leader_trade_budget_fraction,
+        round_up_to_min_order=round_up_to_min_order,
         allow_notional_fallback=allow_notional_fallback,
     )
     replay_events = report.event_rows

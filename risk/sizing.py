@@ -32,6 +32,7 @@ def compute_signal_copy_amount(
     leader_portfolio_value_usd: float | None = None,
     leader_exit_fraction: float | None = None,
     max_leader_trade_budget_fraction: float | None = None,
+    round_up_to_min_order: bool = False,
     allow_notional_fallback: bool = False,
     allow_budget_fallback: bool = False,
     precision: int = 2,
@@ -62,6 +63,7 @@ def compute_signal_copy_amount(
         "leader_portfolio_value_usd": portfolio_value,
         "leader_exit_fraction": exit_fraction,
         "max_leader_trade_budget_fraction": max_budget_fraction,
+        "round_up_to_min_order": bool(round_up_to_min_order),
         "allow_notional_fallback": bool(allow_notional_fallback),
         "allow_budget_fallback": bool(allow_budget_fallback),
         "min_order_size_usd": min_order,
@@ -136,6 +138,23 @@ def compute_signal_copy_amount(
     }
 
     if amount < min_order:
+        if round_up_to_min_order:
+            amount = min_order
+            details = {
+                **details,
+                "pre_min_order_round_amount_usd": details["capped_amount_usd"],
+                "capped_amount_usd": amount,
+                "min_order_round_up_applied": True,
+            }
+            rounded = round(amount, precision)
+            return CopySizeDecision(
+                True,
+                rounded,
+                source,
+                "rounded up to min_order_size_usd",
+                {**details, "rounded_amount_usd": rounded},
+            )
+
         return CopySizeDecision(
             False,
             0.0,

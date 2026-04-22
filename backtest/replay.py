@@ -42,6 +42,7 @@ def build_fills_from_signal_observations(
     min_order_size_usd: float,
     max_per_trade_usd: float,
     max_leader_trade_budget_fraction: float | None = None,
+    round_up_to_min_order: bool = False,
     allow_notional_fallback: bool = False,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     fill_rows: list[dict[str, Any]] = []
@@ -103,6 +104,7 @@ def build_fills_from_signal_observations(
             ),
             leader_exit_fraction=safe_float(obs.get("selected_leader_exit_fraction")),
             max_leader_trade_budget_fraction=max_leader_trade_budget_fraction,
+            round_up_to_min_order=round_up_to_min_order,
             allow_notional_fallback=allow_notional_fallback,
             precision=6,
         )
@@ -175,6 +177,7 @@ def replay_signal_observations(
     min_order_size_usd: float,
     max_per_trade_usd: float,
     max_leader_trade_budget_fraction: float | None = None,
+    round_up_to_min_order: bool = False,
     allow_notional_fallback: bool = False,
 ) -> SignalObservationReplayReport:
     fill_rows, skipped_rows = build_fills_from_signal_observations(
@@ -183,6 +186,7 @@ def replay_signal_observations(
         min_order_size_usd=min_order_size_usd,
         max_per_trade_usd=max_per_trade_usd,
         max_leader_trade_budget_fraction=max_leader_trade_budget_fraction,
+        round_up_to_min_order=round_up_to_min_order,
         allow_notional_fallback=allow_notional_fallback,
     )
     simulation = simulate_position_fills(fill_rows)

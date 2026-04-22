@@ -101,6 +101,7 @@ max_experimental_weight = 0.08
 
 [sizing]
 leader_trade_notional_copy_fraction = 0.20
+round_up_to_min_order = true
 allow_notional_fallback = false
 allow_budget_fallback = false
 max_leader_trade_budget_fraction = 0.25

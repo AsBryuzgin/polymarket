@@ -251,6 +251,39 @@ class RiskGuardTests(unittest.TestCase):
         self.assertEqual(decision.source, "leader_trade_budget_fraction")
         self.assertIn("below min_order_size_usd", decision.reason)
 
+    def test_signal_sizing_can_round_up_to_market_minimum(self) -> None:
+        decision = compute_signal_copy_amount(
+            leader_budget_usd=12.0,
+            remaining_leader_budget_usd=12.0,
+            leader_trade_notional_usd=50.0,
+            leader_trade_notional_copy_fraction=0.20,
+            leader_portfolio_value_usd=1000.0,
+            min_order_size_usd=1.85,
+            max_per_trade_usd=10.0,
+            round_up_to_min_order=True,
+        )
+
+        self.assertTrue(decision.allowed)
+        self.assertEqual(decision.amount_usd, 1.85)
+        self.assertEqual(decision.reason, "rounded up to min_order_size_usd")
+        self.assertTrue(decision.details["min_order_round_up_applied"])
+        self.assertAlmostEqual(decision.details["pre_min_order_round_amount_usd"], 0.6)
+
+    def test_signal_sizing_does_not_round_up_past_caps(self) -> None:
+        decision = compute_signal_copy_amount(
+            leader_budget_usd=12.0,
+            remaining_leader_budget_usd=12.0,
+            leader_trade_notional_usd=50.0,
+            leader_trade_notional_copy_fraction=0.20,
+            leader_portfolio_value_usd=1000.0,
+            min_order_size_usd=1.85,
+            max_per_trade_usd=1.0,
+            round_up_to_min_order=True,
+        )
+
+        self.assertFalse(decision.allowed)
+        self.assertIn("max_per_trade_usd below", decision.reason)
+
     def test_signal_sizing_blocks_without_leader_portfolio_by_default(self) -> None:
         decision = compute_signal_copy_amount(
             leader_budget_usd=12.0,

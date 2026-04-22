@@ -91,6 +91,36 @@ class BacktestReplayTests(unittest.TestCase):
         self.assertEqual(final_rows[0]["position_after_usd"], 3.0)
         self.assertEqual(final_rows[0]["realized_pnl_usd"], 0.2)
 
+    def test_signal_observation_replay_can_round_up_to_min_order(self) -> None:
+        report = replay_signal_observations(
+            [
+                {
+                    "observation_id": 1,
+                    "observed_at": "2026-01-01 00:00:00",
+                    "leader_wallet": "wallet1",
+                    "leader_user_name": "leader",
+                    "category": "ECONOMICS",
+                    "latest_status": "FRESH_COPYABLE",
+                    "selected_signal_id": "tiny-buy",
+                    "selected_side": "BUY",
+                    "token_id": "tokenA",
+                    "selected_trade_notional_usd": 50.0,
+                    "selected_leader_portfolio_value_usd": 1000.0,
+                    "target_budget_usd": 12.0,
+                    "snapshot_midpoint": 0.50,
+                    "snapshot_best_bid": 0.49,
+                }
+            ],
+            leader_trade_notional_copy_fraction=0.20,
+            min_order_size_usd=1.85,
+            max_per_trade_usd=10.0,
+            round_up_to_min_order=True,
+        )
+
+        entries = [row for row in report.event_rows if row["replay_event_type"] == "ENTRY"]
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0]["amount_usd"], 1.85)
+
 
 if __name__ == "__main__":
     unittest.main()
