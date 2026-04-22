@@ -129,9 +129,20 @@ def compute_signal_copy_amount(
         return CopySizeDecision(False, 0.0, source, "computed amount <= 0", details)
 
     amount = min(max_trade, raw_amount, budget)
+    details = {
+        **details,
+        "raw_amount_usd": raw_amount,
+        "capped_amount_usd": amount,
+    }
 
     if amount < min_order:
-        return CopySizeDecision(False, 0.0, source, "computed amount below min order size", details)
+        return CopySizeDecision(
+            False,
+            0.0,
+            source,
+            f"computed amount {amount:.4f} below min_order_size_usd {min_order:.4f}",
+            details,
+        )
 
     rounded = round(amount, precision)
-    return CopySizeDecision(True, rounded, source, "ok", {**details, "raw_amount_usd": raw_amount})
+    return CopySizeDecision(True, rounded, source, "ok", {**details, "rounded_amount_usd": rounded})

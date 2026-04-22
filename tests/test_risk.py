@@ -249,7 +249,7 @@ class RiskGuardTests(unittest.TestCase):
 
         self.assertFalse(decision.allowed)
         self.assertEqual(decision.source, "leader_trade_budget_fraction")
-        self.assertIn("below min order", decision.reason)
+        self.assertIn("below min_order_size_usd", decision.reason)
 
     def test_signal_sizing_blocks_without_leader_portfolio_by_default(self) -> None:
         decision = compute_signal_copy_amount(
