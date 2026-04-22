@@ -9,6 +9,10 @@ from pathlib import Path
 from statistics import median
 from pprint import pprint
 
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
 import execution.state_store as state_store
 
 
