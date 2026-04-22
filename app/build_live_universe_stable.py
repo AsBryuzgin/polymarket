@@ -96,6 +96,47 @@ def pick_selected_weight_base(row: dict) -> float:
     return float(row["final_wss"])
 
 
+def selected_wss(row: dict) -> float:
+    return float(row["final_wss"])
+
+
+def apply_live_category_capacity(
+    *,
+    selected_rows: list[dict],
+    report_rows: list[dict],
+    max_live_categories: int,
+) -> tuple[list[dict], list[dict]]:
+    ranked = sorted(
+        selected_rows,
+        key=lambda row: (selected_wss(row), pick_selected_weight_base(row)),
+        reverse=True,
+    )
+    rank_by_category = {row["category"]: idx for idx, row in enumerate(ranked, start=1)}
+
+    if max_live_categories <= 0 or len(ranked) <= max_live_categories:
+        included_categories = {row["category"] for row in ranked}
+        capacity_reason = "no live category cap"
+    else:
+        included_categories = {row["category"] for row in ranked[:max_live_categories]}
+        capacity_reason = f"top {max_live_categories} categories by selected_wss"
+
+    live_rows = [row for row in selected_rows if row["category"] in included_categories]
+
+    for report in report_rows:
+        category = report["category"]
+        rank = rank_by_category.get(category)
+        included = category in included_categories
+        report["live_rank"] = rank if rank is not None else ""
+        report["live_included"] = "YES" if included else "NO"
+        report["live_capacity_reason"] = (
+            capacity_reason
+            if included
+            else f"excluded by {capacity_reason}"
+        )
+
+    return live_rows, report_rows
+
+
 def main() -> None:
     cfg = load_toml(CONFIG_FILE).get("rebalance", {})
     exclude_categories = set(cfg.get("exclude_categories", ["MENTIONS"]))
@@ -103,6 +144,7 @@ def main() -> None:
     hold_gap_abs = float(cfg.get("hold_gap_abs", 4.0))
     hold_gap_rel = float(cfg.get("hold_gap_rel", 0.05))
     confirmation_cycles = int(cfg.get("confirmation_cycles", 2))
+    max_live_categories = int(cfg.get("max_live_categories", 0) or 0)
 
     final_rows = [r for r in load_csv(FINAL_FILE) if r["category"] not in exclude_categories]
     if not final_rows:
@@ -239,6 +281,12 @@ def main() -> None:
             "selected_user_name": chosen["user_name"],
             "selected_wss": round(float(chosen["final_wss"]), 2),
         })
+
+    selected_rows, report_rows = apply_live_category_capacity(
+        selected_rows=selected_rows,
+        report_rows=report_rows,
+        max_live_categories=max_live_categories,
+    )
 
     # re-normalize weights only across selected live universe
     total_base = sum(pick_selected_weight_base(r) for r in selected_rows)

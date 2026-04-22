@@ -1,6 +1,10 @@
 [rebalance]
 exclude_categories = ["MENTIONS"]
 
+# Keep scoring/reports across all categories, but only run new BUYs for the
+# strongest N categories in the live universe. 0 means no cap.
+max_live_categories = 4
+
 # incumbent stays if still competitive
 incumbent_max_rank = 2
 hold_gap_abs = 4.0
