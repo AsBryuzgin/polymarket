@@ -81,8 +81,8 @@ def check_wallet_filters(metrics: WalletMetrics) -> tuple[bool, List[str]]:
         reasons.append("primary_domain_share < 0.35")
     if metrics.single_market_concentration > 0.35:
         reasons.append("single_market_concentration > 0.35")
-    if metrics.trades_90d < 3:
-        reasons.append("trades_90d < 3")
+    if metrics.trades_30d < 5:
+        reasons.append("trades_30d < 5")
     if metrics.days_since_last_trade > 45:
         reasons.append("days_since_last_trade > 45")
 
@@ -176,11 +176,10 @@ def score_wallet(metrics: WalletMetrics) -> WalletScoreBreakdown:
     r = return_quality_score(metrics)
 
     raw_wss = (
-        0.30 * c
+        0.35 * c
         + 0.25 * d
         + 0.20 * s
         + 0.10 * k
-        + 0.05 * a
         + 0.10 * r
     )
 

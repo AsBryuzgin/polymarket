@@ -128,8 +128,44 @@ class TestWalletScoring(unittest.TestCase):
         result = score_wallet(inactive)
 
         self.assertFalse(result.eligible)
-        self.assertIn("trades_90d < 3", result.filter_reasons)
+        self.assertIn("trades_30d < 5", result.filter_reasons)
         self.assertIn("days_since_last_trade > 45", result.filter_reasons)
+
+    def test_activity_does_not_change_wss_above_minimum_gate(self) -> None:
+        base = dict(
+            age_days=500,
+            closed_positions=160,
+            unique_markets=45,
+            primary_domain_share=0.60,
+            single_market_concentration=0.20,
+            roi_30=0.05,
+            roi_90=0.10,
+            roi_180=0.18,
+            monthly_roi_last_6=[0.03, 0.02, 0.04, 0.01, 0.03, 0.02],
+            negative_monthly_roi_last_12=[-0.01, -0.015],
+            primary_domain_roi_30=0.04,
+            primary_domain_roi_90=0.11,
+            primary_domain_roi_180=0.19,
+            max_drawdown=0.07,
+            longest_loss_streak=2,
+            median_spread=0.01,
+            median_liquidity=22000,
+            slippage_proxy=0.005,
+            delay_sec=40,
+            profit_factor=1.8,
+            largest_win_share=0.20,
+            days_since_last_trade=2,
+        )
+        barely_active = WalletMetrics(**base, trades_30d=5, trades_90d=5)
+        hyper_active = WalletMetrics(**base, trades_30d=300, trades_90d=300)
+
+        barely_result = score_wallet(barely_active)
+        hyper_result = score_wallet(hyper_active)
+
+        self.assertTrue(barely_result.eligible)
+        self.assertTrue(hyper_result.eligible)
+        self.assertNotEqual(barely_result.activity_score, hyper_result.activity_score)
+        self.assertEqual(barely_result.final_wss, hyper_result.final_wss)
 
 
 if __name__ == "__main__":
