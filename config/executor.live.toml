@@ -25,8 +25,10 @@ trading_disabled = false
 enforce_leader_budget_cap = true
 max_per_trade_pct = 0.05
 max_position_pct = 0.08
-max_wallet_exposure_pct = 0.25
-max_category_exposure_pct = 0.25
+# Per-leader budgets come from WSS allocation via leader_registry.target_budget_usd.
+# Keep these static caps disabled so top-4/top-8 weights can move with WSS.
+max_wallet_exposure_pct = 0.0
+max_category_exposure_pct = 0.0
 max_portfolio_exposure_pct = 0.90
 max_daily_realized_loss_pct = 0.075
 
