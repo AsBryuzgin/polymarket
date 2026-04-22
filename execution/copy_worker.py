@@ -26,6 +26,7 @@ from execution.state_store import (
     log_trade_event,
     list_open_positions,
 )
+from execution.trade_notifications import send_trade_notification
 from risk.guards import build_runtime_risk_limits, evaluate_entry_risk
 from risk.sizing import compute_signal_copy_amount
 
@@ -571,6 +572,24 @@ def process_signal(signal: LeaderSignal) -> dict:
         )
 
         status = _exit_success_signal_status(execution, closed_fully=closed_fully)
+        send_trade_notification(
+            config=config,
+            mode=execution.mode,
+            event_type="EXIT",
+            leader_wallet=signal.leader_wallet,
+            leader_user_name=leader_user_name,
+            category=category,
+            token_id=signal.token_id,
+            amount_usd=round(actual_sell_amount, 2),
+            price=execution_price,
+            position_before_usd=position_before_usd,
+            position_after_usd=position_after_usd,
+            signal_id=signal.signal_id,
+            realized_pnl_usd=realized_pnl_usd,
+            realized_pnl_pct=realized_pnl_pct,
+            holding_minutes=holding_minutes,
+            closed_fully=closed_fully,
+        )
 
         record_signal(
             signal_id=signal.signal_id,
@@ -810,6 +829,20 @@ def process_signal(signal: LeaderSignal) -> dict:
     )
 
     entry_status = _entry_success_signal_status(execution)
+    send_trade_notification(
+        config=config,
+        mode=execution.mode,
+        event_type="ENTRY",
+        leader_wallet=signal.leader_wallet,
+        leader_user_name=leader_user_name,
+        category=category,
+        token_id=signal.token_id,
+        amount_usd=executed_amount_usd,
+        price=execution_price,
+        position_before_usd=pos_update["position_before_usd"],
+        position_after_usd=pos_update["position_after_usd"],
+        signal_id=signal.signal_id,
+    )
 
     record_signal(
         signal_id=signal.signal_id,

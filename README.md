@@ -114,7 +114,15 @@ env PYTHONDONTWRITEBYTECODE=1 \
   .venv/bin/python app/executor_alerts.py --deliver
 ```
 
-Configure destinations through env vars such as `POLY_ALERT_TELEGRAM_BOT_TOKEN`, `POLY_ALERT_TELEGRAM_CHAT_ID`, `POLY_ALERT_DISCORD_WEBHOOK_URL`, `POLY_ALERT_EMAIL_WEBHOOK_URL`, or `POLY_ALERT_GENERIC_WEBHOOK_URL`. Delivery is off until `[alert_delivery].enabled = true`.
+Configure destinations through env vars such as `POLY_ALERT_TELEGRAM_BOT_TOKEN`, `POLY_ALERT_TELEGRAM_CHAT_ID`, `POLY_ALERT_DISCORD_WEBHOOK_URL`, `POLY_ALERT_EMAIL_WEBHOOK_URL`, or `POLY_ALERT_GENERIC_WEBHOOK_URL`. Delivery is off until `[alert_delivery].enabled = true`. Empty "no alerts" snapshots are not sent unless `[alert_delivery].send_empty_alerts = true`; filled entries/exits can be sent with `[alert_delivery].notify_trades = true`.
+
+Run the Telegram command bot for status, positions, leaders, and 24h activity:
+
+```bash
+env PYTHONDONTWRITEBYTECODE=1 \
+  POLY_EXECUTOR_CONFIG_PATH=config/executor.live.toml \
+  .venv/bin/python app/telegram_bot.py
+```
 
 View or clear the runtime kill-switch lock:
 

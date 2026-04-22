@@ -4,7 +4,7 @@ import unittest
 from datetime import datetime, timezone
 from unittest.mock import patch
 
-from execution.alert_delivery import deliver_alerts, format_alert_message
+from execution.alert_delivery import deliver_alerts, deliver_text_notification, format_alert_message
 from execution.alerts import build_executor_alerts, has_critical_alerts
 
 
@@ -122,6 +122,92 @@ class ExecutorAlertsTests(unittest.TestCase):
 
         self.assertEqual(len(calls), 3)
         self.assertTrue(all(result.delivered for result in results))
+
+    def test_deliver_alerts_does_not_send_empty_alerts_by_default(self) -> None:
+        calls = []
+
+        def fake_post(url, payload):
+            calls.append((url, payload))
+
+        config = {
+            "alert_delivery": {
+                "enabled": True,
+                "telegram_bot_token_env": "TEST_TG_TOKEN",
+                "telegram_chat_id_env": "TEST_TG_CHAT",
+            }
+        }
+        env = {
+            "TEST_TG_TOKEN": "token",
+            "TEST_TG_CHAT": "chat",
+        }
+
+        with patch.dict("os.environ", env):
+            results = deliver_alerts(
+                config=config,
+                alerts=[],
+                post_json=fake_post,
+            )
+
+        self.assertEqual(calls, [])
+        self.assertEqual(results[0].reason, "no alerts to deliver")
+
+    def test_deliver_alerts_can_send_empty_alerts_when_configured(self) -> None:
+        calls = []
+
+        def fake_post(url, payload):
+            calls.append((url, payload))
+
+        config = {
+            "alert_delivery": {
+                "enabled": True,
+                "send_empty_alerts": True,
+                "telegram_bot_token_env": "TEST_TG_TOKEN",
+                "telegram_chat_id_env": "TEST_TG_CHAT",
+            }
+        }
+        env = {
+            "TEST_TG_TOKEN": "token",
+            "TEST_TG_CHAT": "chat",
+        }
+
+        with patch.dict("os.environ", env):
+            results = deliver_alerts(
+                config=config,
+                alerts=[],
+                post_json=fake_post,
+            )
+
+        self.assertEqual(len(calls), 1)
+        self.assertIn("no alerts", calls[0][1]["text"])
+        self.assertTrue(results[0].delivered)
+
+    def test_deliver_text_notification_posts_plain_message(self) -> None:
+        calls = []
+
+        def fake_post(url, payload):
+            calls.append((url, payload))
+
+        config = {
+            "alert_delivery": {
+                "enabled": True,
+                "telegram_bot_token_env": "TEST_TG_TOKEN",
+                "telegram_chat_id_env": "TEST_TG_CHAT",
+            }
+        }
+        env = {
+            "TEST_TG_TOKEN": "token",
+            "TEST_TG_CHAT": "chat",
+        }
+
+        with patch.dict("os.environ", env):
+            results = deliver_text_notification(
+                config=config,
+                message="trade filled",
+                post_json=fake_post,
+            )
+
+        self.assertEqual(calls[0][1]["text"], "trade filled")
+        self.assertTrue(results[0].delivered)
 
 
 if __name__ == "__main__":

@@ -3,6 +3,7 @@ from __future__ import annotations
 import unittest
 
 from app.build_live_universe_stable import apply_live_category_capacity
+from app.portfolio_allocation_demo import resolve_allocation_caps
 
 
 class RebalanceCapacityTests(unittest.TestCase):
@@ -38,6 +39,23 @@ class RebalanceCapacityTests(unittest.TestCase):
         self.assertEqual(report_by_category["ECONOMICS"]["live_rank"], 1)
         self.assertEqual(report_by_category["SPORTS"]["live_included"], "NO")
         self.assertIn("excluded", report_by_category["SPORTS"]["live_capacity_reason"])
+
+    def test_allocation_wallet_cap_tracks_live_category_capacity(self) -> None:
+        caps = resolve_allocation_caps(
+            rebalance_config={"rebalance": {"max_live_categories": 8}},
+            executor_config={"portfolio": {"max_wallet_weight": 0.25}},
+        )
+
+        self.assertEqual(caps.max_wallet_weight, 0.125)
+        self.assertEqual(caps.wallet_cap_source, "auto_from_max_live_categories=8")
+
+    def test_allocation_wallet_cap_falls_back_to_config_without_live_capacity(self) -> None:
+        caps = resolve_allocation_caps(
+            rebalance_config={"rebalance": {"max_live_categories": 0}},
+            executor_config={"portfolio": {"max_wallet_weight": 0.20}},
+        )
+
+        self.assertEqual(caps.max_wallet_weight, 0.20)
 
 
 if __name__ == "__main__":

@@ -65,10 +65,43 @@ def deliver_alerts(
     post_json: Callable[[str, dict[str, Any]], None] | None = None,
 ) -> list[AlertDeliveryResult]:
     delivery_cfg = config.get("alert_delivery", {})
+    title = str(delivery_cfg.get("title") or "Polymarket bot alert")
+    send_empty_alerts = _bool_or_default(delivery_cfg.get("send_empty_alerts"), False)
+
+    if not alerts and not send_empty_alerts:
+        return [
+            AlertDeliveryResult(
+                channel="all",
+                attempted=False,
+                delivered=False,
+                reason="no alerts to deliver",
+            )
+        ]
+
+    message = format_alert_message(alerts, title=title)
+
+    return deliver_text_notification(
+        config=config,
+        message=message,
+        title=title,
+        post_json=post_json,
+        extra_payload={"alerts": alerts},
+    )
+
+
+def deliver_text_notification(
+    *,
+    config: dict[str, Any],
+    message: str,
+    title: str | None = None,
+    post_json: Callable[[str, dict[str, Any]], None] | None = None,
+    extra_payload: dict[str, Any] | None = None,
+) -> list[AlertDeliveryResult]:
+    delivery_cfg = config.get("alert_delivery", {})
     enabled = _bool_or_default(delivery_cfg.get("enabled"), False)
     timeout_sec = float(delivery_cfg.get("timeout_sec", 5.0))
-    title = str(delivery_cfg.get("title") or "Polymarket bot alert")
-    message = format_alert_message(alerts, title=title)
+    title = title or str(delivery_cfg.get("title") or "Polymarket bot alert")
+    extra_payload = extra_payload or {}
 
     if post_json is None:
         post_json = lambda url, payload: _post_json(url, payload, timeout_sec=timeout_sec)
@@ -100,12 +133,12 @@ def deliver_alerts(
         (
             "email_webhook",
             str(delivery_cfg.get("email_webhook_url_env") or ""),
-            {"subject": title, "text": message, "alerts": alerts},
+            {"subject": title, "text": message, **extra_payload},
         ),
         (
             "generic_webhook",
             str(delivery_cfg.get("generic_webhook_url_env") or ""),
-            {"text": message, "alerts": alerts},
+            {"text": message, **extra_payload},
         ),
     ):
         url = os.getenv(env_key) if env_key else ""
