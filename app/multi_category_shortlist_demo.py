@@ -92,6 +92,7 @@ def score_wallet_from_category_entry(
         "median_spread": median_spread,
         "median_liquidity": median_liquidity,
         "slippage_proxy": slippage_proxy,
+        "current_position_pnl_ratio": metrics.current_position_pnl_ratio,
         "trades_30d": metrics.trades_30d,
         "trades_90d": metrics.trades_90d,
         "days_since_last_trade": metrics.days_since_last_trade,
@@ -148,6 +149,7 @@ def run_category(
                     "median_spread": None,
                     "median_liquidity": None,
                     "slippage_proxy": None,
+                    "current_position_pnl_ratio": 0.0,
                     "trades_30d": 0,
                     "trades_90d": 0,
                     "days_since_last_trade": 9999,
@@ -185,6 +187,7 @@ def save_csv(rows: list[dict], path: Path) -> None:
         "median_spread",
         "median_liquidity",
         "slippage_proxy",
+        "current_position_pnl_ratio",
         "trades_30d",
         "trades_90d",
         "days_since_last_trade",
@@ -208,6 +211,7 @@ def print_top(rows: list[dict], top_n: int = 5) -> None:
             f"trades30={row['trades_30d']} | "
             f"spread={row['median_spread']} | "
             f"slip={row['slippage_proxy']} | "
+            f"open_pnl={row['current_position_pnl_ratio']} | "
             f"pnl={round(row['leaderboard_pnl'], 2)} | "
             f"wallet={row['wallet']}"
         )

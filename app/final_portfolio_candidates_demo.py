@@ -106,6 +106,7 @@ def save_csv(rows: list[dict], path: Path) -> None:
         "median_spread",
         "median_liquidity",
         "slippage_proxy",
+        "current_position_pnl_ratio",
         "trades_30d",
         "trades_90d",
         "days_since_last_trade",

@@ -257,6 +257,28 @@ def _infer_unique_markets(
     return max(traded_count, len(unique_keys))
 
 
+def _current_position_pnl_ratio(current_positions: list[dict[str, Any]]) -> float:
+    exposure = 0.0
+    pnl = 0.0
+
+    for item in current_positions:
+        initial_value = abs(_safe_float(item.get("initialValue")))
+        cash_pnl = _safe_float(item.get("cashPnl"))
+        if initial_value <= 0:
+            current_value = abs(_safe_float(item.get("currentValue")))
+            total_bought = abs(_safe_float(item.get("totalBought")))
+            initial_value = max(current_value, total_bought)
+        if initial_value <= 0:
+            continue
+        exposure += initial_value
+        pnl += cash_pnl
+
+    if exposure <= 0:
+        return 0.0
+
+    return pnl / exposure
+
+
 def _activity_stats(
     trades: list[dict[str, Any]],
     now: datetime,
@@ -327,6 +349,7 @@ def build_wallet_metrics(
         delay_sec=delay_sec,
         profit_factor=_profit_factor(closed_positions),
         largest_win_share=_largest_win_share(closed_positions),
+        current_position_pnl_ratio=_current_position_pnl_ratio(current_positions),
         trades_30d=trades_30d,
         trades_90d=trades_90d,
         days_since_last_trade=days_since_last_trade,

@@ -82,6 +82,7 @@ def score_wallet_from_category_entry(
         "median_spread": median_spread,
         "median_liquidity": median_liquidity,
         "slippage_proxy": slippage_proxy,
+        "current_position_pnl_ratio": metrics.current_position_pnl_ratio,
     }
 
 
@@ -139,6 +140,7 @@ def main() -> None:
                     "median_spread": None,
                     "median_liquidity": None,
                     "slippage_proxy": None,
+                    "current_position_pnl_ratio": 0.0,
                 }
             )
 
@@ -165,6 +167,7 @@ def main() -> None:
             f"closed_used={item['closed_positions_used']:>4} | "
             f"spread={item['median_spread']} | "
             f"slip={item['slippage_proxy']} | "
+            f"open_pnl={item['current_position_pnl_ratio']} | "
             f"pnl={round(float(item['leaderboard_pnl']), 2)} | "
             f"wallet={item['wallet']}"
         )

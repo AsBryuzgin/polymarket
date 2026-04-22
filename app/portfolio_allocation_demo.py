@@ -189,6 +189,7 @@ def save_csv(rows: list[dict], path: Path) -> None:
         "days_since_last_trade",
         "median_spread",
         "slippage_proxy",
+        "current_position_pnl_ratio",
     ]
 
     with path.open("w", encoding="utf-8", newline="") as f:
@@ -213,6 +214,7 @@ def save_csv(rows: list[dict], path: Path) -> None:
                     "days_since_last_trade": row.get("days_since_last_trade", ""),
                     "median_spread": row.get("median_spread", ""),
                     "slippage_proxy": row.get("slippage_proxy", ""),
+                    "current_position_pnl_ratio": row.get("current_position_pnl_ratio", ""),
                 }
             )
 

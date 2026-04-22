@@ -34,6 +34,7 @@ class PortfolioPipelineTests(unittest.TestCase):
                         "median_spread": 0.01,
                         "median_liquidity": 10000.0,
                         "slippage_proxy": 0.005,
+                        "current_position_pnl_ratio": 0.10,
                         "trades_30d": 12,
                         "trades_90d": 30,
                         "days_since_last_trade": 1,
@@ -48,6 +49,7 @@ class PortfolioPipelineTests(unittest.TestCase):
 
         self.assertEqual(rows[0]["activity_score"], "100.0")
         self.assertEqual(rows[0]["trades_30d"], "12")
+        self.assertEqual(rows[0]["current_position_pnl_ratio"], "0.1")
 
     def test_deduplicate_wallets_prefers_better_rank_when_wss_ties(self) -> None:
         rows = deduplicate_wallets(

@@ -47,6 +47,7 @@ class WalletMetrics:
     delay_sec: float
     profit_factor: float
     largest_win_share: float
+    current_position_pnl_ratio: float = 0.0
     trades_30d: int = 0
     trades_90d: int = 0
     days_since_last_trade: int = 9999
@@ -81,6 +82,8 @@ def check_wallet_filters(metrics: WalletMetrics) -> tuple[bool, List[str]]:
         reasons.append("primary_domain_share < 0.35")
     if metrics.single_market_concentration > 0.35:
         reasons.append("single_market_concentration > 0.35")
+    if metrics.current_position_pnl_ratio < -0.25:
+        reasons.append("current_position_pnl_ratio < -0.25")
     if metrics.trades_30d < 5:
         reasons.append("trades_30d < 5")
     if metrics.days_since_last_trade > 45:
