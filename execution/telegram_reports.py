@@ -144,6 +144,11 @@ def _funding_snapshot(config: dict[str, Any]) -> tuple[dict[str, Any] | None, st
         return None, str(e)
 
 
+def _configured_capital_usd(config: dict[str, Any]) -> float | None:
+    capital = _safe_float(config.get("capital", {}).get("total_capital_usd"))
+    return capital if capital > 0 else None
+
+
 def build_status_report(
     config: dict[str, Any],
     *,
@@ -154,16 +159,27 @@ def build_status_report(
     init_signal_observation_table()
     now = now or datetime.now(timezone.utc)
 
-    funding, funding_error = _funding_snapshot(config)
     open_rows, snapshot_errors = _open_position_marks(snapshot_loader=snapshot_loader)
     registry = list_leader_registry(limit=100000)
     observations = list_signal_observations(limit=1)
 
-    cash = funding.get("balance_usd") if funding else None
-    allowance = funding.get("allowance_usd") if funding else None
     invested = sum(_safe_float(row.get("position_usd")) for row in open_rows)
     mark_bid = sum(_safe_float(row.get("mark_value_bid_usd")) for row in open_rows)
     mark_mid = sum(_safe_float(row.get("mark_value_mid_usd")) for row in open_rows)
+
+    mode = str(config.get("global", {}).get("execution_mode", "unknown")).lower()
+    paper_bankroll = _configured_capital_usd(config) if mode == "paper" else None
+    funding = None
+    funding_error = None
+
+    if paper_bankroll is not None:
+        cash = max(paper_bankroll - invested, 0.0)
+        allowance = None
+    else:
+        funding, funding_error = _funding_snapshot(config)
+        cash = funding.get("balance_usd") if funding else None
+        allowance = funding.get("allowance_usd") if funding else None
+
     total_bid = cash + mark_bid if cash is not None else None
     total_mid = cash + mark_mid if cash is not None else None
 
@@ -175,14 +191,18 @@ def build_status_report(
 
     lines = [
         "Polymarket bot status",
-        f"mode: {str(config.get('global', {}).get('execution_mode', 'unknown')).upper()}",
-        f"cash balance: {_money(cash)}",
+        f"mode: {mode.upper()}",
+    ]
+    if paper_bankroll is not None:
+        lines.append(f"paper bankroll: {_money(paper_bankroll)}")
+    lines.extend([
+        f"cash excluding open: {_money(cash)}",
         f"allowance: {_money(allowance)}",
         f"open positions: {len(open_rows)} | invested: {_money(invested)}",
         f"equity by bid: {_money(total_bid)} | by mid: {_money(total_mid)}",
         f"open PnL by bid: {_money(mark_bid - invested, signed=True)} | by mid: {_money(mark_mid - invested, signed=True)}",
         f"leaders: {active_leaders} active, {exit_only_leaders} exit-only",
-    ]
+    ])
 
     if last_age is not None:
         lines.append(f"last observation: {last_age:.1f} min ago")

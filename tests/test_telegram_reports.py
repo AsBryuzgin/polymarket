@@ -48,9 +48,46 @@ class TelegramReportTests(unittest.TestCase):
                 snapshot_loader=snapshot_loader,
             )
 
-        self.assertIn("cash balance: $100.00", report)
+        self.assertIn("cash excluding open: $100.00", report)
         self.assertIn("equity by bid: $106.00", report)
         self.assertIn("leaders: 1 active, 1 exit-only", report)
+
+    def test_status_report_uses_paper_bankroll_when_configured(self) -> None:
+        def snapshot_loader(_token_id: str, _side: str):
+            return {"best_bid": 0.60, "midpoint": 0.65}
+
+        with (
+            patch("execution.telegram_reports.init_db"),
+            patch("execution.telegram_reports.init_signal_observation_table"),
+            patch("execution.telegram_reports.fetch_collateral_balance_allowance") as funding,
+            patch("execution.telegram_reports.list_open_positions") as positions,
+            patch("execution.telegram_reports.list_leader_registry") as registry,
+            patch("execution.telegram_reports.list_signal_observations") as observations,
+            patch("execution.telegram_reports._load_latest_alert_count", return_value=0),
+        ):
+            positions.return_value = [
+                {
+                    "leader_wallet": "wallet1",
+                    "token_id": "tokenA",
+                    "position_usd": 5.0,
+                    "avg_entry_price": 0.50,
+                }
+            ]
+            registry.return_value = []
+            observations.return_value = []
+
+            report = build_status_report(
+                {
+                    "global": {"execution_mode": "paper"},
+                    "capital": {"total_capital_usd": 100.0},
+                },
+                snapshot_loader=snapshot_loader,
+            )
+
+        funding.assert_not_called()
+        self.assertIn("paper bankroll: $100.00", report)
+        self.assertIn("cash excluding open: $95.00", report)
+        self.assertIn("equity by bid: $101.00", report)
 
     def test_activity_report_counts_last_day_observations(self) -> None:
         now = datetime(2026, 4, 22, tzinfo=timezone.utc)
