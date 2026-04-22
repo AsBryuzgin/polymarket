@@ -66,8 +66,12 @@ def score_wallet_from_category_entry(
         "eligible": score.eligible,
         "final_wss": score.final_wss,
         "raw_wss": score.raw_wss,
+        "activity_score": score.activity_score,
         "filter_reasons": score.filter_reasons,
         "closed_positions_used": len(closed_positions),
+        "trades_30d": metrics.trades_30d,
+        "trades_90d": metrics.trades_90d,
+        "days_since_last_trade": metrics.days_since_last_trade,
         "median_spread": median_spread,
         "median_liquidity": median_liquidity,
         "slippage_proxy": slippage_proxy,
@@ -119,8 +123,12 @@ def main() -> None:
                     "eligible": False,
                     "final_wss": -1.0,
                     "raw_wss": -1.0,
+                    "activity_score": -1.0,
                     "filter_reasons": [f"error: {e}"],
                     "closed_positions_used": 0,
+                    "trades_30d": 0,
+                    "trades_90d": 0,
+                    "days_since_last_trade": 9999,
                     "median_spread": None,
                     "median_liquidity": None,
                     "slippage_proxy": None,
@@ -145,6 +153,8 @@ def main() -> None:
             f"user={item['user_name']} | "
             f"wss={item['final_wss']:>6} | "
             f"eligible={item['eligible']} | "
+            f"activity={item['activity_score']} | "
+            f"trades30={item['trades_30d']} | "
             f"closed_used={item['closed_positions_used']:>4} | "
             f"spread={item['median_spread']} | "
             f"slip={item['slippage_proxy']} | "

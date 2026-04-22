@@ -82,10 +82,14 @@ def score_wallet_from_category_entry(
         "eligible": score.eligible,
         "final_wss": score.final_wss,
         "raw_wss": score.raw_wss,
+        "activity_score": score.activity_score,
         "filter_reasons": "; ".join(score.filter_reasons),
         "median_spread": median_spread,
         "median_liquidity": median_liquidity,
         "slippage_proxy": slippage_proxy,
+        "trades_30d": metrics.trades_30d,
+        "trades_90d": metrics.trades_90d,
+        "days_since_last_trade": metrics.days_since_last_trade,
         "closed_positions_used": len(closed_positions),
     }
 
@@ -134,10 +138,14 @@ def run_category(
                     "eligible": False,
                     "final_wss": -1.0,
                     "raw_wss": -1.0,
+                    "activity_score": -1.0,
                     "filter_reasons": f"error: {e}",
                     "median_spread": None,
                     "median_liquidity": None,
                     "slippage_proxy": None,
+                    "trades_30d": 0,
+                    "trades_90d": 0,
+                    "days_since_last_trade": 9999,
                     "closed_positions_used": 0,
                 }
             )
@@ -167,10 +175,14 @@ def save_csv(rows: list[dict], path: Path) -> None:
         "eligible",
         "final_wss",
         "raw_wss",
+        "activity_score",
         "filter_reasons",
         "median_spread",
         "median_liquidity",
         "slippage_proxy",
+        "trades_30d",
+        "trades_90d",
+        "days_since_last_trade",
         "closed_positions_used",
     ]
 
@@ -187,6 +199,8 @@ def print_top(rows: list[dict], top_n: int = 5) -> None:
             f"user={row['user_name']} | "
             f"wss={row['final_wss']:>6} | "
             f"eligible={row['eligible']} | "
+            f"activity={row['activity_score']} | "
+            f"trades30={row['trades_30d']} | "
             f"spread={row['median_spread']} | "
             f"slip={row['slippage_proxy']} | "
             f"pnl={round(row['leaderboard_pnl'], 2)} | "

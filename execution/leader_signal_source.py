@@ -283,8 +283,12 @@ def latest_fresh_copyable_signal_from_wallet(
             continue
 
         max_spread = float(risk.get("skip_if_spread_gt", 0.02))
+        max_spread_rel = _positive_float_or_none(risk.get("skip_if_spread_rel_gt"))
+        max_spread_hard = _positive_float_or_none(risk.get("skip_if_spread_hard_gt"))
         if trade.side == "SELL" and has_open_position:
             max_spread = exit_max_spread
+            max_spread_rel = _positive_float_or_none(exit_cfg.get("exit_max_spread_rel"))
+            max_spread_hard = _positive_float_or_none(exit_cfg.get("exit_max_spread_hard"))
 
         policy = evaluate_order_policy(
             side=trade.side,
@@ -297,6 +301,8 @@ def latest_fresh_copyable_signal_from_wallet(
             sell_max_price=1.0,
             max_spread=max_spread,
             min_order_size_usd=float(risk.get("min_order_size_usd", 1.0)),
+            max_spread_rel=max_spread_rel,
+            max_spread_hard=max_spread_hard,
         )
 
         if not policy.allowed:

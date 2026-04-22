@@ -384,6 +384,8 @@ def process_signal(signal: LeaderSignal) -> dict:
             sell_max_price=1.0,
             max_spread=float(exit_cfg.get("exit_max_spread", 0.05)),
             min_order_size_usd=0.0,
+            max_spread_rel=_positive_float_or_none(exit_cfg.get("exit_max_spread_rel")),
+            max_spread_hard=_positive_float_or_none(exit_cfg.get("exit_max_spread_hard")),
         )
 
         if not policy.allowed:
@@ -627,6 +629,8 @@ def process_signal(signal: LeaderSignal) -> dict:
         sell_max_price=1.0,
         max_spread=float(risk.get("skip_if_spread_gt", 0.02)),
         min_order_size_usd=min_order_size_usd,
+        max_spread_rel=_positive_float_or_none(risk.get("skip_if_spread_rel_gt")),
+        max_spread_hard=_positive_float_or_none(risk.get("skip_if_spread_hard_gt")),
     )
 
     if not policy.allowed:

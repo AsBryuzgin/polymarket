@@ -87,18 +87,18 @@ def format_trade_notification(
 
     lines = [
         title,
-        f"leader: {leader} | {category_text}",
-        f"amount: {_money(amount_usd)} | price: {_price(price)}",
-        f"position: {_money(position_before_usd)} -> {_money(position_after_usd)}",
+        f"лидер: {leader} | {category_text}",
+        f"сумма: {_money(amount_usd)} | цена: {_price(price)}",
+        f"позиция: {_money(position_before_usd)} -> {_money(position_after_usd)}",
         f"token: {_short_token(token_id)}",
     ]
 
     if event_type == "EXIT":
-        exit_kind = "full exit" if closed_fully else "partial exit"
-        lines.insert(2, f"type: {exit_kind}")
-        lines.append(f"pnl: {_money(realized_pnl_usd)} ({_pct(realized_pnl_pct)})")
+        exit_kind = "полный выход" if closed_fully else "частичный выход"
+        lines.insert(2, f"тип: {exit_kind}")
+        lines.append(f"PnL: {_money(realized_pnl_usd)} ({_pct(realized_pnl_pct)})")
         if holding_minutes is not None:
-            lines.append(f"holding: {float(holding_minutes):.1f} min")
+            lines.append(f"удержание: {float(holding_minutes):.1f} мин")
 
     if signal_id:
         lines.append(f"signal: {signal_id}")

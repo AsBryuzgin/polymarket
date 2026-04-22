@@ -19,7 +19,9 @@ source = "collateral_balance"
 [risk]
 min_order_size_usd = 0.01
 slippage_tolerance = 0.02
-skip_if_spread_gt = 0.02
+skip_if_spread_gt = 0.03
+skip_if_spread_rel_gt = 0.08
+skip_if_spread_hard_gt = 0.06
 skip_if_minutes_to_resolve_lt = 30
 trading_disabled = false
 enforce_leader_budget_cap = true
@@ -95,6 +97,8 @@ buy_max_price = 0.95
 [exit]
 ignore_exit_drift = true
 exit_max_spread = 0.05
+exit_max_spread_rel = 0.12
+exit_max_spread_hard = 0.08
 
 [portfolio]
 max_wallet_weight = 0.25

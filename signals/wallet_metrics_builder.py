@@ -29,6 +29,22 @@ def _parse_unix_ts(value: Any) -> datetime | None:
         return None
 
 
+def _item_dt(item: dict[str, Any]) -> datetime | None:
+    for key in ("timestamp", "createdAt", "created_at", "updatedAt", "closedAt"):
+        value = item.get(key)
+        if value is None:
+            continue
+        if key == "timestamp":
+            dt = _parse_unix_ts(value)
+        else:
+            dt = _parse_iso_dt(str(value))
+        if dt is not None:
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return dt.astimezone(timezone.utc)
+    return None
+
+
 def _safe_float(value: Any) -> float:
     try:
         if value is None:
@@ -241,6 +257,22 @@ def _infer_unique_markets(
     return max(traded_count, len(unique_keys))
 
 
+def _activity_stats(
+    trades: list[dict[str, Any]],
+    now: datetime,
+) -> tuple[int, int, int]:
+    trade_times = [dt for item in trades if (dt := _item_dt(item)) is not None]
+    if not trade_times:
+        return 0, 0, 9999
+
+    cutoff_30 = now - timedelta(days=30)
+    cutoff_90 = now - timedelta(days=90)
+    trades_30d = sum(1 for dt in trade_times if dt >= cutoff_30)
+    trades_90d = sum(1 for dt in trade_times if dt >= cutoff_90)
+    days_since_last_trade = max((now - max(trade_times)).days, 0)
+    return trades_30d, trades_90d, days_since_last_trade
+
+
 def build_wallet_metrics(
     profile: dict[str, Any],
     traded_count: int,
@@ -262,6 +294,7 @@ def build_wallet_metrics(
         closed_positions=closed_positions,
         trades=trades,
     )
+    trades_30d, trades_90d, days_since_last_trade = _activity_stats(trades, now)
 
     return WalletMetrics(
         age_days=age_days,
@@ -294,6 +327,9 @@ def build_wallet_metrics(
         delay_sec=delay_sec,
         profit_factor=_profit_factor(closed_positions),
         largest_win_share=_largest_win_share(closed_positions),
+        trades_30d=trades_30d,
+        trades_90d=trades_90d,
+        days_since_last_trade=days_since_last_trade,
     )
 
 

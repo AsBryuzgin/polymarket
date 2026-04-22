@@ -46,7 +46,7 @@ class TradeNotificationTests(unittest.TestCase):
         )
 
         self.assertIn("Polymarket LIVE SELL", message)
-        self.assertIn("full exit", message)
+        self.assertIn("полный выход", message)
         self.assertIn("+$0.50", message)
         self.assertIn("+10.00%", message)
 

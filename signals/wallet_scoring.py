@@ -47,6 +47,9 @@ class WalletMetrics:
     delay_sec: float
     profit_factor: float
     largest_win_share: float
+    trades_30d: int = 0
+    trades_90d: int = 0
+    days_since_last_trade: int = 9999
 
 
 @dataclass
@@ -57,6 +60,7 @@ class WalletScoreBreakdown:
     drawdown_score: float
     specialization_score: float
     copyability_score: float
+    activity_score: float
     return_quality_score: float
     raw_wss: float
     track_record_multiplier: float
@@ -77,6 +81,10 @@ def check_wallet_filters(metrics: WalletMetrics) -> tuple[bool, List[str]]:
         reasons.append("primary_domain_share < 0.35")
     if metrics.single_market_concentration > 0.35:
         reasons.append("single_market_concentration > 0.35")
+    if metrics.trades_90d < 3:
+        reasons.append("trades_90d < 3")
+    if metrics.days_since_last_trade > 45:
+        reasons.append("days_since_last_trade > 45")
 
     return len(reasons) == 0, reasons
 
@@ -127,6 +135,17 @@ def copyability_score(metrics: WalletMetrics) -> float:
     )
 
 
+def activity_score(metrics: WalletMetrics) -> float:
+    trades_30_score = clip01(metrics.trades_30d / 8.0)
+    trades_90_score = clip01(metrics.trades_90d / 20.0)
+    recency_score = 1.0 - clip01(max(metrics.days_since_last_trade - 7, 0) / 38.0)
+    return 100.0 * (
+        0.50 * trades_30_score
+        + 0.30 * trades_90_score
+        + 0.20 * recency_score
+    )
+
+
 def return_quality_score(metrics: WalletMetrics) -> float:
     roi_180_score = clip01(metrics.roi_180 / 0.25)
     pf_score = clip01(metrics.profit_factor / 2.5)
@@ -153,13 +172,15 @@ def score_wallet(metrics: WalletMetrics) -> WalletScoreBreakdown:
     d = drawdown_control_score(metrics)
     s = specialization_score(metrics)
     k = copyability_score(metrics)
+    a = activity_score(metrics)
     r = return_quality_score(metrics)
 
     raw_wss = (
-        0.35 * c
+        0.30 * c
         + 0.25 * d
         + 0.20 * s
         + 0.10 * k
+        + 0.05 * a
         + 0.10 * r
     )
 
@@ -174,6 +195,7 @@ def score_wallet(metrics: WalletMetrics) -> WalletScoreBreakdown:
         drawdown_score=round(d, 2),
         specialization_score=round(s, 2),
         copyability_score=round(k, 2),
+        activity_score=round(a, 2),
         return_quality_score=round(r, 2),
         raw_wss=round(raw_wss, 2),
         track_record_multiplier=round(tr, 4),

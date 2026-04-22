@@ -27,10 +27,10 @@ from execution.telegram_reports import (
 OFFSET_FILE = Path("data/telegram_bot_offset.json")
 KEYBOARD = {
     "keyboard": [
-        [{"text": "Status"}, {"text": "Positions"}],
-        [{"text": "Leaders"}, {"text": "Activity 24h"}],
-        [{"text": "Blocks 24h"}],
-        [{"text": "Help"}],
+        [{"text": "Статус"}, {"text": "Позиции"}],
+        [{"text": "Лидеры"}, {"text": "Активность 24ч"}],
+        [{"text": "Блокировки 24ч"}],
+        [{"text": "Помощь"}],
     ],
     "resize_keyboard": True,
     "one_time_keyboard": False,
@@ -148,19 +148,19 @@ def _prime_offset(
 
 def _build_response(text: str, config: dict[str, Any]) -> str:
     normalized = text.strip().lower()
-    if normalized in {"/start", "start", "/help", "help"}:
+    if normalized in {"/start", "start", "/help", "help", "помощь"}:
         return build_help_report()
-    if normalized in {"/status", "status", "баланс", "balance"}:
+    if normalized in {"/status", "status", "статус", "баланс", "balance"}:
         return build_status_report(config)
     if normalized in {"/positions", "positions", "позиции"}:
         return build_positions_report()
     if normalized in {"/leaders", "leaders", "лидеры"}:
         return build_leaders_report()
-    if normalized in {"/activity", "activity", "activity 24h", "активность"}:
+    if normalized in {"/activity", "activity", "activity 24h", "активность", "активность 24ч"}:
         return build_activity_report()
-    if normalized in {"/blocks", "blocks", "blocks 24h", "блоки"}:
+    if normalized in {"/blocks", "blocks", "blocks 24h", "блоки", "блокировки", "блокировки 24ч"}:
         return build_blocks_report()
-    return "Unknown command. Press Help or send /help."
+    return "Не понял команду. Нажми Помощь или отправь /help."
 
 
 def run_bot(*, poll_sec: float, timeout_sec: float, process_pending: bool) -> None:

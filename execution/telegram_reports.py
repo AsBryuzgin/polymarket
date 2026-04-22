@@ -66,6 +66,24 @@ def _pct(value: Any) -> str:
     return f"{parsed * 100:.1f}%"
 
 
+def _status_hint(status: str) -> str:
+    hints = {
+        "FRESH_COPYABLE": "свежий сигнал, можно копировать",
+        "LATE_BUT_COPYABLE": "сигнал старше свежего окна, но еще допустим",
+        "EXIT_FOLLOW": "выход по уже открытой позиции",
+        "EXIT_FOLLOW_STALE": "запаздывающий выход по открытой позиции",
+        "POLICY_BLOCKED": "остановлен фильтром цены, spread, ликвидности или размера",
+        "DRIFT_BLOCKED": "текущая цена слишком ушла от цены входа лидера",
+        "SKIPPED_NO_POSITION": "лидер продает, но у бота нет такой позиции",
+        "ALREADY_PROCESSED": "этот signal уже обработан раньше",
+        "EXIT_ONLY_BUY_BLOCKED": "лидер в EXIT_ONLY, новые входы запрещены",
+        "NO_ORDERBOOK": "нет стакана по токену",
+        "NO_SIGNAL": "нет выбранного сигнала",
+        "TOO_OLD": "BUY слишком старый для нового входа",
+    }
+    return hints.get(status, "см. latest_reason для деталей")
+
+
 def _age_minutes(dt: datetime | None, *, now: datetime) -> float | None:
     if dt is None:
         return None
@@ -205,28 +223,40 @@ def build_status_report(
     alert_count = _load_latest_alert_count()
 
     lines = [
-        "Polymarket bot status",
-        f"mode: {mode.upper()}",
+        "Статус Polymarket bot",
+        f"Режим: {mode.upper()}",
+        "",
+        "Баланс",
     ]
     if paper_bankroll is not None:
-        lines.append(f"paper bankroll: {_money(paper_bankroll)}")
-    lines.extend([
-        f"cash excluding open: {_money(cash)}",
-        f"allowance: {_money(allowance)}",
-        f"open positions: {len(open_rows)} | invested: {_money(invested)}",
-        f"equity by bid: {_money(total_bid)} | by mid: {_money(total_mid)}",
-        f"open PnL by bid: {_money(mark_bid - invested, signed=True)} | by mid: {_money(mark_mid - invested, signed=True)}",
-        f"leaders: {active_leaders} active, {exit_only_leaders} exit-only",
-    ])
+        lines.append(f"банкролл paper: {_money(paper_bankroll)}")
+    lines.extend(
+        [
+            f"свободно без открытых позиций: {_money(cash)}",
+            f"allowance: {_money(allowance)}",
+            "",
+            "Портфель",
+            f"открытых позиций: {len(open_rows)} | вложено: {_money(invested)}",
+            f"equity по bid: {_money(total_bid)} | по mid: {_money(total_mid)}",
+            (
+                "open PnL по bid/mid: "
+                f"{_money(mark_bid - invested, signed=True)} / "
+                f"{_money(mark_mid - invested, signed=True)}"
+            ),
+            "",
+            "Система",
+            f"лидеры: {active_leaders} active, {exit_only_leaders} exit-only",
+        ]
+    )
 
     if last_age is not None:
-        lines.append(f"last observation: {last_age:.1f} min ago")
+        lines.append(f"последнее наблюдение: {last_age:.1f} мин назад")
     if alert_count is not None:
-        lines.append(f"current alerts: {alert_count}")
+        lines.append(f"текущие alerts: {alert_count}")
     if funding_error:
-        lines.append(f"funding check: ERROR {_short(funding_error, 40, 0)}")
+        lines.append(f"проверка баланса: ERROR {_short(funding_error, 40, 0)}")
     if snapshot_errors:
-        lines.append(f"snapshot errors: {len(snapshot_errors)}")
+        lines.append(f"ошибки market snapshot: {len(snapshot_errors)}")
 
     return "\n".join(lines)
 
@@ -239,27 +269,37 @@ def build_positions_report(
     open_rows, snapshot_errors = _open_position_marks(snapshot_loader=snapshot_loader)
 
     if not open_rows:
-        return "Open positions\nnone"
+        return "Открытые позиции\nпозиций нет"
 
-    lines = ["Open positions"]
+    invested = sum(_safe_float(row.get("position_usd")) for row in open_rows)
+    mark_bid = sum(_safe_float(row.get("mark_value_bid_usd")) for row in open_rows)
+    lines = [
+        "Открытые позиции",
+        f"Всего: {len(open_rows)} | вложено: {_money(invested)} | bid PnL: {_money(mark_bid - invested, signed=True)}",
+        "",
+    ]
     registry = {row["wallet"]: row for row in list_leader_registry(limit=100000)}
-    for row in sorted(open_rows, key=lambda x: _safe_float(x.get("position_usd")), reverse=True)[:12]:
+    sorted_rows = sorted(open_rows, key=lambda x: _safe_float(x.get("position_usd")), reverse=True)
+    for idx, row in enumerate(sorted_rows[:12], start=1):
         leader = registry.get(row.get("leader_wallet"), {})
         name = _leader_name({**leader, **row})
         category = leader.get("category") or "UNKNOWN"
-        lines.append(
-            (
-                f"{name} | {category} | {_money(row.get('position_usd'))} "
-                f"-> bid {_money(row.get('mark_value_bid_usd'))} "
-                f"pnl {_money(row.get('unrealized_pnl_bid_usd'), signed=True)} "
-                f"| token {_short(str(row.get('token_id')))}"
-            )
+        lines.extend(
+            [
+                f"{idx}. {name} | {category}",
+                (
+                    f"   вход {_money(row.get('position_usd'))} -> bid "
+                    f"{_money(row.get('mark_value_bid_usd'))} | PnL "
+                    f"{_money(row.get('unrealized_pnl_bid_usd'), signed=True)}"
+                ),
+                f"   token {_short(str(row.get('token_id')))}",
+            ]
         )
 
     if len(open_rows) > 12:
-        lines.append(f"... {len(open_rows) - 12} more")
+        lines.append(f"... еще {len(open_rows) - 12}")
     if snapshot_errors:
-        lines.append(f"snapshot errors: {len(snapshot_errors)}")
+        lines.append(f"ошибки market snapshot: {len(snapshot_errors)}")
 
     return "\n".join(lines)
 
@@ -322,19 +362,24 @@ def build_leaders_report(
         rows.append(item)
 
     if not rows:
-        return "Leaders\nno leader data yet"
+        return "Лидеры\nданных по лидерам пока нет"
 
     rows.sort(key=lambda x: x["total_pnl_bid_usd"], reverse=True)
-    lines = ["Leaders by bot PnL"]
-    for row in rows[:10]:
-        lines.append(
-            (
-                f"{row['name']} | {row['category']} | "
-                f"PnL {_money(row['total_pnl_bid_usd'], signed=True)} "
-                f"(realized {_money(row['realized_pnl_usd'], signed=True)}, "
-                f"open {_money(row['unrealized_pnl_bid_usd'], signed=True)}) | "
-                f"entries {row['entries']} exits {row['exits']}"
-            )
+    lines = ["Лидеры по PnL бота"]
+    for idx, row in enumerate(rows[:10], start=1):
+        lines.extend(
+            [
+                f"{idx}. {row['name']} | {row['category']}",
+                (
+                    f"   total {_money(row['total_pnl_bid_usd'], signed=True)} | "
+                    f"realized {_money(row['realized_pnl_usd'], signed=True)} | "
+                    f"open {_money(row['unrealized_pnl_bid_usd'], signed=True)}"
+                ),
+                (
+                    f"   entries {row['entries']} | exits {row['exits']} | "
+                    f"open invested {_money(row['invested_open_usd'])}"
+                ),
+            ]
         )
 
     return "\n".join(lines)
@@ -381,27 +426,30 @@ def build_activity_report(*, now: datetime | None = None) -> str:
     realized = sum(_safe_float(row.get("realized_pnl_usd")) for row in history if row.get("event_type") == "EXIT")
 
     lines = [
-        "Activity 24h",
+        "Активность за 24ч",
         (
-            f"observations: {len(observations)} | "
-            f"latest trades: {_unique_count(observations, 'latest_trade_hash')} | "
-            f"selected unique: {selected_unique_count}"
+            f"проверки: {len(observations)} | "
+            f"уникальные latest-сделки: {_unique_count(observations, 'latest_trade_hash')}"
         ),
-        f"entries: {entries} | exits: {exits} | realized: {_money(realized, signed=True)}",
+        f"выбранные сигналы: {selected_count} проверок / {selected_unique_count} unique",
+        f"сделки бота: BUY {entries} | SELL {exits} | realized {_money(realized, signed=True)}",
+        "",
+        "Пояснение: проверки = каждый polling-цикл. Unique = разные сделки лидеров.",
     ]
 
     if status_counts:
-        lines.append("statuses obs/unique:")
+        lines.append("")
+        lines.append("Статусы, проверки/unique:")
         for status, count in status_counts.most_common(6):
             lines.append(f"{status}: {count}/{unique_by_status.get(status, 0)}")
+            lines.append(f"  {_status_hint(status)}")
 
     leaders = sorted(by_leader.values(), key=lambda x: (x["selected"], x["observations"]), reverse=True)
     if leaders:
-        lines.append("top activity:")
-        for row in leaders[:5]:
-            lines.append(
-                f"{row['name']} | {row['category']} | obs {row['observations']} selected {row['selected']}"
-            )
+        lines.append("")
+        lines.append("Топ лидеров:")
+        for idx, row in enumerate(leaders[:5], start=1):
+            lines.append(f"{idx}. {row['name']} | {row['category']} | checks {row['observations']} | selected {row['selected']}")
 
     return "\n".join(lines)
 
@@ -424,7 +472,7 @@ def build_blocks_report(*, now: datetime | None = None) -> str:
     ]
 
     if not blocked:
-        return "Blocks 24h\nnone"
+        return "Блокировки за 24ч\nнет POLICY_BLOCKED или DRIFT_BLOCKED"
 
     by_status: dict[str, list[dict[str, Any]]] = defaultdict(list)
     by_leader_status: dict[tuple[str, str, str], list[dict[str, Any]]] = defaultdict(list)
@@ -439,16 +487,20 @@ def build_blocks_report(*, now: datetime | None = None) -> str:
             )
         ].append(row)
 
-    lines = ["Blocks 24h"]
+    lines = [
+        "Блокировки за 24ч",
+        "Проверки/unique: много проверок по одному hash не равно много разных пропущенных сделок.",
+        "",
+    ]
     for status in ("POLICY_BLOCKED", "DRIFT_BLOCKED"):
         rows = by_status.get(status, [])
         if not rows:
             continue
-        lines.append(
-            f"{status}: obs {len(rows)} | unique {_unique_count(rows, 'latest_trade_hash')}"
-        )
+        lines.append(f"{status}: {len(rows)} проверок / {_unique_count(rows, 'latest_trade_hash')} unique")
+        lines.append(f"  {_status_hint(status)}")
 
-    lines.append("by leader:")
+    lines.append("")
+    lines.append("По лидерам:")
     leader_rows = sorted(
         by_leader_status.items(),
         key=lambda item: (len(item[1]), _unique_count(item[1], "latest_trade_hash")),
@@ -458,19 +510,20 @@ def build_blocks_report(*, now: datetime | None = None) -> str:
         lines.append(
             (
                 f"{leader} | {category} | {status}: "
-                f"{len(rows)}/{_unique_count(rows, 'latest_trade_hash')}"
+                f"{len(rows)} checks / {_unique_count(rows, 'latest_trade_hash')} unique"
             )
         )
 
     reason_counts = Counter(str(row.get("latest_reason") or "UNKNOWN") for row in blocked)
     if reason_counts:
-        lines.append("top reasons:")
+        lines.append("")
+        lines.append("Главные причины:")
         for reason, count in reason_counts.most_common(5):
             unique = _unique_count(
                 [row for row in blocked if str(row.get("latest_reason") or "UNKNOWN") == reason],
                 "latest_trade_hash",
             )
-            lines.append(f"{count}/{unique}: {reason[:92]}")
+            lines.append(f"{count} checks / {unique} unique: {reason[:92]}")
 
     drift_abs_values = [
         value
@@ -480,12 +533,7 @@ def build_blocks_report(*, now: datetime | None = None) -> str:
     if drift_abs_values:
         drift_abs_values.sort()
         median = drift_abs_values[len(drift_abs_values) // 2]
-        lines.append(
-            (
-                "drift abs: "
-                f"median {median:.4f}, max {max(drift_abs_values):.4f}"
-            )
-        )
+        lines.append(f"drift abs: median {median:.4f}, max {max(drift_abs_values):.4f}")
 
     return "\n".join(lines)
 
@@ -493,12 +541,12 @@ def build_blocks_report(*, now: datetime | None = None) -> str:
 def build_help_report() -> str:
     return "\n".join(
         [
-            "Polymarket bot commands",
-            "/status - balance, equity, alerts, freshness",
-            "/positions - open positions and mark-to-market",
-            "/leaders - leader PnL from bot history",
-            "/activity - signal activity over the last 24h",
-            "/blocks - policy/drift blocks over the last 24h",
-            "/help - this menu",
+            "Команды Polymarket bot",
+            "/status - баланс, equity, алерты, свежесть данных",
+            "/positions - открытые позиции и mark-to-market",
+            "/leaders - PnL по лидерам из истории бота",
+            "/activity - активность сигналов за 24ч",
+            "/blocks - policy/drift блокировки за 24ч",
+            "/help - это меню",
         ]
     )

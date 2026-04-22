@@ -53,9 +53,9 @@ class TelegramReportTests(unittest.TestCase):
                 snapshot_loader=snapshot_loader,
             )
 
-        self.assertIn("cash excluding open: $100.00", report)
-        self.assertIn("equity by bid: $106.00", report)
-        self.assertIn("leaders: 1 active, 1 exit-only", report)
+        self.assertIn("свободно без открытых позиций: $100.00", report)
+        self.assertIn("equity по bid: $106.00", report)
+        self.assertIn("лидеры: 1 active, 1 exit-only", report)
 
     def test_status_report_uses_paper_bankroll_when_configured(self) -> None:
         def snapshot_loader(_token_id: str, _side: str):
@@ -90,9 +90,9 @@ class TelegramReportTests(unittest.TestCase):
             )
 
         funding.assert_not_called()
-        self.assertIn("paper bankroll: $100.00", report)
-        self.assertIn("cash excluding open: $95.00", report)
-        self.assertIn("equity by bid: $101.00", report)
+        self.assertIn("банкролл paper: $100.00", report)
+        self.assertIn("свободно без открытых позиций: $95.00", report)
+        self.assertIn("equity по bid: $101.00", report)
 
     def test_activity_report_counts_last_day_observations(self) -> None:
         now = datetime(2026, 4, 22, tzinfo=timezone.utc)
@@ -123,9 +123,10 @@ class TelegramReportTests(unittest.TestCase):
 
             report = build_activity_report(now=now)
 
-        self.assertIn("observations: 1 | latest trades: 1 | selected unique: 1", report)
+        self.assertIn("проверки: 1 | уникальные latest-сделки: 1", report)
+        self.assertIn("выбранные сигналы: 1 проверок / 1 unique", report)
         self.assertIn("FRESH_COPYABLE: 1/1", report)
-        self.assertIn("realized: +$0.25", report)
+        self.assertIn("realized +$0.25", report)
         self.assertIn("Leader", report)
 
     def test_leaders_report_handles_registry_map(self) -> None:
@@ -155,7 +156,7 @@ class TelegramReportTests(unittest.TestCase):
 
             report = build_leaders_report(snapshot_loader=lambda _token_id, _side: {})
 
-        self.assertIn("Leaders by bot PnL", report)
+        self.assertIn("Лидеры по PnL бота", report)
         self.assertIn("Leader", report)
 
     def test_blocks_report_shows_observation_and_unique_counts(self) -> None:
@@ -188,9 +189,9 @@ class TelegramReportTests(unittest.TestCase):
 
             report = build_blocks_report(now=now)
 
-        self.assertIn("DRIFT_BLOCKED: obs 2 | unique 1", report)
+        self.assertIn("DRIFT_BLOCKED: 2 проверок / 1 unique", report)
         self.assertIn("Leader", report)
-        self.assertIn("2/1", report)
+        self.assertIn("2 checks / 1 unique", report)
 
 
 if __name__ == "__main__":
