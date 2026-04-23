@@ -179,6 +179,12 @@ class TelegramReportTests(unittest.TestCase):
                     "latest_status": "DRIFT_BLOCKED",
                     "latest_reason": "buy price drift abs too high: 0.0910 > 0.0100",
                     "latest_trade_hash": "hash1",
+                    "latest_trade_side": "BUY",
+                    "latest_trade_age_sec": 77.0,
+                    "latest_token_id": "token1",
+                    "latest_trade_price": 0.31,
+                    "latest_snapshot_midpoint": 0.40,
+                    "latest_snapshot_spread": 0.03,
                 },
                 {
                     "observed_at": "2026-04-21 12:31:00",
@@ -188,6 +194,12 @@ class TelegramReportTests(unittest.TestCase):
                     "latest_status": "DRIFT_BLOCKED",
                     "latest_reason": "buy price drift abs too high: 0.0910 > 0.0100",
                     "latest_trade_hash": "hash1",
+                    "latest_trade_side": "BUY",
+                    "latest_trade_age_sec": 137.0,
+                    "latest_token_id": "token1",
+                    "latest_trade_price": 0.31,
+                    "latest_snapshot_midpoint": 0.41,
+                    "latest_snapshot_spread": 0.03,
                 },
             ]
 
@@ -195,7 +207,11 @@ class TelegramReportTests(unittest.TestCase):
 
         self.assertIn("DRIFT_BLOCKED: 2 проверок / 1 unique", report)
         self.assertIn("Leader", report)
-        self.assertIn("2 checks / 1 unique", report)
+        self.assertIn("price drift: 1 unique / 2 checks", report)
+        self.assertIn("age 77s->2.3m", report)
+        self.assertIn("leader px 0.3100", report)
+        self.assertIn("mid 0.4100", report)
+        self.assertIn("spread 0.0300 (7.3%)", report)
 
 
 if __name__ == "__main__":

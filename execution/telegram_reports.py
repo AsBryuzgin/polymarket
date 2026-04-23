@@ -31,6 +31,15 @@ def _safe_float(value: Any) -> float:
         return 0.0
 
 
+def _maybe_float(value: Any) -> float | None:
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def _safe_dt(value: Any) -> datetime | None:
     if value is None:
         return None
@@ -64,6 +73,27 @@ def _pct(value: Any) -> str:
     except (TypeError, ValueError):
         return "n/a"
     return f"{parsed * 100:.1f}%"
+
+
+def _num(value: Any, digits: int = 4) -> str:
+    parsed = _maybe_float(value)
+    if parsed is None:
+        return "n/a"
+    return f"{parsed:.{digits}f}"
+
+
+def _age(value: Any) -> str:
+    seconds = _maybe_float(value)
+    if seconds is None:
+        return "n/a"
+    seconds = max(seconds, 0.0)
+    if seconds < 90:
+        return f"{seconds:.0f}s"
+    if seconds < 3600:
+        return f"{seconds / 60.0:.1f}m"
+    if seconds < 86400:
+        return f"{seconds / 3600.0:.1f}h"
+    return f"{seconds / 86400.0:.1f}d"
 
 
 def _status_hint(status: str) -> str:
@@ -115,6 +145,84 @@ def _drift_abs(reason: Any) -> float | None:
         return float(match.group(1))
     except ValueError:
         return None
+
+
+def _reason_bucket(row: dict[str, Any]) -> str:
+    status = str(row.get("latest_status") or "UNKNOWN")
+    reason = str(row.get("latest_reason") or "").lower()
+    if status == "DRIFT_BLOCKED":
+        return "price drift"
+    if "spread" in reason:
+        return "spread"
+    if "below min_price" in reason:
+        return "price too low"
+    if "above max_price" in reason:
+        return "price too high"
+    if "min order" in reason or "min_order" in reason or "budget below" in reason:
+        return "size/min order"
+    if "liquidity" in reason or "liquid" in reason:
+        return "liquidity"
+    return status.lower()
+
+
+def _latest_snapshot_value(row: dict[str, Any], name: str) -> Any:
+    latest_value = row.get(f"latest_snapshot_{name}")
+    if _maybe_float(latest_value) is not None:
+        return latest_value
+    if row.get("selected_signal_id"):
+        return None
+    return row.get(f"snapshot_{name}")
+
+
+def _block_key(row: dict[str, Any]) -> str:
+    latest_hash = str(row.get("latest_trade_hash") or "").strip()
+    if latest_hash:
+        return latest_hash
+    return "|".join(
+        [
+            str(row.get("leader_wallet") or ""),
+            str(row.get("latest_status") or ""),
+            str(row.get("latest_reason") or ""),
+            str(row.get("latest_token_id") or row.get("token_id") or ""),
+            str(row.get("latest_trade_side") or ""),
+        ]
+    )
+
+
+def _summarize_block(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    ordered = sorted(
+        rows,
+        key=lambda row: _safe_dt(row.get("observed_at")) or datetime.min.replace(tzinfo=timezone.utc),
+    )
+    first = ordered[0]
+    last = ordered[-1]
+    ages = [_maybe_float(row.get("latest_trade_age_sec")) for row in ordered]
+    ages = [age for age in ages if age is not None]
+    midpoint = _latest_snapshot_value(last, "midpoint")
+    spread = _latest_snapshot_value(last, "spread")
+    midpoint_num = _maybe_float(midpoint)
+    spread_num = _maybe_float(spread)
+    spread_rel = None
+    if midpoint_num and spread_num is not None:
+        spread_rel = spread_num / midpoint_num
+    return {
+        "leader": _leader_name(last),
+        "category": str(last.get("category") or "UNKNOWN"),
+        "status": str(last.get("latest_status") or "UNKNOWN"),
+        "reason": str(last.get("latest_reason") or "UNKNOWN"),
+        "reason_bucket": _reason_bucket(last),
+        "checks": len(rows),
+        "side": str(last.get("latest_trade_side") or "n/a"),
+        "hash": str(last.get("latest_trade_hash") or ""),
+        "token": str(last.get("latest_token_id") or last.get("token_id") or ""),
+        "leader_price": last.get("latest_trade_price"),
+        "midpoint": midpoint,
+        "spread": spread,
+        "spread_rel": spread_rel,
+        "age_first": min(ages) if ages else None,
+        "age_last": max(ages) if ages else None,
+        "observed_at": _safe_dt(last.get("observed_at")),
+    }
 
 
 def _load_latest_alert_count(path: Path = Path("data/executor_alerts_latest.json")) -> int | None:
@@ -499,55 +607,72 @@ def build_blocks_report(*, now: datetime | None = None) -> str:
         return "Блокировки за 24ч\nнет POLICY_BLOCKED или DRIFT_BLOCKED"
 
     by_status: dict[str, list[dict[str, Any]]] = defaultdict(list)
-    by_leader_status: dict[tuple[str, str, str], list[dict[str, Any]]] = defaultdict(list)
+    by_key: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for row in blocked:
         status = str(row.get("latest_status") or "UNKNOWN")
         by_status[status].append(row)
-        by_leader_status[
-            (
-                _leader_name(row),
-                str(row.get("category") or "UNKNOWN"),
-                status,
-            )
-        ].append(row)
+        by_key[_block_key(row)].append(row)
+
+    unique_blocks = [_summarize_block(rows) for rows in by_key.values()]
+    unique_blocks.sort(
+        key=lambda row: (
+            row["observed_at"] or datetime.min.replace(tzinfo=timezone.utc),
+            row["checks"],
+        ),
+        reverse=True,
+    )
 
     lines = [
         "Блокировки за 24ч",
-        "Проверки/unique: много проверок по одному hash не равно много разных пропущенных сделок.",
+        f"проверки: {len(blocked)} | unique latest-сделки: {len(unique_blocks)}",
+        "Пояснение: checks = повторные polling-проверки одной и той же latest-сделки.",
         "",
     ]
     for status in ("POLICY_BLOCKED", "DRIFT_BLOCKED"):
         rows = by_status.get(status, [])
         if not rows:
             continue
-        lines.append(f"{status}: {len(rows)} проверок / {_unique_count(rows, 'latest_trade_hash')} unique")
+        unique = len({_block_key(row) for row in rows})
+        lines.append(f"{status}: {len(rows)} проверок / {unique} unique")
         lines.append(f"  {_status_hint(status)}")
 
-    lines.append("")
-    lines.append("По лидерам:")
-    leader_rows = sorted(
-        by_leader_status.items(),
-        key=lambda item: (len(item[1]), _unique_count(item[1], "latest_trade_hash")),
-        reverse=True,
-    )
-    for (leader, category, status), rows in leader_rows[:8]:
-        lines.append(
-            (
-                f"{leader} | {category} | {status}: "
-                f"{len(rows)} checks / {_unique_count(rows, 'latest_trade_hash')} unique"
-            )
-        )
-
-    reason_counts = Counter(str(row.get("latest_reason") or "UNKNOWN") for row in blocked)
+    reason_counts: Counter[str] = Counter()
+    reason_check_counts: Counter[str] = Counter()
+    for item in unique_blocks:
+        bucket = str(item["reason_bucket"])
+        reason_counts[bucket] += 1
+        reason_check_counts[bucket] += int(item["checks"])
     if reason_counts:
         lines.append("")
-        lines.append("Главные причины:")
-        for reason, count in reason_counts.most_common(5):
-            unique = _unique_count(
-                [row for row in blocked if str(row.get("latest_reason") or "UNKNOWN") == reason],
-                "latest_trade_hash",
+        lines.append("Причины, unique:")
+        for reason, unique in reason_counts.most_common(6):
+            lines.append(f"{reason}: {unique} unique / {reason_check_counts[reason]} checks")
+
+    lines.append("")
+    lines.append("Последние unique-блокировки:")
+    for idx, item in enumerate(unique_blocks[:8], start=1):
+        spread_rel = item.get("spread_rel")
+        spread_rel_text = f" ({_pct(spread_rel)})" if spread_rel is not None else ""
+        age_first = _age(item.get("age_first"))
+        age_last = _age(item.get("age_last"))
+        age_text = age_last if age_first == age_last else f"{age_first}->{age_last}"
+        lines.extend(
+            [
+                (
+                    f"{idx}. {item['leader']} | {item['category']} | {item['side']} | "
+                    f"{item['status']} / {item['reason_bucket']} | checks {item['checks']}"
+                ),
+                (
+                    f"   age {age_text} | leader px {_num(item.get('leader_price'))} | "
+                    f"mid {_num(item.get('midpoint'))} | spread {_num(item.get('spread'))}{spread_rel_text}"
+                ),
+                f"   reason: {item['reason'][:120]}",
+            ]
+        )
+        if item.get("hash") or item.get("token"):
+            lines.append(
+                f"   hash {_short(item.get('hash') or 'n/a')} | token {_short(item.get('token') or 'n/a')}"
             )
-            lines.append(f"{count} checks / {unique} unique: {reason[:92]}")
 
     drift_abs_values = [
         value

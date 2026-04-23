@@ -89,6 +89,12 @@ def capture_once(verbose: bool = True) -> list[dict]:
             snapshot_best_bid=snapshot_best_bid,
             snapshot_best_ask=snapshot_best_ask,
             snapshot_spread=snapshot_spread,
+            latest_token_id=summary.get("latest_token_id"),
+            latest_trade_price=_safe_float(summary.get("latest_trade_price")),
+            latest_snapshot_midpoint=_safe_float(summary.get("latest_snapshot_midpoint")),
+            latest_snapshot_best_bid=_safe_float(summary.get("latest_snapshot_best_bid")),
+            latest_snapshot_best_ask=_safe_float(summary.get("latest_snapshot_best_ask")),
+            latest_snapshot_spread=_safe_float(summary.get("latest_snapshot_spread")),
         )
 
         rows_to_print.append(
@@ -102,6 +108,7 @@ def capture_once(verbose: bool = True) -> list[dict]:
                 "selected_signal_id": selected_signal_id,
                 "selected_side": selected_side,
                 "token_id": selected_token_id,
+                "latest_token_id": summary.get("latest_token_id"),
                 "selected_trade_notional_usd": _safe_float(summary.get("selected_trade_notional_usd")),
                 "selected_leader_portfolio_value_usd": _safe_float(
                     summary.get("selected_leader_portfolio_value_usd")
@@ -110,6 +117,7 @@ def capture_once(verbose: bool = True) -> list[dict]:
                     summary.get("selected_leader_exit_fraction")
                 ),
                 "snapshot_spread": snapshot_spread,
+                "latest_snapshot_spread": _safe_float(summary.get("latest_snapshot_spread")),
             }
         )
 

@@ -202,6 +202,12 @@ def latest_fresh_copyable_signal_from_wallet(
         "latest_trade_side": None,
         "latest_trade_age_sec": None,
         "latest_trade_hash": None,
+        "latest_token_id": None,
+        "latest_trade_price": None,
+        "latest_snapshot_midpoint": None,
+        "latest_snapshot_best_bid": None,
+        "latest_snapshot_best_ask": None,
+        "latest_snapshot_spread": None,
         "latest_status": None,
         "latest_reason": None,
         "selected_trade_hash": None,
@@ -226,6 +232,8 @@ def latest_fresh_copyable_signal_from_wallet(
             summary["latest_trade_side"] = trade.side
             summary["latest_trade_age_sec"] = age_sec
             summary["latest_trade_hash"] = trade.transaction_hash
+            summary["latest_token_id"] = trade.asset
+            summary["latest_trade_price"] = trade.price
 
         if trade.side not in {"BUY", "SELL"}:
             if idx == 0:
@@ -281,6 +289,12 @@ def latest_fresh_copyable_signal_from_wallet(
                     summary["latest_status"] = "SNAPSHOT_ERROR"
                     summary["latest_reason"] = msg
             continue
+
+        if idx == 0:
+            summary["latest_snapshot_midpoint"] = snapshot.get("midpoint")
+            summary["latest_snapshot_best_bid"] = snapshot.get("best_bid")
+            summary["latest_snapshot_best_ask"] = snapshot.get("best_ask")
+            summary["latest_snapshot_spread"] = snapshot.get("spread")
 
         max_spread = float(risk.get("skip_if_spread_gt", 0.02))
         max_spread_rel = _positive_float_or_none(risk.get("skip_if_spread_rel_gt"))
