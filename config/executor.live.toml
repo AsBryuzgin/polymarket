@@ -124,3 +124,16 @@ max_recent_trades = 3
 leader_position_context_max_pages = 20
 max_price_drift_abs = 0.02
 max_price_drift_rel = 0.03
+
+[settlement]
+enabled = true
+collateral_token_address = "0xC011a7E12a19f7B1f670d46F03B03f3342E82DFB"
+ctf_contract_address = "0x4D97DCd97eC945f40cF65F87097ACe5EA0476045"
+proxy_factory_address = "0xaB45c5A4B0c941a2F231C04C3f49182e1A254052"
+relay_hub_address = "0xD216153c06E857cD7f72665E0aF1d7D82172F494"
+parent_collection_id = "0x0000000000000000000000000000000000000000000000000000000000000000"
+gas_price = "0"
+gas_limit = "10000000"
+poll_attempts = 10
+poll_interval_sec = 2.0
+live_require_exchange_position = true

@@ -9,6 +9,7 @@ from execution.telegram_reports import (
     build_activity_report,
     build_blocks_report,
     build_leaders_report,
+    build_settlements_report,
     build_status_report,
     build_unmarked_report,
 )
@@ -230,6 +231,18 @@ class TelegramReportTests(unittest.TestCase):
         self.assertIn("realized +$0.25", report)
         self.assertIn("Leader", report)
         self.assertIn("BUY 0 | SELL 1", report)
+
+    def test_settlements_report_uses_settlement_builder(self) -> None:
+        with (
+            patch("execution.telegram_reports.init_db"),
+            patch(
+                "execution.telegram_reports.build_settlement_report",
+                return_value="settlement report body",
+            ),
+        ):
+            report = build_settlements_report({"global": {"execution_mode": "paper"}})
+
+        self.assertEqual(report, "settlement report body")
 
     def test_leaders_report_handles_registry_map(self) -> None:
         with (

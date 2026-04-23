@@ -11,6 +11,7 @@ from execution.allowance import fetch_collateral_balance_allowance
 from execution.market_diagnostics import diagnose_market_snapshot_error
 from execution.position_marking import is_marked, is_unmarked, mark_position
 from execution.polymarket_executor import fetch_market_snapshot
+from execution.settlement import build_settlement_report
 from execution.signal_observation_store import (
     init_signal_observation_table,
     list_signal_observations,
@@ -553,6 +554,18 @@ def build_unmarked_report(
     return "\n".join(lines)
 
 
+def build_settlements_report(
+    config: dict[str, Any],
+    *,
+    snapshot_loader: SnapshotLoader = fetch_market_snapshot,
+) -> str:
+    init_db()
+    return build_settlement_report(
+        config=config,
+        snapshot_loader=snapshot_loader,
+    )
+
+
 def build_leaders_report(
     *,
     snapshot_loader: SnapshotLoader = fetch_market_snapshot,
@@ -838,6 +851,7 @@ def build_help_report() -> str:
             "/activity - активность сигналов за 24ч",
             "/blocks - policy/drift блокировки за 24ч",
             "/unmarked - позиции без текущего рыночного mark-to-market",
+            "/settlements - resolved позиции и последние redeem-операции",
             "/rebalance - прислать review-файлы и запросить подтверждение",
             "candidates CATEGORY - топ кандидатов категории pending-review",
             "pick CATEGORY N - выбрать кандидата вручную",

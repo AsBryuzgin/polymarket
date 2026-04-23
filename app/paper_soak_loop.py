@@ -13,8 +13,10 @@ if str(ROOT) not in sys.path:
 from execution.builder_auth import load_executor_config
 from execution.order_router import resolve_execution_mode
 from execution.signal_observation_store import init_signal_observation_table
+from execution.settlement import run_settlement_cycle
 from execution.soak_runner import filter_registry_rows_for_scan, run_soak_cycle, summarize_soak_cycle
 from execution.state_store import init_db, list_leader_registry, list_open_positions
+from execution.polymarket_executor import fetch_market_snapshot
 import execution.state_store as state_store
 
 
@@ -83,9 +85,15 @@ def main() -> None:
             started = time.strftime("%Y-%m-%d %H:%M:%S")
             rows = run_soak_cycle(registry_rows=registry_rows)
             summary = summarize_soak_cycle(rows)
+            settlement_summary = run_settlement_cycle(
+                config=config,
+                snapshot_loader=fetch_market_snapshot,
+            )
 
             print(f"\n--- paper soak cycle {cycle} at {started} ---")
             pprint(summary)
+            print("--- settlement ---")
+            pprint(settlement_summary)
 
             if args.max_cycles and cycle >= args.max_cycles:
                 print("Reached max_cycles, stopping.")

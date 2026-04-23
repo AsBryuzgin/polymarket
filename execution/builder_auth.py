@@ -7,6 +7,8 @@ import tomllib
 
 from dotenv import load_dotenv
 from py_clob_client.client import ClobClient
+from py_builder_signing_sdk.config import BuilderConfig
+from py_builder_signing_sdk.sdk_types import BuilderApiKeyCreds
 
 load_dotenv()
 
@@ -74,6 +76,17 @@ def build_clob_client(env: ExecutorEnv) -> ClobClient:
         funder=env.funder_address,
     )
     return client
+
+
+def build_builder_config(env: ExecutorEnv) -> BuilderConfig | None:
+    if not env.builder_api_key or not env.builder_secret or not env.builder_passphrase:
+        return None
+    creds = BuilderApiKeyCreds(
+        key=env.builder_api_key,
+        secret=env.builder_secret,
+        passphrase=env.builder_passphrase,
+    )
+    return BuilderConfig(local_builder_creds=creds)
 
 
 def health_snapshot() -> dict:

@@ -47,6 +47,12 @@ class TelegramBotTests(unittest.TestCase):
 
         self.assertEqual(response, "diag report")
 
+    def test_settlements_command_is_routed(self) -> None:
+        with patch("app.telegram_bot.build_settlements_report", return_value="settlement report"):
+            response = telegram_bot._build_response("сеттлмент", {})
+
+        self.assertEqual(response, "settlement report")
+
 
 if __name__ == "__main__":
     unittest.main()

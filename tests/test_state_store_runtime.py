@@ -71,6 +71,43 @@ class StateStoreRuntimeTests(unittest.TestCase):
 
             self.assertIsNone(state_store.get_leader_registry("wallet1"))
 
+    def test_processed_settlement_is_upserted(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            state_store.DB_PATH = Path(tmp) / "executor_state.db"
+            state_store.init_db()
+
+            state_store.record_processed_settlement(
+                "condition-1",
+                market_slug="slug-a",
+                question="Question A",
+                token_ids=["tokenA"],
+                mode="PAPER",
+                status="PAPER_SETTLED",
+                reason="ok",
+                expected_payout_usd=10.0,
+                position_count=1,
+                raw_response={"ok": True},
+            )
+            row = state_store.get_processed_settlement("condition-1")
+            self.assertIsNotNone(row)
+            self.assertEqual(row["status"], "PAPER_SETTLED")
+
+            state_store.record_processed_settlement(
+                "condition-1",
+                market_slug="slug-b",
+                question="Question B",
+                token_ids=["tokenA", "tokenB"],
+                mode="LIVE",
+                status="LIVE_SUBMITTED",
+                reason="pending",
+                transaction_id="tx-1",
+            )
+            row = state_store.get_processed_settlement("condition-1")
+            self.assertIsNotNone(row)
+            self.assertEqual(row["mode"], "LIVE")
+            self.assertEqual(row["status"], "LIVE_SUBMITTED")
+            self.assertEqual(row["transaction_id"], "tx-1")
+
 
 if __name__ == "__main__":
     unittest.main()

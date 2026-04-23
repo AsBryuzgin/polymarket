@@ -174,6 +174,27 @@ def init_db() -> None:
         """
     )
 
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS processed_settlements (
+            condition_id TEXT PRIMARY KEY,
+            market_slug TEXT,
+            question TEXT,
+            token_ids_json TEXT,
+            mode TEXT,
+            status TEXT NOT NULL,
+            reason TEXT,
+            transaction_id TEXT,
+            transaction_hash TEXT,
+            expected_payout_usd REAL,
+            position_count INTEGER,
+            raw_response_json TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        """
+    )
+
     conn.commit()
     conn.close()
 
@@ -393,6 +414,115 @@ def list_order_attempts(signal_id: str | None = None, limit: int = 50) -> list[d
             (signal_id, limit),
         )
 
+    rows = [dict(row) for row in cur.fetchall()]
+    conn.close()
+    return rows
+
+
+def get_processed_settlement(condition_id: str) -> dict[str, Any] | None:
+    conn = get_connection()
+    cur = conn.cursor()
+
+    cur.execute(
+        """
+        SELECT *
+        FROM processed_settlements
+        WHERE condition_id = ?
+        LIMIT 1
+        """,
+        (condition_id,),
+    )
+    row = cur.fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
+def record_processed_settlement(
+    condition_id: str,
+    *,
+    market_slug: str | None,
+    question: str | None,
+    token_ids: list[str] | None,
+    mode: str | None,
+    status: str,
+    reason: str | None,
+    transaction_id: str | None = None,
+    transaction_hash: str | None = None,
+    expected_payout_usd: float | None = None,
+    position_count: int | None = None,
+    raw_response: dict[str, Any] | list[Any] | None = None,
+) -> None:
+    raw_response_json = None
+    if raw_response is not None:
+        raw_response_json = json.dumps(raw_response, ensure_ascii=False, default=str)
+    token_ids_json = json.dumps(token_ids or [], ensure_ascii=False)
+
+    conn = get_connection()
+    cur = conn.cursor()
+
+    cur.execute(
+        """
+        INSERT INTO processed_settlements (
+            condition_id,
+            market_slug,
+            question,
+            token_ids_json,
+            mode,
+            status,
+            reason,
+            transaction_id,
+            transaction_hash,
+            expected_payout_usd,
+            position_count,
+            raw_response_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(condition_id) DO UPDATE SET
+            market_slug = excluded.market_slug,
+            question = excluded.question,
+            token_ids_json = excluded.token_ids_json,
+            mode = excluded.mode,
+            status = excluded.status,
+            reason = excluded.reason,
+            transaction_id = excluded.transaction_id,
+            transaction_hash = excluded.transaction_hash,
+            expected_payout_usd = excluded.expected_payout_usd,
+            position_count = excluded.position_count,
+            raw_response_json = excluded.raw_response_json,
+            updated_at = CURRENT_TIMESTAMP
+        """,
+        (
+            condition_id,
+            market_slug,
+            question,
+            token_ids_json,
+            mode,
+            status,
+            reason,
+            transaction_id,
+            transaction_hash,
+            expected_payout_usd,
+            position_count,
+            raw_response_json,
+        ),
+    )
+
+    conn.commit()
+    conn.close()
+
+
+def list_processed_settlements(limit: int = 200) -> list[dict[str, Any]]:
+    conn = get_connection()
+    cur = conn.cursor()
+
+    cur.execute(
+        """
+        SELECT *
+        FROM processed_settlements
+        ORDER BY updated_at DESC, created_at DESC
+        LIMIT ?
+        """,
+        (limit,),
+    )
     rows = [dict(row) for row in cur.fetchall()]
     conn.close()
     return rows
