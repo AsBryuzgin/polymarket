@@ -6,6 +6,7 @@ import os
 import sys
 import time
 import urllib.request
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -22,6 +23,15 @@ from execution.telegram_reports import (
     build_positions_report,
     build_status_report,
 )
+from app.rebalance_review import (
+    apply_manual_pick,
+    approve_pending_review,
+    build_review_message,
+    create_rebalance_review,
+    list_manual_candidates,
+    load_pending_review,
+    reject_pending_review,
+)
 
 
 OFFSET_FILE = Path("data/telegram_bot_offset.json")
@@ -29,7 +39,7 @@ KEYBOARD = {
     "keyboard": [
         [{"text": "Статус"}, {"text": "Позиции"}],
         [{"text": "Лидеры"}, {"text": "Активность 24ч"}],
-        [{"text": "Блокировки 24ч"}],
+        [{"text": "Блокировки 24ч"}, {"text": "Ребаланс"}],
         [{"text": "Помощь"}],
     ],
     "resize_keyboard": True,
@@ -43,6 +53,49 @@ def _post_json(url: str, payload: dict[str, Any], *, timeout_sec: float) -> dict
         url,
         data=body,
         headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    with urllib.request.urlopen(request, timeout=timeout_sec) as response:
+        raw = response.read().decode("utf-8")
+    parsed = json.loads(raw)
+    if not isinstance(parsed, dict):
+        raise RuntimeError(f"unexpected Telegram response: {parsed!r}")
+    return parsed
+
+
+def _post_multipart(
+    url: str,
+    *,
+    fields: dict[str, str],
+    file_field: str,
+    file_path: Path,
+    timeout_sec: float,
+) -> dict[str, Any]:
+    boundary = f"----polymarket-{uuid.uuid4().hex}"
+    chunks: list[bytes] = []
+    for name, value in fields.items():
+        chunks.append(f"--{boundary}\r\n".encode("utf-8"))
+        chunks.append(f'Content-Disposition: form-data; name="{name}"\r\n\r\n'.encode("utf-8"))
+        chunks.append(str(value).encode("utf-8"))
+        chunks.append(b"\r\n")
+
+    chunks.append(f"--{boundary}\r\n".encode("utf-8"))
+    chunks.append(
+        (
+            f'Content-Disposition: form-data; name="{file_field}"; '
+            f'filename="{file_path.name}"\r\n'
+            "Content-Type: application/octet-stream\r\n\r\n"
+        ).encode("utf-8")
+    )
+    chunks.append(file_path.read_bytes())
+    chunks.append(b"\r\n")
+    chunks.append(f"--{boundary}--\r\n".encode("utf-8"))
+
+    body = b"".join(chunks)
+    request = urllib.request.Request(
+        url,
+        data=body,
+        headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
         method="POST",
     )
     with urllib.request.urlopen(request, timeout=timeout_sec) as response:
@@ -105,6 +158,32 @@ def _send_message(
     _post_json(_api_url(token, "sendMessage"), payload, timeout_sec=timeout_sec)
 
 
+def _send_document(
+    *,
+    token: str,
+    chat_id: str,
+    path: Path,
+    timeout_sec: float,
+    caption: str = "",
+    reply_markup: dict[str, Any] | None = None,
+) -> None:
+    fields = {
+        "chat_id": chat_id,
+        "caption": caption[:900],
+    }
+    if reply_markup is not None:
+        fields["reply_markup"] = json.dumps(reply_markup, ensure_ascii=False)
+    response = _post_multipart(
+        _api_url(token, "sendDocument"),
+        fields=fields,
+        file_field="document",
+        file_path=path,
+        timeout_sec=timeout_sec,
+    )
+    if not response.get("ok"):
+        raise RuntimeError(f"Telegram sendDocument failed: {response}")
+
+
 def _get_updates(
     *,
     token: str,
@@ -116,7 +195,7 @@ def _get_updates(
     payload: dict[str, Any] = {
         "timeout": poll_timeout_sec,
         "limit": limit,
-        "allowed_updates": ["message"],
+        "allowed_updates": ["message", "callback_query"],
     }
     if offset is not None:
         payload["offset"] = offset
@@ -163,6 +242,201 @@ def _build_response(text: str, config: dict[str, Any]) -> str:
     return "Не понял команду. Нажми Помощь или отправь /help."
 
 
+def _review_markup(review_id: str) -> dict[str, Any]:
+    return {
+        "inline_keyboard": [
+            [
+                {"text": "Подтвердить", "callback_data": f"rebalance_approve:{review_id}"},
+                {"text": "Отклонить", "callback_data": f"rebalance_reject:{review_id}"},
+            ],
+            [
+                {"text": "Выбрать вручную", "callback_data": f"rebalance_manual:{review_id}"},
+            ],
+        ]
+    }
+
+
+def _is_rebalance_command(text: str) -> bool:
+    return text.strip().lower() in {
+        "/rebalance",
+        "rebalance",
+        "ребаланс",
+        "новый ребаланс",
+        "review rebalance",
+    }
+
+
+def _handle_rebalance_command(
+    *,
+    token: str,
+    chat_id: str,
+    timeout_sec: float,
+) -> None:
+    _send_message(
+        token=token,
+        chat_id=chat_id,
+        text="Готовлю rebalance review по последним top-30 shortlist CSV. Live universe пока не меняю.",
+        timeout_sec=timeout_sec,
+        reply_markup=KEYBOARD,
+    )
+    review = create_rebalance_review()
+    markup = _review_markup(str(review["review_id"]))
+    _send_document(
+        token=token,
+        chat_id=chat_id,
+        path=Path(review["files"]["all_csv"]),
+        caption="Top-30 all categories CSV",
+        timeout_sec=timeout_sec,
+    )
+    _send_document(
+        token=token,
+        chat_id=chat_id,
+        path=Path(review["files"]["xlsx"]),
+        caption="Top-30 all categories XLSX with WSS formulas",
+        timeout_sec=timeout_sec,
+    )
+    _send_message(
+        token=token,
+        chat_id=chat_id,
+        text=build_review_message(review),
+        timeout_sec=timeout_sec,
+        reply_markup=markup,
+    )
+
+
+def _handle_pick_command(text: str) -> str | None:
+    parts = text.strip().split()
+    if not parts:
+        return None
+    command = parts[0].lower()
+    if command in {"candidates", "кандидаты"} and len(parts) == 2:
+        return list_manual_candidates(parts[1])
+    if command in {"pick", "выбрать"} and len(parts) == 3:
+        result = apply_manual_pick(parts[1], int(parts[2]))
+        review = result["review"]
+        chosen = result["chosen"]
+        replaced = result.get("replaced_category")
+        replaced_text = f"\nЗаменена категория: {replaced}" if replaced else ""
+        return (
+            f"Выбран {chosen.get('user_name')} | {chosen.get('category')} | "
+            f"WSS {chosen.get('final_wss')}.{replaced_text}\n\n"
+            f"{build_review_message(review)}"
+        )
+    return None
+
+
+def _answer_callback_query(
+    *,
+    token: str,
+    callback_query_id: str,
+    text: str,
+    timeout_sec: float,
+) -> None:
+    _post_json(
+        _api_url(token, "answerCallbackQuery"),
+        {"callback_query_id": callback_query_id, "text": text[:180]},
+        timeout_sec=timeout_sec,
+    )
+
+
+def _handle_callback_query(
+    *,
+    token: str,
+    allowed_chat_id: str,
+    callback_query: dict[str, Any],
+    timeout_sec: float,
+) -> None:
+    callback_id = str(callback_query.get("id") or "")
+    message = callback_query.get("message") or {}
+    chat = message.get("chat") or {}
+    chat_id = str(chat.get("id") or "")
+    if chat_id != str(allowed_chat_id):
+        return
+
+    data = str(callback_query.get("data") or "")
+    action, _, review_id = data.partition(":")
+    try:
+        if action == "rebalance_approve":
+            log = approve_pending_review(review_id or None)
+            _answer_callback_query(
+                token=token,
+                callback_query_id=callback_id,
+                text="Rebalance approved",
+                timeout_sec=timeout_sec,
+            )
+            _send_message(
+                token=token,
+                chat_id=allowed_chat_id,
+                text=f"Rebalance {review_id} применен.\n\n{log[-2500:]}",
+                timeout_sec=timeout_sec,
+                reply_markup=KEYBOARD,
+            )
+        elif action == "rebalance_reject":
+            text = reject_pending_review(review_id or None)
+            _answer_callback_query(
+                token=token,
+                callback_query_id=callback_id,
+                text="Rebalance rejected",
+                timeout_sec=timeout_sec,
+            )
+            _send_message(
+                token=token,
+                chat_id=allowed_chat_id,
+                text=text,
+                timeout_sec=timeout_sec,
+                reply_markup=KEYBOARD,
+            )
+        elif action == "rebalance_manual":
+            review = load_pending_review()
+            categories = [
+                str(row.get("category"))
+                for row in (review or {}).get("proposed_live", [])
+                if row.get("category")
+            ]
+            lines = [
+                "Ручной выбор включен.",
+                "Посмотреть кандидатов: candidates CATEGORY",
+                "Выбрать: pick CATEGORY N",
+                "",
+                f"Текущие категории: {', '.join(categories) if categories else 'n/a'}",
+                "Пример: candidates FINANCE",
+            ]
+            _answer_callback_query(
+                token=token,
+                callback_query_id=callback_id,
+                text="Manual mode",
+                timeout_sec=timeout_sec,
+            )
+            _send_message(
+                token=token,
+                chat_id=allowed_chat_id,
+                text="\n".join(lines),
+                timeout_sec=timeout_sec,
+                reply_markup=KEYBOARD,
+            )
+        else:
+            _answer_callback_query(
+                token=token,
+                callback_query_id=callback_id,
+                text="Unknown action",
+                timeout_sec=timeout_sec,
+            )
+    except Exception as e:
+        _answer_callback_query(
+            token=token,
+            callback_query_id=callback_id,
+            text="Command failed",
+            timeout_sec=timeout_sec,
+        )
+        _send_message(
+            token=token,
+            chat_id=allowed_chat_id,
+            text=f"Rebalance callback failed: {e}",
+            timeout_sec=timeout_sec,
+            reply_markup=KEYBOARD,
+        )
+
+
 def run_bot(*, poll_sec: float, timeout_sec: float, process_pending: bool) -> None:
     config = load_executor_config()
     token, allowed_chat_id = _telegram_env(config)
@@ -189,6 +463,16 @@ def run_bot(*, poll_sec: float, timeout_sec: float, process_pending: bool) -> No
             offset = update_id + 1
             _save_offset(offset)
 
+            callback_query = update.get("callback_query")
+            if callback_query:
+                _handle_callback_query(
+                    token=token,
+                    allowed_chat_id=allowed_chat_id,
+                    callback_query=callback_query,
+                    timeout_sec=timeout_sec,
+                )
+                continue
+
             message = update.get("message") or {}
             chat = message.get("chat") or {}
             chat_id = str(chat.get("id") or "")
@@ -200,7 +484,14 @@ def run_bot(*, poll_sec: float, timeout_sec: float, process_pending: bool) -> No
                 continue
 
             try:
-                response_text = _build_response(text, config)
+                if _is_rebalance_command(text):
+                    _handle_rebalance_command(
+                        token=token,
+                        chat_id=allowed_chat_id,
+                        timeout_sec=timeout_sec,
+                    )
+                    continue
+                response_text = _handle_pick_command(text) or _build_response(text, config)
             except Exception as e:
                 response_text = f"Command failed: {e}"
 

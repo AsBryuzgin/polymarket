@@ -571,6 +571,9 @@ def build_help_report() -> str:
             "/leaders - PnL по лидерам из истории бота",
             "/activity - активность сигналов за 24ч",
             "/blocks - policy/drift блокировки за 24ч",
+            "/rebalance - прислать review-файлы и запросить подтверждение",
+            "candidates CATEGORY - топ кандидатов категории pending-review",
+            "pick CATEGORY N - выбрать кандидата вручную",
             "/help - это меню",
         ]
     )
