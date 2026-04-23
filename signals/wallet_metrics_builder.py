@@ -262,6 +262,8 @@ def _current_position_pnl_ratio(current_positions: list[dict[str, Any]]) -> floa
     pnl = 0.0
 
     for item in current_positions:
+        if item.get("redeemable"):
+            continue
         initial_value = abs(_safe_float(item.get("initialValue")))
         cash_pnl = _safe_float(item.get("cashPnl"))
         if initial_value <= 0:

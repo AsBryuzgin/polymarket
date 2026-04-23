@@ -1,5 +1,6 @@
 import unittest
 
+from signals.wallet_metrics_builder import _current_position_pnl_ratio
 from signals.wallet_scoring import WalletMetrics, score_wallet
 
 
@@ -164,6 +165,24 @@ class TestWalletScoring(unittest.TestCase):
 
         self.assertFalse(result.eligible)
         self.assertIn("current_position_pnl_ratio < -0.25", result.filter_reasons)
+
+    def test_current_position_pnl_ratio_ignores_redeemable_positions(self) -> None:
+        ratio = _current_position_pnl_ratio(
+            [
+                {
+                    "initialValue": 1000.0,
+                    "cashPnl": -1000.0,
+                    "redeemable": True,
+                },
+                {
+                    "initialValue": 100.0,
+                    "cashPnl": 10.0,
+                    "redeemable": False,
+                },
+            ]
+        )
+
+        self.assertEqual(ratio, 0.10)
 
     def test_activity_does_not_change_wss_above_minimum_gate(self) -> None:
         base = dict(

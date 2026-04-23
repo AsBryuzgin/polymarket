@@ -30,7 +30,8 @@ def score_wallet_from_category_entry(
     current_positions = wallet_client.paginate_current_positions(
         wallet,
         page_size=100,
-        max_pages=3,
+        max_pages=10,
+        sort_by="CURRENT",
     )
     trades = wallet_client.paginate_trades(
         wallet,
@@ -73,7 +74,14 @@ def score_wallet_from_category_entry(
         "eligible": score.eligible,
         "final_wss": score.final_wss,
         "raw_wss": score.raw_wss,
+        "consistency_score": score.consistency_score,
+        "drawdown_score": score.drawdown_score,
+        "specialization_score": score.specialization_score,
+        "copyability_score": score.copyability_score,
         "activity_score": score.activity_score,
+        "return_quality_score": score.return_quality_score,
+        "track_record_multiplier": score.track_record_multiplier,
+        "data_depth_multiplier": score.data_depth_multiplier,
         "filter_reasons": score.filter_reasons,
         "closed_positions_used": len(closed_positions),
         "trades_30d": metrics.trades_30d,

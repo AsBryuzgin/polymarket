@@ -48,7 +48,12 @@ def score_wallet_from_category_entry(
     traded_payload = wallet_client.get_total_markets_traded(wallet)
     traded_count = wallet_client.summarize_total_markets_traded(traded_payload)
 
-    current_positions = wallet_client.paginate_current_positions(wallet, page_size=100, max_pages=3)
+    current_positions = wallet_client.paginate_current_positions(
+        wallet,
+        page_size=100,
+        max_pages=10,
+        sort_by="CURRENT",
+    )
     closed_positions = paginate_recent_closed_positions(
         wallet_client=wallet_client,
         wallet=wallet,
@@ -87,7 +92,14 @@ def score_wallet_from_category_entry(
         "eligible": score.eligible,
         "final_wss": score.final_wss,
         "raw_wss": score.raw_wss,
+        "consistency_score": score.consistency_score,
+        "drawdown_score": score.drawdown_score,
+        "specialization_score": score.specialization_score,
+        "copyability_score": score.copyability_score,
         "activity_score": score.activity_score,
+        "return_quality_score": score.return_quality_score,
+        "track_record_multiplier": score.track_record_multiplier,
+        "data_depth_multiplier": score.data_depth_multiplier,
         "filter_reasons": "; ".join(score.filter_reasons),
         "median_spread": median_spread,
         "median_liquidity": median_liquidity,
@@ -144,7 +156,14 @@ def run_category(
                     "eligible": False,
                     "final_wss": -1.0,
                     "raw_wss": -1.0,
+                    "consistency_score": -1.0,
+                    "drawdown_score": -1.0,
+                    "specialization_score": -1.0,
+                    "copyability_score": -1.0,
                     "activity_score": -1.0,
+                    "return_quality_score": -1.0,
+                    "track_record_multiplier": -1.0,
+                    "data_depth_multiplier": -1.0,
                     "filter_reasons": f"error: {e}",
                     "median_spread": None,
                     "median_liquidity": None,
@@ -182,7 +201,14 @@ def save_csv(rows: list[dict], path: Path) -> None:
         "eligible",
         "final_wss",
         "raw_wss",
+        "consistency_score",
+        "drawdown_score",
+        "specialization_score",
+        "copyability_score",
         "activity_score",
+        "return_quality_score",
+        "track_record_multiplier",
+        "data_depth_multiplier",
         "filter_reasons",
         "median_spread",
         "median_liquidity",

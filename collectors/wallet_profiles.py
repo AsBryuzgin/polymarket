@@ -95,12 +95,20 @@ class WalletProfilesClient:
         user: str,
         page_size: int = 100,
         max_pages: int = 20,
+        sort_by: str = "TOKENS",
+        sort_direction: str = "DESC",
     ) -> list[dict[str, Any]]:
         all_items: list[dict[str, Any]] = []
 
         for page in range(max_pages):
             offset = page * page_size
-            items = self.get_current_positions(user=user, limit=page_size, offset=offset)
+            items = self.get_current_positions(
+                user=user,
+                limit=page_size,
+                offset=offset,
+                sort_by=sort_by,
+                sort_direction=sort_direction,
+            )
             if not items:
                 break
             all_items.extend(items)
