@@ -43,6 +43,23 @@ class OrderPolicyTests(unittest.TestCase):
         self.assertFalse(decision.allowed)
         self.assertIn("max_allowed_spread 0.0600", decision.reason)
 
+    def test_sell_ignores_min_order_size_gate(self) -> None:
+        decision = evaluate_order_policy(
+            side="SELL",
+            midpoint=0.50,
+            spread=0.01,
+            leader_budget_usd=0.0,
+            buy_min_price=0.05,
+            buy_max_price=0.95,
+            sell_min_price=0.0,
+            sell_max_price=1.0,
+            max_spread=0.05,
+            min_order_size_usd=1.0,
+        )
+
+        self.assertTrue(decision.allowed)
+        self.assertEqual(decision.reason, "ok")
+
 
 if __name__ == "__main__":
     unittest.main()

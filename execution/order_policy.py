@@ -62,7 +62,7 @@ def evaluate_order_policy(
             ),
         )
 
-    if leader_budget_usd < min_order_size_usd:
+    if side == "BUY" and leader_budget_usd < min_order_size_usd:
         return PolicyDecision(False, "leader budget below min order size")
 
     return PolicyDecision(True, "ok")
