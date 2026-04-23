@@ -166,6 +166,40 @@ class TestWalletScoring(unittest.TestCase):
         self.assertFalse(result.eligible)
         self.assertIn("current_position_pnl_ratio < -0.25", result.filter_reasons)
 
+    def test_low_primary_domain_share_is_penalty_not_hard_filter(self) -> None:
+        broad_generalist = WalletMetrics(
+            age_days=500,
+            closed_positions=160,
+            unique_markets=45,
+            primary_domain_share=0.20,
+            single_market_concentration=0.20,
+            roi_30=0.05,
+            roi_90=0.10,
+            roi_180=0.18,
+            monthly_roi_last_6=[0.03, 0.02, 0.04, 0.01, 0.03, 0.02],
+            negative_monthly_roi_last_12=[-0.01, -0.015],
+            primary_domain_roi_30=0.04,
+            primary_domain_roi_90=0.11,
+            primary_domain_roi_180=0.19,
+            max_drawdown=0.07,
+            longest_loss_streak=2,
+            median_spread=0.01,
+            median_liquidity=22000,
+            slippage_proxy=0.005,
+            delay_sec=40,
+            profit_factor=1.8,
+            largest_win_share=0.20,
+            current_position_pnl_ratio=0.0,
+            trades_30d=12,
+            trades_90d=30,
+            days_since_last_trade=2,
+        )
+
+        result = score_wallet(broad_generalist)
+
+        self.assertTrue(result.eligible)
+        self.assertNotIn("primary_domain_share < 0.35", result.filter_reasons)
+
     def test_current_position_pnl_ratio_ignores_redeemable_positions(self) -> None:
         ratio = _current_position_pnl_ratio(
             [

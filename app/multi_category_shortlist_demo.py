@@ -51,7 +51,7 @@ def score_wallet_from_category_entry(
     current_positions = wallet_client.paginate_current_positions(
         wallet,
         page_size=100,
-        max_pages=10,
+        max_pages=20,
         sort_by="CURRENT",
     )
     closed_positions = paginate_recent_closed_positions(

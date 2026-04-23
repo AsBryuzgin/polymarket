@@ -78,8 +78,6 @@ def check_wallet_filters(metrics: WalletMetrics) -> tuple[bool, List[str]]:
         reasons.append("closed_positions < 40")
     if metrics.unique_markets < 15:
         reasons.append("unique_markets < 15")
-    if metrics.primary_domain_share < 0.35:
-        reasons.append("primary_domain_share < 0.35")
     if metrics.single_market_concentration > 0.35:
         reasons.append("single_market_concentration > 0.35")
     if metrics.current_position_pnl_ratio < -0.25:
