@@ -147,6 +147,49 @@ class RebalanceReviewTests(unittest.TestCase):
         self.assertAlmostEqual(sum(float(row["weight"]) for row in rows), 1.0, places=6)
         self.assertTrue(report_exists)
 
+    def test_approve_rejects_stale_pending_review_without_components(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            all_csv = root / "all.csv"
+            pending_json = root / "pending.json"
+            with all_csv.open("w", encoding="utf-8", newline="") as f:
+                writer = csv.DictWriter(
+                    f,
+                    fieldnames=["category", "user_name", "wallet", "eligible", "final_wss", "raw_wss"],
+                )
+                writer.writeheader()
+                writer.writerow(
+                    {
+                        "category": "FINANCE",
+                        "user_name": "OldExport",
+                        "wallet": "wallet",
+                        "eligible": "True",
+                        "final_wss": "65",
+                        "raw_wss": "75",
+                    }
+                )
+            pending_json.write_text(
+                json.dumps(
+                    {
+                        "review_id": "stale",
+                        "status": "PENDING",
+                        "files": {
+                            "all_csv": str(all_csv),
+                            "final_candidates": str(root / "final.csv"),
+                            "final_allocation": str(root / "alloc.csv"),
+                            "live": str(root / "live.csv"),
+                            "report": str(root / "report.csv"),
+                            "state": str(root / "state.json"),
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with patch.object(rebalance_review, "PENDING_FILE", pending_json):
+                with self.assertRaisesRegex(RuntimeError, "missing scoring columns"):
+                    rebalance_review.approve_pending_review("stale")
+
 
 if __name__ == "__main__":
     unittest.main()

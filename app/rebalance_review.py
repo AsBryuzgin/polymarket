@@ -619,6 +619,9 @@ def approve_pending_review(review_id: str | None = None) -> str:
         raise RuntimeError(f"pending review id mismatch: {review.get('review_id')} != {review_id}")
 
     files = review["files"]
+    all_csv = files.get("all_csv")
+    if all_csv:
+        _validate_review_rows(_read_csv(Path(all_csv)))
     _copy_required(Path(files["final_candidates"]), FINAL_CANDIDATES_FILE)
     _copy_required(Path(files["final_allocation"]), FINAL_ALLOCATION_FILE)
     _copy_required(Path(files["live"]), LIVE_FILE)
