@@ -17,7 +17,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 import app.build_live_universe_stable as stable_universe
-from app import final_portfolio_candidates_demo, portfolio_allocation_demo
+from app import final_portfolio_candidates_demo, multi_category_shortlist_demo, portfolio_allocation_demo
 from app.apply_rebalance_lifecycle import main as apply_rebalance_lifecycle
 
 
@@ -46,6 +46,25 @@ REVIEW_COLUMNS = [
     "raw_wss",
     "formula_raw_wss",
     "formula_final_wss",
+    "consistency_score",
+    "drawdown_score",
+    "specialization_score",
+    "copyability_score",
+    "return_quality_score",
+    "track_record_multiplier",
+    "data_depth_multiplier",
+    "activity_score",
+    "current_position_pnl_ratio",
+    "trades_30d",
+    "trades_90d",
+    "days_since_last_trade",
+    "median_spread",
+    "median_liquidity",
+    "slippage_proxy",
+    "closed_positions_used",
+]
+
+REQUIRED_SCORING_COLUMNS = [
     "consistency_score",
     "drawdown_score",
     "specialization_score",
@@ -152,6 +171,7 @@ def _workbook_xml(sheet_names: list[str]) -> str:
         '<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" '
         'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">'
         f"<sheets>{sheets}</sheets>"
+        '<calcPr calcId="0" fullCalcOnLoad="1" forceFullCalc="1"/>'
         "</workbook>"
     )
 
@@ -250,8 +270,22 @@ def write_review_xlsx(rows: list[dict[str, Any]], path: Path) -> None:
         ["specialization_score", 0.20, "domain focus and single-market concentration penalty"],
         ["copyability_score", 0.10, "spread, liquidity, slippage proxy, delay"],
         ["return_quality_score", 0.10, "ROI 180, profit factor, largest-win dependency"],
-        ["final_wss", "raw_wss * track_record_multiplier * data_depth_multiplier", ""],
-        ["hard gates", "age>=120, closed>=40, unique>=15, concentration<=35%, open_pnl>=-25%, trades30>=5, last_trade<=7d", ""],
+        ["raw_wss", "weighted strategy quality score", "does not include track-record confidence haircut"],
+        [
+            "final_wss",
+            "raw_wss * track_record_multiplier * data_depth_multiplier",
+            "confidence-adjusted WSS used for ranking/allocation",
+        ],
+        [
+            "activity_score",
+            "display only; not included in WSS",
+            "activity is enforced by hard gates: trades30>=5 and last_trade<=7d",
+        ],
+        [
+            "hard gates",
+            "age>=120, closed>=40, unique>=15, concentration<=35%, open_pnl>=-25%, trades30>=5, last_trade<=7d",
+            "",
+        ],
     ]
     sheets = {
         "Top30": _review_rows_with_formulas(rows),
@@ -274,6 +308,33 @@ def _all_review_rows() -> list[dict[str, Any]]:
     if not rows:
         raise FileNotFoundError("No master shortlist rows found. Run multi_category_shortlist_demo.py first.")
     return rows
+
+
+def _missing_scoring_columns(rows: list[dict[str, Any]]) -> list[str]:
+    missing = []
+    for column in REQUIRED_SCORING_COLUMNS:
+        if not any(str(row.get(column) or "").strip() for row in rows):
+            missing.append(column)
+    return missing
+
+
+def _validate_review_rows(rows: list[dict[str, Any]]) -> None:
+    missing = _missing_scoring_columns(rows)
+    if missing:
+        raise RuntimeError(
+            "shortlist rows are missing scoring columns: "
+            + ", ".join(missing)
+            + ". Re-run the current multi-category shortlist build before creating review."
+        )
+
+
+def refresh_shortlists() -> str:
+    buf = StringIO()
+    with redirect_stdout(buf):
+        multi_category_shortlist_demo.main()
+    rows = _all_review_rows()
+    _validate_review_rows(rows)
+    return buf.getvalue()
 
 
 def _copy_required(src: Path, dst: Path) -> None:
@@ -344,12 +405,17 @@ def _summarize_live_rows(rows: list[dict[str, str]]) -> str:
     return "\n".join(lines)
 
 
-def create_rebalance_review() -> dict[str, Any]:
+def create_rebalance_review(*, refresh: bool = True) -> dict[str, Any]:
     review_id = _utc_review_id()
     paths = _pending_paths(review_id)
     paths["root"].mkdir(parents=True, exist_ok=True)
 
+    refresh_log = ""
+    if refresh:
+        refresh_log = refresh_shortlists()
+
     all_rows = _all_review_rows()
+    _validate_review_rows(all_rows)
     _write_csv(all_rows, paths["all_csv"], REVIEW_COLUMNS)
     write_review_xlsx(all_rows, paths["xlsx"])
 
@@ -374,6 +440,7 @@ def create_rebalance_review() -> dict[str, Any]:
         "manual_overrides": {},
         "files": {key: str(path) for key, path in paths.items() if key != "root"},
         "proposed_live": live_rows,
+        "refresh_log_tail": refresh_log[-4000:],
         "preview_log_tail": preview_log[-4000:],
     }
     PENDING_FILE.parent.mkdir(parents=True, exist_ok=True)

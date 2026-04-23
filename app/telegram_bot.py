@@ -275,7 +275,10 @@ def _handle_rebalance_command(
     _send_message(
         token=token,
         chat_id=chat_id,
-        text="Готовлю rebalance review по последним top-30 shortlist CSV. Live universe пока не меняю.",
+        text=(
+            "Пересобираю свежий top-30 по категориям и готовлю rebalance review. "
+            "Это может занять несколько минут. Live universe пока не меняю."
+        ),
         timeout_sec=timeout_sec,
         reply_markup=KEYBOARD,
     )

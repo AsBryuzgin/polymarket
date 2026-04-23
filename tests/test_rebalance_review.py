@@ -37,10 +37,25 @@ class RebalanceReviewTests(unittest.TestCase):
             with zipfile.ZipFile(path) as zf:
                 names = set(zf.namelist())
                 sheet_xml = zf.read("xl/worksheets/sheet1.xml").decode("utf-8")
+                workbook_xml = zf.read("xl/workbook.xml").decode("utf-8")
 
         self.assertIn("xl/worksheets/sheet1.xml", names)
         self.assertIn("xl/worksheets/sheet2.xml", names)
         self.assertIn("<f>0.35*", sheet_xml)
+        self.assertIn('fullCalcOnLoad="1"', workbook_xml)
+
+    def test_validate_review_rows_rejects_stale_shortlist_without_components(self) -> None:
+        rows = [
+            {
+                "category": "FINANCE",
+                "user_name": "OldExport",
+                "final_wss": "65",
+                "raw_wss": "75",
+            }
+        ]
+
+        with self.assertRaisesRegex(RuntimeError, "missing scoring columns"):
+            rebalance_review._validate_review_rows(rows)
 
     def test_manual_pick_replaces_category_and_reweights(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
