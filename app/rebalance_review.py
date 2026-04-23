@@ -283,7 +283,7 @@ def write_review_xlsx(rows: list[dict[str, Any]], path: Path) -> None:
         ],
         [
             "hard gates",
-            "age>=120, closed>=40, unique>=15, concentration<=35%, open_pnl>=-25%, trades30>=5, last_trade<=7d",
+            "age>=120, closed>=40, unique>=15, concentration<=35%, open_pnl>=-25%, trades30>=5, last_trade<=7d, copyability>=50",
             "",
         ],
     ]
@@ -532,6 +532,7 @@ def list_manual_candidates(category: str, *, limit: int = 10) -> str:
     for idx, row in enumerate(rows[:limit], start=1):
         lines.append(
             f"{idx}. {row.get('user_name')} | WSS {row.get('final_wss')} | "
+            f"copy {row.get('copyability_score')} | "
             f"rank {row.get('rank')} | last {row.get('days_since_last_trade')}d | "
             f"openPnL {row.get('current_position_pnl_ratio')}"
         )

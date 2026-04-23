@@ -247,10 +247,10 @@ def _review_markup(review_id: str) -> dict[str, Any]:
         "inline_keyboard": [
             [
                 {"text": "Подтвердить", "callback_data": f"rebalance_approve:{review_id}"},
-                {"text": "Отклонить", "callback_data": f"rebalance_reject:{review_id}"},
+                {"text": "Отменить", "callback_data": f"rebalance_reject:{review_id}"},
             ],
             [
-                {"text": "Выбрать вручную", "callback_data": f"rebalance_manual:{review_id}"},
+                {"text": "Сменить кандидатов", "callback_data": f"rebalance_manual:{review_id}"},
             ],
         ]
     }
@@ -307,24 +307,26 @@ def _handle_rebalance_command(
     )
 
 
-def _handle_pick_command(text: str) -> str | None:
+def _handle_pick_command(text: str) -> tuple[str, dict[str, Any] | None] | None:
     parts = text.strip().split()
     if not parts:
         return None
     command = parts[0].lower()
     if command in {"candidates", "кандидаты"} and len(parts) == 2:
-        return list_manual_candidates(parts[1])
+        return list_manual_candidates(parts[1]), None
     if command in {"pick", "выбрать"} and len(parts) == 3:
         result = apply_manual_pick(parts[1], int(parts[2]))
         review = result["review"]
         chosen = result["chosen"]
         replaced = result.get("replaced_category")
         replaced_text = f"\nЗаменена категория: {replaced}" if replaced else ""
-        return (
+        text = (
             f"Выбран {chosen.get('user_name')} | {chosen.get('category')} | "
             f"WSS {chosen.get('final_wss')}.{replaced_text}\n\n"
-            f"{build_review_message(review)}"
+            f"{build_review_message(review)}\n\n"
+            "Можно подтвердить, отменить или сменить кандидатов в других категориях."
         )
+        return text, _review_markup(str(review["review_id"]))
     return None
 
 
@@ -494,16 +496,24 @@ def run_bot(*, poll_sec: float, timeout_sec: float, process_pending: bool) -> No
                         timeout_sec=timeout_sec,
                     )
                     continue
-                response_text = _handle_pick_command(text) or _build_response(text, config)
+                reply_markup = KEYBOARD
+                pick_response = _handle_pick_command(text)
+                if pick_response is not None:
+                    response_text, custom_markup = pick_response
+                    if custom_markup is not None:
+                        reply_markup = custom_markup
+                else:
+                    response_text = _build_response(text, config)
             except Exception as e:
                 response_text = f"Command failed: {e}"
+                reply_markup = KEYBOARD
 
             _send_message(
                 token=token,
                 chat_id=allowed_chat_id,
                 text=response_text,
                 timeout_sec=timeout_sec,
-                reply_markup=KEYBOARD,
+                reply_markup=reply_markup,
             )
 
         if not updates:

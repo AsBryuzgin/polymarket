@@ -6,6 +6,9 @@ from statistics import median, pstdev
 from typing import List
 
 
+MIN_COPYABILITY_SCORE = 50.0
+
+
 def clip01(x: float) -> float:
     return max(0.0, min(1.0, x))
 
@@ -69,7 +72,11 @@ class WalletScoreBreakdown:
     final_wss: float
 
 
-def check_wallet_filters(metrics: WalletMetrics) -> tuple[bool, List[str]]:
+def check_wallet_filters(
+    metrics: WalletMetrics,
+    *,
+    copyability: float | None = None,
+) -> tuple[bool, List[str]]:
     reasons: List[str] = []
 
     if metrics.age_days < 120:
@@ -86,6 +93,8 @@ def check_wallet_filters(metrics: WalletMetrics) -> tuple[bool, List[str]]:
         reasons.append("trades_30d < 5")
     if metrics.days_since_last_trade > 7:
         reasons.append("days_since_last_trade > 7")
+    if copyability is not None and copyability < MIN_COPYABILITY_SCORE:
+        reasons.append(f"copyability_score < {MIN_COPYABILITY_SCORE:g}")
 
     return len(reasons) == 0, reasons
 
@@ -167,14 +176,13 @@ def data_depth_multiplier(metrics: WalletMetrics) -> float:
 
 
 def score_wallet(metrics: WalletMetrics) -> WalletScoreBreakdown:
-    eligible, reasons = check_wallet_filters(metrics)
-
     c = consistency_score(metrics)
     d = drawdown_control_score(metrics)
     s = specialization_score(metrics)
     k = copyability_score(metrics)
     a = activity_score(metrics)
     r = return_quality_score(metrics)
+    eligible, reasons = check_wallet_filters(metrics, copyability=k)
 
     raw_wss = (
         0.35 * c
