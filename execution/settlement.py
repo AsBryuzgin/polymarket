@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import time
 from dataclasses import asdict, dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Callable
 
 import requests
@@ -145,7 +145,9 @@ def _parse_opened_at_to_minutes(opened_at: str | None) -> float | None:
         dt = datetime.fromisoformat(opened_at.replace(" ", "T"))
     except ValueError:
         return None
-    return round((datetime.utcnow() - dt).total_seconds() / 60.0, 2)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return round((datetime.now(timezone.utc) - dt.astimezone(timezone.utc)).total_seconds() / 60.0, 2)
 
 
 def _settlement_cfg_value(config: dict[str, Any], key: str, default: Any) -> Any:
