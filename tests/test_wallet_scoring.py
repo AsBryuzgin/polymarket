@@ -130,7 +130,41 @@ class TestWalletScoring(unittest.TestCase):
 
         self.assertFalse(result.eligible)
         self.assertIn("trades_30d < 5", result.filter_reasons)
-        self.assertIn("days_since_last_trade > 45", result.filter_reasons)
+        self.assertIn("days_since_last_trade > 7", result.filter_reasons)
+
+    def test_filter_rejects_recently_stale_wallet(self) -> None:
+        stale = WalletMetrics(
+            age_days=500,
+            closed_positions=160,
+            unique_markets=45,
+            primary_domain_share=0.60,
+            single_market_concentration=0.20,
+            roi_30=0.05,
+            roi_90=0.10,
+            roi_180=0.18,
+            monthly_roi_last_6=[0.03, 0.02, 0.04, 0.01, 0.03, 0.02],
+            negative_monthly_roi_last_12=[-0.01, -0.015],
+            primary_domain_roi_30=0.04,
+            primary_domain_roi_90=0.11,
+            primary_domain_roi_180=0.19,
+            max_drawdown=0.07,
+            longest_loss_streak=2,
+            median_spread=0.01,
+            median_liquidity=22000,
+            slippage_proxy=0.005,
+            delay_sec=40,
+            profit_factor=1.8,
+            largest_win_share=0.20,
+            current_position_pnl_ratio=0.0,
+            trades_30d=40,
+            trades_90d=120,
+            days_since_last_trade=8,
+        )
+
+        result = score_wallet(stale)
+
+        self.assertFalse(result.eligible)
+        self.assertIn("days_since_last_trade > 7", result.filter_reasons)
 
     def test_filter_rejects_large_current_position_drawdown(self) -> None:
         underwater = WalletMetrics(

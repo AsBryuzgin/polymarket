@@ -84,8 +84,8 @@ def check_wallet_filters(metrics: WalletMetrics) -> tuple[bool, List[str]]:
         reasons.append("current_position_pnl_ratio < -0.25")
     if metrics.trades_30d < 5:
         reasons.append("trades_30d < 5")
-    if metrics.days_since_last_trade > 45:
-        reasons.append("days_since_last_trade > 45")
+    if metrics.days_since_last_trade > 7:
+        reasons.append("days_since_last_trade > 7")
 
     return len(reasons) == 0, reasons
 
