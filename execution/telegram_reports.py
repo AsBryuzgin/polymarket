@@ -9,6 +9,7 @@ from typing import Any, Callable
 
 from execution.allowance import fetch_collateral_balance_allowance
 from execution.market_diagnostics import diagnose_market_snapshot_error
+from execution.position_marking import is_marked, is_unmarked, mark_position
 from execution.polymarket_executor import fetch_market_snapshot
 from execution.signal_observation_store import (
     init_signal_observation_table,
@@ -287,37 +288,14 @@ def _open_position_marks(
     errors = []
 
     for pos in list_open_positions(limit=100000):
-        position_usd = _safe_float(pos.get("position_usd"))
-        avg_entry_price = _safe_float(pos.get("avg_entry_price"))
-        qty = position_usd / avg_entry_price if avg_entry_price > 0 else 0.0
-        mark_bid = None
-        mark_mid = None
-        snapshot_status = "OK"
-
-        try:
-            snapshot = snapshot_loader(str(pos["token_id"]), "SELL")
-            best_bid = _safe_float(snapshot.get("best_bid"))
-            midpoint = _safe_float(snapshot.get("midpoint"))
-            mark_bid = qty * best_bid if best_bid > 0 else None
-            mark_mid = qty * midpoint if midpoint > 0 else None
-            snapshot_error = None
-        except Exception as e:
-            snapshot_status = "ERROR"
-            snapshot_error = str(e)
-            errors.append(f"{_short(str(pos.get('token_id')))}: {e}")
-
-        row = dict(pos)
-        row.update(
-            {
-                "qty": qty,
-                "mark_value_bid_usd": mark_bid,
-                "mark_value_mid_usd": mark_mid,
-                "unrealized_pnl_bid_usd": mark_bid - position_usd if mark_bid is not None else None,
-                "unrealized_pnl_mid_usd": mark_mid - position_usd if mark_mid is not None else None,
-                "snapshot_status": snapshot_status,
-                "snapshot_error": snapshot_error,
-            }
+        row = mark_position(
+            pos,
+            snapshot_loader=snapshot_loader,
+            diagnosis_loader=diagnose_market_snapshot_error,
+            snapshot_side="SELL",
         )
+        if is_unmarked(row):
+            errors.append(f"{_short(str(pos.get('token_id')))}: {row.get('snapshot_reason')}")
         rows.append(row)
 
     return rows, errors
@@ -350,8 +328,9 @@ def build_status_report(
     observations = list_signal_observations(limit=1)
 
     invested = sum(_safe_float(row.get("position_usd")) for row in open_rows)
-    marked_rows = [row for row in open_rows if row.get("snapshot_status") == "OK"]
-    unmarked_rows = [row for row in open_rows if row.get("snapshot_status") != "OK"]
+    marked_rows = [row for row in open_rows if is_marked(row)]
+    settled_rows = [row for row in open_rows if str(row.get("snapshot_status")) == "SETTLED"]
+    unmarked_rows = [row for row in open_rows if is_unmarked(row)]
     marked_invested = sum(_safe_float(row.get("position_usd")) for row in marked_rows)
     unmarked_invested = sum(_safe_float(row.get("position_usd")) for row in unmarked_rows)
     mark_bid = sum(_safe_float(row.get("mark_value_bid_usd")) for row in marked_rows)
@@ -418,6 +397,11 @@ def build_status_report(
             f"сумма: {_money(unmarked_invested)}"
         )
         lines.append("детали по неоцененным: /unmarked")
+    if settled_rows:
+        lines.append(
+            f"settlement-marked: {len(settled_rows)} | "
+            f"сумма: {_money(sum(_safe_float(row.get('position_usd')) for row in settled_rows))}"
+        )
 
     return "\n".join(lines)
 
@@ -433,8 +417,9 @@ def build_positions_report(
         return "Открытые позиции\nпозиций нет"
 
     invested = sum(_safe_float(row.get("position_usd")) for row in open_rows)
-    marked_rows = [row for row in open_rows if row.get("snapshot_status") == "OK"]
-    unmarked_rows = [row for row in open_rows if row.get("snapshot_status") != "OK"]
+    marked_rows = [row for row in open_rows if is_marked(row)]
+    settled_rows = [row for row in open_rows if str(row.get("snapshot_status")) == "SETTLED"]
+    unmarked_rows = [row for row in open_rows if is_unmarked(row)]
     marked_invested = sum(_safe_float(row.get("position_usd")) for row in marked_rows)
     unmarked_invested = sum(_safe_float(row.get("position_usd")) for row in unmarked_rows)
     mark_bid = sum(_safe_float(row.get("mark_value_bid_usd")) for row in marked_rows)
@@ -463,7 +448,12 @@ def build_positions_report(
                 f"   token {_short(str(row.get('token_id')))}",
             ]
         )
-        if row.get("snapshot_status") != "OK":
+        if row.get("snapshot_status") == "SETTLED":
+            lines.append(
+                "   оценка: settlement fallback "
+                f"по resolved market, price={_num(row.get('settlement_price'))}"
+            )
+        elif row.get("snapshot_status") != "OK":
             lines.append("   market snapshot: ERROR, позиция не оценена по рынку")
 
     if len(open_rows) > 12:
@@ -471,6 +461,11 @@ def build_positions_report(
     if snapshot_errors:
         lines.append(f"неоцененные по рынку: {len(snapshot_errors)} | сумма: {_money(unmarked_invested)}")
         lines.append("подробно: /unmarked")
+    if settled_rows:
+        lines.append(
+            f"settlement-marked: {len(settled_rows)} | "
+            f"сумма: {_money(sum(_safe_float(row.get('position_usd')) for row in settled_rows))}"
+        )
 
     return "\n".join(lines)
 
@@ -481,7 +476,7 @@ def build_unmarked_report(
 ) -> str:
     init_db()
     open_rows, _snapshot_errors = _open_position_marks(snapshot_loader=snapshot_loader)
-    unmarked_rows = [row for row in open_rows if row.get("snapshot_status") != "OK"]
+    unmarked_rows = [row for row in open_rows if is_unmarked(row)]
 
     if not unmarked_rows:
         return "Неоцененные позиции\nнеоцененных позиций нет"

@@ -138,6 +138,60 @@ class TelegramReportTests(unittest.TestCase):
         self.assertIn("неоцененные по рынку: 1 | сумма: $5.00", report)
         self.assertIn("детали по неоцененным: /unmarked", report)
 
+    def test_status_report_counts_settlement_fallback_as_marked(self) -> None:
+        def snapshot_loader(token_id: str, _side: str):
+            if token_id == "tokenB":
+                raise RuntimeError("No orderbook exists for the requested token id")
+            return {"best_bid": 0.60, "midpoint": 0.65}
+
+        with (
+            patch("execution.telegram_reports.init_db"),
+            patch("execution.telegram_reports.init_signal_observation_table"),
+            patch("execution.telegram_reports.list_open_positions") as positions,
+            patch("execution.telegram_reports.list_leader_registry") as registry,
+            patch("execution.telegram_reports.list_signal_observations") as observations,
+            patch("execution.telegram_reports._load_latest_alert_count", return_value=0),
+            patch(
+                "execution.telegram_reports.diagnose_market_snapshot_error",
+                return_value={
+                    "diagnosis_status": "NO_ORDERBOOK_CLOSED_OR_RESOLVED",
+                    "diagnosis_label": "closed/resolved",
+                    "diagnosis_reason": "market resolved",
+                    "action_hint": "redeem path is needed",
+                    "token_winner": True,
+                    "token_outcome": "Yes",
+                },
+            ),
+        ):
+            positions.return_value = [
+                {
+                    "leader_wallet": "wallet1",
+                    "token_id": "tokenA",
+                    "position_usd": 5.0,
+                    "avg_entry_price": 0.50,
+                },
+                {
+                    "leader_wallet": "wallet2",
+                    "token_id": "tokenB",
+                    "position_usd": 5.0,
+                    "avg_entry_price": 0.50,
+                },
+            ]
+            registry.return_value = []
+            observations.return_value = []
+
+            report = build_status_report(
+                {
+                    "global": {"execution_mode": "paper"},
+                    "capital": {"total_capital_usd": 100.0},
+                },
+                snapshot_loader=snapshot_loader,
+            )
+
+        self.assertIn("equity по bid: $106.00", report)
+        self.assertIn("settlement-marked: 1 | сумма: $5.00", report)
+        self.assertNotIn("неоцененные по рынку: 1", report)
+
     def test_activity_report_counts_last_day_observations(self) -> None:
         now = datetime(2026, 4, 22, tzinfo=timezone.utc)
         with (

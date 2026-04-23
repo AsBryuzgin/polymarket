@@ -10,7 +10,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from execution.polymarket_executor import fetch_market_snapshot
+from execution.position_marking import mark_position
 from execution.state_store import init_db, list_open_positions, list_leader_registry
 
 
@@ -83,20 +83,7 @@ def main() -> None:
                 grace_status = "GRACE_EXPIRED"
                 eligible_for_force_unwind = True
 
-        snapshot_status = "OK"
-        snapshot_reason = ""
-        best_bid = ""
-        midpoint = ""
-        best_ask = ""
-
-        try:
-            snapshot = fetch_market_snapshot(token_id=token_id, side="BUY")
-            best_bid = snapshot.get("best_bid")
-            midpoint = snapshot.get("midpoint")
-            best_ask = snapshot.get("best_ask")
-        except Exception as e:
-            snapshot_status = "ERROR"
-            snapshot_reason = str(e)
+        marked = mark_position(pos)
 
         rows.append({
             "leader_wallet": leader_wallet,
@@ -112,11 +99,13 @@ def main() -> None:
             "grace_status": grace_status,
             "days_to_grace_end": days_to_grace_end,
             "eligible_for_force_unwind": eligible_for_force_unwind,
-            "best_bid": best_bid,
-            "midpoint": midpoint,
-            "best_ask": best_ask,
-            "snapshot_status": snapshot_status,
-            "snapshot_reason": snapshot_reason,
+            "best_bid": marked.get("best_bid"),
+            "midpoint": marked.get("midpoint"),
+            "best_ask": marked.get("best_ask"),
+            "snapshot_status": marked.get("snapshot_status"),
+            "snapshot_reason": marked.get("snapshot_reason"),
+            "mark_source": marked.get("mark_source"),
+            "settlement_price": marked.get("settlement_price"),
         })
 
     rows.sort(
