@@ -3,10 +3,28 @@ from __future__ import annotations
 import unittest
 from unittest.mock import patch
 
-from execution.market_diagnostics import diagnose_market_snapshot_error
+from execution.market_diagnostics import (
+    _extract_token_meta_from_market,
+    diagnose_market_snapshot_error,
+)
 
 
 class MarketDiagnosticsTests(unittest.TestCase):
+    def test_extract_token_meta_falls_back_to_outcome_price_arrays(self) -> None:
+        meta = _extract_token_meta_from_market(
+            {
+                "tokens": None,
+                "clobTokenIds": '["tokenA","tokenB"]',
+                "outcomes": '["Yes","No"]',
+                "outcomePrices": '["1","0"]',
+            },
+            "tokenA",
+        )
+
+        self.assertEqual(meta["outcome"], "Yes")
+        self.assertTrue(meta["winner"])
+        self.assertEqual(meta["price"], 1.0)
+
     def test_no_orderbook_closed_market_is_classified_as_closed(self) -> None:
         with patch(
             "execution.market_diagnostics.lookup_token_market",

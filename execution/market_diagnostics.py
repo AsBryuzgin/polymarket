@@ -72,6 +72,52 @@ def _extract_token_meta(raw_tokens: Any, token_id: str) -> dict[str, Any]:
     return {}
 
 
+def _maybe_json_list(value: Any) -> list[Any]:
+    if isinstance(value, list):
+        return value
+    if isinstance(value, str):
+        try:
+            import json
+
+            parsed = json.loads(value)
+        except Exception:
+            return []
+        return parsed if isinstance(parsed, list) else []
+    return []
+
+
+def _extract_token_meta_from_market(raw_market: dict[str, Any], token_id: str) -> dict[str, Any]:
+    token_meta = _extract_token_meta(raw_market.get("tokens"), token_id)
+    if token_meta:
+        return token_meta
+
+    token_ids = [str(item) for item in _maybe_json_list(raw_market.get("clobTokenIds"))]
+    outcomes = [str(item) for item in _maybe_json_list(raw_market.get("outcomes"))]
+    outcome_prices = _maybe_json_list(raw_market.get("outcomePrices"))
+
+    try:
+        idx = token_ids.index(token_id)
+    except ValueError:
+        return {}
+
+    price = None
+    winner = None
+    if idx < len(outcome_prices):
+        price = _safe_float(outcome_prices[idx])
+        if price is not None:
+            if abs(price - 1.0) < 1e-9:
+                winner = True
+            elif abs(price - 0.0) < 1e-9:
+                winner = False
+
+    return {
+        "token_id": token_id,
+        "outcome": outcomes[idx] if idx < len(outcomes) else None,
+        "winner": winner,
+        "price": price,
+    }
+
+
 def _looks_resolved(status: Any) -> bool:
     text = str(status or "").strip().lower()
     if not text:
@@ -140,7 +186,7 @@ def lookup_token_market(token_id: str) -> dict[str, Any] | None:
     if condition_id and not market.get("condition_id"):
         market["condition_id"] = condition_id
 
-    token_meta = _extract_token_meta(raw_market.get("tokens"), token_id)
+    token_meta = _extract_token_meta_from_market(raw_market, token_id)
     market.update(
         {
             "token_id": token_id,
