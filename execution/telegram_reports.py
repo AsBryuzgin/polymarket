@@ -174,6 +174,38 @@ def _latest_snapshot_value(row: dict[str, Any], name: str) -> Any:
     return row.get(f"snapshot_{name}")
 
 
+def _reason_price_values(reason: Any) -> dict[str, float | None]:
+    text = str(reason or "")
+    values: dict[str, float | None] = {
+        "midpoint": None,
+        "spread": None,
+        "spread_rel": None,
+    }
+
+    spread_match = re.search(
+        r"spread\s+([0-9]+(?:\.[0-9]+)?)\s+\(([0-9]+(?:\.[0-9]+)?)%\s+of midpoint\)",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if spread_match:
+        spread = _maybe_float(spread_match.group(1))
+        spread_rel = (_maybe_float(spread_match.group(2)) or 0.0) / 100.0
+        values["spread"] = spread
+        values["spread_rel"] = spread_rel if spread_rel > 0 else None
+        if spread is not None and spread_rel > 0:
+            values["midpoint"] = spread / spread_rel
+
+    midpoint_match = re.search(
+        r"midpoint\s+([0-9]+(?:\.[0-9]+)?)\s+(?:above|below)",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if midpoint_match:
+        values["midpoint"] = _maybe_float(midpoint_match.group(1))
+
+    return values
+
+
 def _block_key(row: dict[str, Any]) -> str:
     latest_hash = str(row.get("latest_trade_hash") or "").strip()
     if latest_hash:
@@ -202,9 +234,18 @@ def _summarize_block(rows: list[dict[str, Any]]) -> dict[str, Any]:
     spread = _latest_snapshot_value(last, "spread")
     midpoint_num = _maybe_float(midpoint)
     spread_num = _maybe_float(spread)
+    reason_values = _reason_price_values(last.get("latest_reason"))
+    if midpoint_num is None:
+        midpoint_num = reason_values.get("midpoint")
+        midpoint = midpoint_num
+    if spread_num is None:
+        spread_num = reason_values.get("spread")
+        spread = spread_num
     spread_rel = None
     if midpoint_num and spread_num is not None:
         spread_rel = spread_num / midpoint_num
+    if spread_rel is None:
+        spread_rel = reason_values.get("spread_rel")
     return {
         "leader": _leader_name(last),
         "category": str(last.get("category") or "UNKNOWN"),

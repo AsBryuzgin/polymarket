@@ -213,6 +213,33 @@ class TelegramReportTests(unittest.TestCase):
         self.assertIn("mid 0.4100", report)
         self.assertIn("spread 0.0300 (7.3%)", report)
 
+    def test_blocks_report_parses_old_spread_reason_when_snapshot_missing(self) -> None:
+        now = datetime(2026, 4, 22, tzinfo=timezone.utc)
+        with (
+            patch("execution.telegram_reports.init_db"),
+            patch("execution.telegram_reports.init_signal_observation_table"),
+            patch("execution.telegram_reports.list_signal_observations") as observations,
+        ):
+            observations.return_value = [
+                {
+                    "observed_at": "2026-04-21 12:30:00",
+                    "leader_wallet": "wallet1",
+                    "leader_user_name": "Leader",
+                    "category": "CULTURE",
+                    "latest_status": "POLICY_BLOCKED",
+                    "latest_reason": "spread 0.0400 (16.67% of midpoint) above max_allowed_spread 0.0300",
+                    "latest_trade_hash": "hash1",
+                    "latest_trade_side": "BUY",
+                    "latest_trade_age_sec": 600.0,
+                },
+            ]
+
+            report = build_blocks_report(now=now)
+
+        self.assertIn("spread: 1 unique / 1 checks", report)
+        self.assertIn("mid 0.2400", report)
+        self.assertIn("spread 0.0400 (16.7%)", report)
+
 
 if __name__ == "__main__":
     unittest.main()
