@@ -289,16 +289,16 @@ def _open_position_marks(
         position_usd = _safe_float(pos.get("position_usd"))
         avg_entry_price = _safe_float(pos.get("avg_entry_price"))
         qty = position_usd / avg_entry_price if avg_entry_price > 0 else 0.0
-        mark_bid = 0.0
-        mark_mid = 0.0
+        mark_bid = None
+        mark_mid = None
         snapshot_status = "OK"
 
         try:
             snapshot = snapshot_loader(str(pos["token_id"]), "SELL")
             best_bid = _safe_float(snapshot.get("best_bid"))
             midpoint = _safe_float(snapshot.get("midpoint"))
-            mark_bid = qty * best_bid if best_bid > 0 else 0.0
-            mark_mid = qty * midpoint if midpoint > 0 else 0.0
+            mark_bid = qty * best_bid if best_bid > 0 else None
+            mark_mid = qty * midpoint if midpoint > 0 else None
         except Exception as e:
             snapshot_status = "ERROR"
             errors.append(f"{_short(str(pos.get('token_id')))}: {e}")
@@ -309,8 +309,8 @@ def _open_position_marks(
                 "qty": qty,
                 "mark_value_bid_usd": mark_bid,
                 "mark_value_mid_usd": mark_mid,
-                "unrealized_pnl_bid_usd": mark_bid - position_usd,
-                "unrealized_pnl_mid_usd": mark_mid - position_usd,
+                "unrealized_pnl_bid_usd": mark_bid - position_usd if mark_bid is not None else None,
+                "unrealized_pnl_mid_usd": mark_mid - position_usd if mark_mid is not None else None,
                 "snapshot_status": snapshot_status,
             }
         )
@@ -346,8 +346,12 @@ def build_status_report(
     observations = list_signal_observations(limit=1)
 
     invested = sum(_safe_float(row.get("position_usd")) for row in open_rows)
-    mark_bid = sum(_safe_float(row.get("mark_value_bid_usd")) for row in open_rows)
-    mark_mid = sum(_safe_float(row.get("mark_value_mid_usd")) for row in open_rows)
+    marked_rows = [row for row in open_rows if row.get("snapshot_status") == "OK"]
+    unmarked_rows = [row for row in open_rows if row.get("snapshot_status") != "OK"]
+    marked_invested = sum(_safe_float(row.get("position_usd")) for row in marked_rows)
+    unmarked_invested = sum(_safe_float(row.get("position_usd")) for row in unmarked_rows)
+    mark_bid = sum(_safe_float(row.get("mark_value_bid_usd")) for row in marked_rows)
+    mark_mid = sum(_safe_float(row.get("mark_value_mid_usd")) for row in marked_rows)
 
     mode = str(config.get("global", {}).get("execution_mode", "unknown")).lower()
     paper_bankroll = _configured_capital_usd(config) if mode == "paper" else None
@@ -389,8 +393,8 @@ def build_status_report(
             f"equity по bid: {_money(total_bid)} | по mid: {_money(total_mid)}",
             (
                 "open PnL по bid/mid: "
-                f"{_money(mark_bid - invested, signed=True)} / "
-                f"{_money(mark_mid - invested, signed=True)}"
+                f"{_money(mark_bid - marked_invested, signed=True)} / "
+                f"{_money(mark_mid - marked_invested, signed=True)}"
             ),
             "",
             "Система",
@@ -405,7 +409,10 @@ def build_status_report(
     if funding_error:
         lines.append(f"проверка баланса: ERROR {_short(funding_error, 40, 0)}")
     if snapshot_errors:
-        lines.append(f"ошибки market snapshot: {len(snapshot_errors)}")
+        lines.append(
+            f"ошибки market snapshot: {len(snapshot_errors)} | "
+            f"не оценено: {_money(unmarked_invested)}"
+        )
 
     return "\n".join(lines)
 
@@ -421,10 +428,17 @@ def build_positions_report(
         return "Открытые позиции\nпозиций нет"
 
     invested = sum(_safe_float(row.get("position_usd")) for row in open_rows)
-    mark_bid = sum(_safe_float(row.get("mark_value_bid_usd")) for row in open_rows)
+    marked_rows = [row for row in open_rows if row.get("snapshot_status") == "OK"]
+    unmarked_rows = [row for row in open_rows if row.get("snapshot_status") != "OK"]
+    marked_invested = sum(_safe_float(row.get("position_usd")) for row in marked_rows)
+    unmarked_invested = sum(_safe_float(row.get("position_usd")) for row in unmarked_rows)
+    mark_bid = sum(_safe_float(row.get("mark_value_bid_usd")) for row in marked_rows)
     lines = [
         "Открытые позиции",
-        f"Всего: {len(open_rows)} | вложено: {_money(invested)} | bid PnL: {_money(mark_bid - invested, signed=True)}",
+        (
+            f"Всего: {len(open_rows)} | вложено: {_money(invested)} | "
+            f"bid PnL: {_money(mark_bid - marked_invested, signed=True)}"
+        ),
         "",
     ]
     registry = {row["wallet"]: row for row in list_leader_registry(limit=100000)}
@@ -444,11 +458,13 @@ def build_positions_report(
                 f"   token {_short(str(row.get('token_id')))}",
             ]
         )
+        if row.get("snapshot_status") != "OK":
+            lines.append("   market snapshot: ERROR, позиция не оценена по рынку")
 
     if len(open_rows) > 12:
         lines.append(f"... еще {len(open_rows) - 12}")
     if snapshot_errors:
-        lines.append(f"ошибки market snapshot: {len(snapshot_errors)}")
+        lines.append(f"ошибки market snapshot: {len(snapshot_errors)} | не оценено: {_money(unmarked_invested)}")
 
     return "\n".join(lines)
 
