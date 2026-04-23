@@ -10,6 +10,7 @@ from execution.order_router import (
     execute_market_order,
     resolve_execution_mode,
 )
+from execution.price_drift import price_drift_ok
 from execution.polymarket_executor import fetch_market_snapshot, preview_market_order
 from execution.runtime_guard import evaluate_runtime_guard
 from execution.live_safety import evaluate_live_buy_safety
@@ -66,28 +67,13 @@ def _entry_price_drift_ok(
     max_abs: float,
     max_rel: float,
 ) -> tuple[bool, str]:
-    if leader_price is None or leader_price <= 0:
-        return True, "leader trade price missing"
-    if current_price is None or current_price <= 0:
-        return False, "current price quote missing"
-
-    abs_drift = abs(current_price - leader_price)
-    rel_drift = abs_drift / leader_price
-    side = side.upper()
-
-    if side == "BUY" and current_price > leader_price:
-        if abs_drift > max_abs:
-            return False, f"buy price drift abs too high: {abs_drift:.4f} > {max_abs:.4f}"
-        if rel_drift > max_rel:
-            return False, f"buy price drift rel too high: {rel_drift:.4f} > {max_rel:.4f}"
-
-    if side == "SELL" and current_price < leader_price:
-        if abs_drift > max_abs:
-            return False, f"sell price drift abs too high: {abs_drift:.4f} > {max_abs:.4f}"
-        if rel_drift > max_rel:
-            return False, f"sell price drift rel too high: {rel_drift:.4f} > {max_rel:.4f}"
-
-    return True, "ok"
+    return price_drift_ok(
+        leader_price=leader_price,
+        current_price=current_price,
+        side=side,
+        max_abs=max_abs,
+        max_rel=max_rel,
+    )
 
 
 def _execute_with_recorded_attempt(
@@ -379,7 +365,7 @@ def process_signal(signal: LeaderSignal) -> dict:
             spread=snapshot["spread"],
             leader_budget_usd=signal.leader_budget_usd,
             buy_min_price=float(filters.get("buy_min_price", 0.05)),
-            buy_max_price=float(filters.get("buy_max_price", 0.95)),
+            buy_max_price=float(filters.get("buy_max_price", 0.96)),
             sell_min_price=0.0,
             sell_max_price=1.0,
             max_spread=float(exit_cfg.get("exit_max_spread", 0.05)),
@@ -413,8 +399,8 @@ def process_signal(signal: LeaderSignal) -> dict:
                 leader_price=signal.leader_trade_price,
                 current_price=current_price,
                 side=signal.side,
-                max_abs=float(freshness.get("max_price_drift_abs", 0.01)),
-                max_rel=float(freshness.get("max_price_drift_rel", 0.02)),
+                max_abs=float(freshness.get("max_price_drift_abs", 0.02)),
+                max_rel=float(freshness.get("max_price_drift_rel", 0.03)),
             )
 
         if not drift_ok:
@@ -624,7 +610,7 @@ def process_signal(signal: LeaderSignal) -> dict:
         spread=snapshot["spread"],
         leader_budget_usd=signal.leader_budget_usd,
         buy_min_price=float(filters.get("buy_min_price", 0.05)),
-        buy_max_price=float(filters.get("buy_max_price", 0.95)),
+        buy_max_price=float(filters.get("buy_max_price", 0.96)),
         sell_min_price=0.0,
         sell_max_price=1.0,
         max_spread=float(risk.get("skip_if_spread_gt", 0.02)),
@@ -718,8 +704,8 @@ def process_signal(signal: LeaderSignal) -> dict:
         leader_price=signal.leader_trade_price,
         current_price=current_price,
         side=signal.side,
-        max_abs=float(freshness.get("max_price_drift_abs", 0.01)),
-        max_rel=float(freshness.get("max_price_drift_rel", 0.02)),
+        max_abs=float(freshness.get("max_price_drift_abs", 0.02)),
+        max_rel=float(freshness.get("max_price_drift_rel", 0.03)),
     )
 
     if not drift_ok:

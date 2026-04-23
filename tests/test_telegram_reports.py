@@ -10,6 +10,7 @@ from execution.telegram_reports import (
     build_blocks_report,
     build_leaders_report,
     build_status_report,
+    build_unmarked_report,
 )
 
 
@@ -134,7 +135,8 @@ class TelegramReportTests(unittest.TestCase):
             )
 
         self.assertIn("open PnL по bid/mid: +$1.00 / +$1.50", report)
-        self.assertIn("ошибки market snapshot: 1 | не оценено: $5.00", report)
+        self.assertIn("неоцененные по рынку: 1 | сумма: $5.00", report)
+        self.assertIn("детали по неоцененным: /unmarked", report)
 
     def test_activity_report_counts_last_day_observations(self) -> None:
         now = datetime(2026, 4, 22, tzinfo=timezone.utc)
@@ -281,6 +283,55 @@ class TelegramReportTests(unittest.TestCase):
         self.assertIn("spread: 1 unique / 1 checks", report)
         self.assertIn("mid 0.2400", report)
         self.assertIn("spread 0.0400 (16.7%)", report)
+
+    def test_unmarked_report_includes_market_diagnosis(self) -> None:
+        def snapshot_loader(token_id: str, _side: str):
+            if token_id == "tokenB":
+                raise RuntimeError("No orderbook exists for the requested token id")
+            return {"best_bid": 0.60, "midpoint": 0.65}
+
+        with (
+            patch("execution.telegram_reports.init_db"),
+            patch("execution.telegram_reports.list_open_positions") as positions,
+            patch("execution.telegram_reports.list_leader_registry") as registry,
+            patch(
+                "execution.telegram_reports.diagnose_market_snapshot_error",
+                return_value={
+                    "diagnosis_status": "NO_ORDERBOOK_DISABLED",
+                    "diagnosis_label": "orderbook disabled",
+                    "diagnosis_reason": "market exists but enableOrderBook=false",
+                    "question": "Will it rain?",
+                    "active": False,
+                    "closed": True,
+                    "archived": False,
+                    "accepting_orders": False,
+                    "enable_order_book": False,
+                    "action_hint": "do not expect CLOB quotes for this token",
+                },
+            ),
+        ):
+            positions.return_value = [
+                {
+                    "leader_wallet": "wallet1",
+                    "token_id": "tokenB",
+                    "position_usd": 5.0,
+                    "avg_entry_price": 0.50,
+                }
+            ]
+            registry.return_value = [
+                {
+                    "wallet": "wallet1",
+                    "user_name": "Leader",
+                    "category": "CULTURE",
+                }
+            ]
+
+            report = build_unmarked_report(snapshot_loader=snapshot_loader)
+
+        self.assertIn("Неоцененные позиции", report)
+        self.assertIn("Leader | CULTURE | $5.00", report)
+        self.assertIn("orderbook disabled", report)
+        self.assertIn("Will it rain?", report)
 
 
 if __name__ == "__main__":

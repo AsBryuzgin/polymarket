@@ -8,6 +8,7 @@ from collectors.wallet_profiles import WalletProfilesClient
 from execution.builder_auth import load_executor_config
 from execution.copy_worker import LeaderSignal
 from execution.order_policy import evaluate_order_policy
+from execution.price_drift import price_drift_ok
 from execution.polymarket_executor import fetch_market_snapshot
 from execution.state_store import has_signal, get_open_position, get_leader_registry
 
@@ -130,26 +131,13 @@ def _price_drift_ok(
 ) -> tuple[bool, str]:
     if leader_price <= 0 or current_price <= 0:
         return False, "invalid leader/current price"
-
-    abs_drift = abs(current_price - leader_price)
-    rel_drift = abs_drift / leader_price
-
-    if side == "BUY":
-        if current_price > leader_price:
-            if abs_drift > max_abs:
-                return False, f"buy price drift abs too high: {abs_drift:.4f} > {max_abs:.4f}"
-            if rel_drift > max_rel:
-                return False, f"buy price drift rel too high: {rel_drift:.4f} > {max_rel:.4f}"
-    elif side == "SELL":
-        if current_price < leader_price:
-            if abs_drift > max_abs:
-                return False, f"sell price drift abs too high: {abs_drift:.4f} > {max_abs:.4f}"
-            if rel_drift > max_rel:
-                return False, f"sell price drift rel too high: {rel_drift:.4f} > {max_rel:.4f}"
-    else:
-        return False, f"unsupported side: {side}"
-
-    return True, "ok"
+    return price_drift_ok(
+        leader_price=leader_price,
+        current_price=current_price,
+        side=side,
+        max_abs=max_abs,
+        max_rel=max_rel,
+    )
 
 
 def latest_fresh_copyable_signal_from_wallet(
@@ -173,8 +161,8 @@ def latest_fresh_copyable_signal_from_wallet(
     )
     max_exit_signal_age_sec = int(freshness.get("max_exit_signal_age_sec", 86400))
     max_recent_trades = int(freshness.get("max_recent_trades", 3))
-    max_price_drift_abs = float(freshness.get("max_price_drift_abs", 0.01))
-    max_price_drift_rel = float(freshness.get("max_price_drift_rel", 0.02))
+    max_price_drift_abs = float(freshness.get("max_price_drift_abs", 0.02))
+    max_price_drift_rel = float(freshness.get("max_price_drift_rel", 0.03))
     max_position_pages = int(freshness.get("leader_position_context_max_pages", 20))
 
     ignore_exit_drift = bool(exit_cfg.get("ignore_exit_drift", True))
@@ -310,7 +298,7 @@ def latest_fresh_copyable_signal_from_wallet(
             spread=snapshot["spread"],
             leader_budget_usd=leader_budget_usd,
             buy_min_price=float(filters.get("buy_min_price", 0.05)),
-            buy_max_price=float(filters.get("buy_max_price", 0.95)),
+            buy_max_price=float(filters.get("buy_max_price", 0.96)),
             sell_min_price=0.0,
             sell_max_price=1.0,
             max_spread=max_spread,

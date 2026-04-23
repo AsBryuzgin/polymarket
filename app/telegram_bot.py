@@ -22,6 +22,7 @@ from execution.telegram_reports import (
     build_leaders_report,
     build_positions_report,
     build_status_report,
+    build_unmarked_report,
 )
 from app.rebalance_review import (
     apply_manual_pick,
@@ -39,8 +40,8 @@ KEYBOARD = {
     "keyboard": [
         [{"text": "Статус"}, {"text": "Позиции"}],
         [{"text": "Лидеры"}, {"text": "Активность 24ч"}],
-        [{"text": "Блокировки 24ч"}, {"text": "Ребаланс"}],
-        [{"text": "Помощь"}],
+        [{"text": "Блокировки 24ч"}, {"text": "Неоцененные"}],
+        [{"text": "Ребаланс"}, {"text": "Помощь"}],
     ],
     "resize_keyboard": True,
     "one_time_keyboard": False,
@@ -239,6 +240,8 @@ def _build_response(text: str, config: dict[str, Any]) -> str:
         return build_activity_report()
     if normalized in {"/blocks", "blocks", "blocks 24h", "блоки", "блокировки", "блокировки 24ч"}:
         return build_blocks_report()
+    if normalized in {"/unmarked", "unmarked", "неоцененные", "неоцененные позиции"}:
+        return build_unmarked_report()
     return "Не понял команду. Нажми Помощь или отправь /help."
 
 

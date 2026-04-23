@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from execution.allowance import fetch_collateral_balance_allowance
+from execution.market_diagnostics import diagnose_market_snapshot_error
 from execution.polymarket_executor import fetch_market_snapshot
 from execution.signal_observation_store import (
     init_signal_observation_table,
@@ -299,8 +300,10 @@ def _open_position_marks(
             midpoint = _safe_float(snapshot.get("midpoint"))
             mark_bid = qty * best_bid if best_bid > 0 else None
             mark_mid = qty * midpoint if midpoint > 0 else None
+            snapshot_error = None
         except Exception as e:
             snapshot_status = "ERROR"
+            snapshot_error = str(e)
             errors.append(f"{_short(str(pos.get('token_id')))}: {e}")
 
         row = dict(pos)
@@ -312,6 +315,7 @@ def _open_position_marks(
                 "unrealized_pnl_bid_usd": mark_bid - position_usd if mark_bid is not None else None,
                 "unrealized_pnl_mid_usd": mark_mid - position_usd if mark_mid is not None else None,
                 "snapshot_status": snapshot_status,
+                "snapshot_error": snapshot_error,
             }
         )
         rows.append(row)
@@ -410,9 +414,10 @@ def build_status_report(
         lines.append(f"проверка баланса: ERROR {_short(funding_error, 40, 0)}")
     if snapshot_errors:
         lines.append(
-            f"ошибки market snapshot: {len(snapshot_errors)} | "
-            f"не оценено: {_money(unmarked_invested)}"
+            f"неоцененные по рынку: {len(snapshot_errors)} | "
+            f"сумма: {_money(unmarked_invested)}"
         )
+        lines.append("детали по неоцененным: /unmarked")
 
     return "\n".join(lines)
 
@@ -464,7 +469,91 @@ def build_positions_report(
     if len(open_rows) > 12:
         lines.append(f"... еще {len(open_rows) - 12}")
     if snapshot_errors:
-        lines.append(f"ошибки market snapshot: {len(snapshot_errors)} | не оценено: {_money(unmarked_invested)}")
+        lines.append(f"неоцененные по рынку: {len(snapshot_errors)} | сумма: {_money(unmarked_invested)}")
+        lines.append("подробно: /unmarked")
+
+    return "\n".join(lines)
+
+
+def build_unmarked_report(
+    *,
+    snapshot_loader: SnapshotLoader = fetch_market_snapshot,
+) -> str:
+    init_db()
+    open_rows, _snapshot_errors = _open_position_marks(snapshot_loader=snapshot_loader)
+    unmarked_rows = [row for row in open_rows if row.get("snapshot_status") != "OK"]
+
+    if not unmarked_rows:
+        return "Неоцененные позиции\nнеоцененных позиций нет"
+
+    registry = {row["wallet"]: row for row in list_leader_registry(limit=100000)}
+    invested = sum(_safe_float(row.get("position_usd")) for row in unmarked_rows)
+    diagnoses: dict[str, dict[str, Any]] = {}
+    lines = [
+        "Неоцененные позиции",
+        f"Всего: {len(unmarked_rows)} | вложено: {_money(invested)}",
+        "Причина: по этим токенам CLOB не дал стакан, поэтому mark-to-market сейчас недоступен.",
+        "",
+    ]
+
+    sorted_rows = sorted(unmarked_rows, key=lambda row: _safe_float(row.get("position_usd")), reverse=True)
+    for idx, row in enumerate(sorted_rows[:12], start=1):
+        token_id = str(row.get("token_id") or "")
+        diagnosis = diagnoses.get(token_id)
+        if diagnosis is None:
+            diagnosis = diagnose_market_snapshot_error(token_id, str(row.get("snapshot_error") or ""))
+            diagnoses[token_id] = diagnosis
+
+        leader = registry.get(row.get("leader_wallet"), {})
+        name = _leader_name({**leader, **row})
+        category = leader.get("category") or "UNKNOWN"
+        flags = []
+        for key, label in (
+            ("active", "active"),
+            ("closed", "closed"),
+            ("archived", "archived"),
+            ("accepting_orders", "accepting"),
+            ("enable_order_book", "orderbook"),
+        ):
+            value = diagnosis.get(key)
+            if value is not None:
+                flags.append(f"{label}={value}")
+        if diagnosis.get("uma_resolution_status"):
+            flags.append(f"uma={diagnosis['uma_resolution_status']}")
+
+        lines.extend(
+            [
+                f"{idx}. {name} | {category} | {_money(row.get('position_usd'))}",
+                f"   token {_short(token_id)}",
+                f"   диагноз: {diagnosis.get('diagnosis_label')} | {diagnosis.get('diagnosis_reason')}",
+            ]
+        )
+        if diagnosis.get("question"):
+            lines.append(f"   market: {diagnosis['question']}")
+        if diagnosis.get("token_outcome"):
+            outcome_line = f"   outcome: {diagnosis['token_outcome']}"
+            if diagnosis.get("token_winner") is not None:
+                outcome_line += f" | winner={diagnosis['token_winner']}"
+            lines.append(outcome_line)
+        if flags:
+            lines.append(f"   flags: {' | '.join(flags)}")
+        if diagnosis.get("action_hint"):
+            lines.append(f"   action: {diagnosis['action_hint']}")
+        if row.get("snapshot_error"):
+            lines.append(f"   snapshot: {row['snapshot_error']}")
+
+    if len(unmarked_rows) > 12:
+        lines.append(f"... еще {len(unmarked_rows) - 12}")
+
+    status_counts = Counter(str(diagnoses[str(row.get("token_id") or "")].get("diagnosis_status") or "UNKNOWN") for row in unmarked_rows)
+    if status_counts:
+        lines.extend(
+            [
+                "",
+                "Итог по диагнозам:",
+                ", ".join(f"{status}={count}" for status, count in sorted(status_counts.items())),
+            ]
+        )
 
     return "\n".join(lines)
 
@@ -753,6 +842,7 @@ def build_help_report() -> str:
             "/leaders - PnL по лидерам из истории бота",
             "/activity - активность сигналов за 24ч",
             "/blocks - policy/drift блокировки за 24ч",
+            "/unmarked - позиции без текущего рыночного mark-to-market",
             "/rebalance - прислать review-файлы и запросить подтверждение",
             "candidates CATEGORY - топ кандидатов категории pending-review",
             "pick CATEGORY N - выбрать кандидата вручную",

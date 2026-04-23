@@ -92,7 +92,7 @@ position_qty_tolerance = 0.000001
 
 [filters]
 buy_min_price = 0.05
-buy_max_price = 0.95
+buy_max_price = 0.96
 
 [exit]
 ignore_exit_drift = true
@@ -118,5 +118,5 @@ max_buy_signal_age_sec = 600
 max_exit_signal_age_sec = 86400
 max_recent_trades = 3
 leader_position_context_max_pages = 20
-max_price_drift_abs = 0.01
-max_price_drift_rel = 0.02
+max_price_drift_abs = 0.02
+max_price_drift_rel = 0.03

@@ -41,6 +41,12 @@ class TelegramBotTests(unittest.TestCase):
         self.assertEqual(buttons[0][1]["text"], "Отменить")
         self.assertEqual(buttons[1][0]["text"], "Сменить кандидатов")
 
+    def test_unmarked_command_is_routed(self) -> None:
+        with patch("app.telegram_bot.build_unmarked_report", return_value="diag report"):
+            response = telegram_bot._build_response("неоцененные", {})
+
+        self.assertEqual(response, "diag report")
+
 
 if __name__ == "__main__":
     unittest.main()
