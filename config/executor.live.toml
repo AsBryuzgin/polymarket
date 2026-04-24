@@ -4,7 +4,7 @@ preview_mode = false
 execution_mode = "live"
 live_trading_enabled = false
 live_trading_ack = ""
-poll_interval_sec = 2
+poll_interval_sec = 4
 
 [state]
 db_path = "data/executor_state_live.db"
@@ -74,6 +74,31 @@ generic_webhook_url_env = "POLY_ALERT_GENERIC_WEBHOOK_URL"
 [state_backup]
 enabled = true
 dir = "data/backups"
+
+[market_cache]
+enabled = true
+ws_url = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
+max_age_sec = 5.0
+refresh_sec = 60.0
+ping_sec = 10.0
+timeout_sec = 5.0
+recent_token_minutes = 360
+max_tokens = 250
+
+[onchain_shadow]
+enabled = true
+rpc_url_env = "POLYGON_RPC_URL"
+rpc_url = "https://polygon-rpc.com"
+chain_id = 137
+poll_interval_sec = 4.0
+confirmation_blocks = 2
+startup_backfill_blocks = 300
+max_block_range = 500
+decimals = 6
+exchange_addresses = [
+  "0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E",
+  "0xC5d563A36AE78145C45a50134d48A1215220f80a",
+]
 
 [config_safety]
 enabled = true

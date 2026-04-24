@@ -8,7 +8,9 @@ from pathlib import Path
 from typing import Any, Callable
 
 from execution.allowance import fetch_collateral_balance_allowance
+from execution.market_cache import market_cache_summary
 from execution.market_diagnostics import diagnose_market_snapshot_error
+from execution.onchain_shadow import onchain_shadow_summary
 from execution.position_marking import is_marked, is_unmarked, mark_position
 from execution.polymarket_executor import fetch_market_snapshot
 from execution.settlement import build_settlement_report
@@ -740,6 +742,61 @@ def build_activity_report(*, now: datetime | None = None) -> str:
     return "\n".join(lines)
 
 
+def build_latency_report(config: dict[str, Any] | None = None) -> str:
+    config = config or {}
+    market_cfg = config.get("market_cache", {})
+    onchain_cfg = config.get("onchain_shadow", {})
+    cache_max_age = float(market_cfg.get("max_age_sec", 5.0))
+    cache = market_cache_summary(max_age_sec=cache_max_age)
+    onchain = onchain_shadow_summary(hours=24)
+
+    lines = [
+        "Latency / источники",
+        "",
+        "Market WebSocket cache",
+        f"токены в cache: {cache['total_tokens']} | свежие <= {cache_max_age:.0f}s: {cache['fresh_tokens']}",
+        (
+            f"service: {'enabled' if market_cfg.get('enabled', False) else 'disabled'} | "
+            f"refresh {float(market_cfg.get('refresh_sec', 60.0)):.0f}s"
+        ),
+        "",
+        "On-chain shadow 24h",
+        (
+            f"fills: {onchain['fills']} | matched Data API: {onchain['matched_data_api']} | "
+            f"unmatched: {onchain['unmatched_data_api']}"
+        ),
+        f"avg Data API lag after on-chain seen: {_age(onchain.get('avg_data_api_lag_sec'))}",
+        (
+            f"service: {'enabled' if onchain_cfg.get('enabled', False) else 'disabled'} | "
+            f"poll {float(onchain_cfg.get('poll_interval_sec', 4.0)):.0f}s"
+        ),
+    ]
+
+    latest = cache.get("latest") or []
+    if latest:
+        lines.append("")
+        lines.append("Последние cache updates:")
+        for row in latest[:5]:
+            lines.append(
+                (
+                    f"{_short(row.get('token_id') or '')} | {row.get('event_type') or 'event'} | "
+                    f"bid {_num(row.get('best_bid'))} ask {_num(row.get('best_ask'))} "
+                    f"spread {_num(row.get('spread'))}"
+                )
+            )
+
+    by_leader = onchain.get("by_leader") or []
+    if by_leader:
+        lines.append("")
+        lines.append("On-chain по лидерам:")
+        for row in by_leader[:5]:
+            lines.append(
+                f"{_short(row.get('leader_wallet') or '')} | {row.get('side')} | fills {row.get('fills')}"
+            )
+
+    return "\n".join(lines)
+
+
 def build_blocks_report(*, now: datetime | None = None) -> str:
     init_db()
     init_signal_observation_table()
@@ -852,6 +909,7 @@ def build_help_report() -> str:
             "/blocks - policy/drift блокировки за 24ч",
             "/unmarked - позиции без текущего рыночного mark-to-market",
             "/settlements - resolved позиции и последние redeem-операции",
+            "/latency - WebSocket cache и on-chain/Data API lag",
             "/rebalance - прислать review-файлы и запросить подтверждение",
             "candidates CATEGORY - топ кандидатов категории pending-review",
             "pick CATEGORY N - выбрать кандидата вручную",

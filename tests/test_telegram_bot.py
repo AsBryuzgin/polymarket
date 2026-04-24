@@ -53,6 +53,12 @@ class TelegramBotTests(unittest.TestCase):
 
         self.assertEqual(response, "settlement report")
 
+    def test_latency_command_is_routed(self) -> None:
+        with patch("app.telegram_bot.build_latency_report", return_value="latency report"):
+            response = telegram_bot._build_response("latency", {})
+
+        self.assertEqual(response, "latency report")
+
 
 if __name__ == "__main__":
     unittest.main()

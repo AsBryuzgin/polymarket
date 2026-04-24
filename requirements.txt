@@ -4,3 +4,6 @@ pydantic
 py-clob-client
 py-builder-relayer-client
 py-builder-signing-sdk
+eth-abi
+eth-utils
+websocket-client

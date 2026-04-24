@@ -10,6 +10,7 @@ from execution.copy_worker import LeaderSignal
 from execution.order_policy import evaluate_order_policy
 from execution.price_drift import price_drift_ok
 from execution.polymarket_executor import fetch_market_snapshot
+from execution.onchain_shadow import record_data_api_trade_seen
 from execution.state_store import has_signal, get_open_position, get_leader_registry
 
 
@@ -264,6 +265,15 @@ def fresh_copyable_signals_from_wallet(
     )
 
     normalized = _dedupe_and_sort_trades(trades)
+    if bool(config.get("onchain_shadow", {}).get("enabled", False)):
+        for trade in normalized:
+            record_data_api_trade_seen(
+                transaction_hash=trade.transaction_hash,
+                leader_wallet=wallet,
+                token_id=trade.asset,
+                side=trade.side,
+                trade_timestamp=trade.timestamp,
+            )
     now_ts = int(time.time())
     summary = _base_summary(
         wallet=wallet,

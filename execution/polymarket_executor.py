@@ -8,7 +8,8 @@ from py_clob_client.client import ClobClient
 from py_clob_client.clob_types import MarketOrderArgs, OrderType
 from py_clob_client.order_builder.constants import BUY, SELL
 
-from execution.builder_auth import load_executor_env
+from execution.builder_auth import load_executor_config, load_executor_env
+from execution.market_cache import get_market_cache_snapshot
 
 load_dotenv()
 
@@ -97,6 +98,17 @@ def build_authenticated_client() -> ClobClient:
 
 
 def fetch_market_snapshot(token_id: str, side: str = "BUY") -> dict:
+    config = load_executor_config()
+    cache_cfg = config.get("market_cache", {})
+    if bool(cache_cfg.get("enabled", False)):
+        cached = get_market_cache_snapshot(
+            token_id,
+            side=side,
+            max_age_sec=float(cache_cfg.get("max_age_sec", 5.0)),
+        )
+        if cached and cached.get("price_quote") is not None and cached.get("midpoint") is not None:
+            return cached
+
     client = build_authenticated_client()
 
     mid = client.get_midpoint(token_id)
@@ -134,6 +146,8 @@ def fetch_market_snapshot(token_id: str, side: str = "BUY") -> dict:
         "tick_size": tick_size,
         "neg_risk": neg_risk,
         "last_trade_price": last_trade_price,
+        "source": "clob_rest",
+        "cache_age_sec": None,
         "raw_midpoint": mid,
         "raw_price_quote": price_quote,
     }
