@@ -86,6 +86,16 @@ class ConfigSafetyTests(unittest.TestCase):
             report["blockers"],
         )
 
+    def test_live_mode_requires_external_alert_delivery(self) -> None:
+        config = safe_config()
+        config["global"] = {"execution_mode": "live"}
+        config["alert_delivery"] = {"enabled": False}
+
+        report = build_config_safety_report(config)
+
+        self.assertEqual(report["status"], "NO_GO")
+        self.assertIn("alert_delivery.enabled must be true", report["blockers"])
+
 
 if __name__ == "__main__":
     unittest.main()

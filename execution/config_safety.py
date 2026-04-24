@@ -87,6 +87,8 @@ def build_config_safety_report(config: dict[str, Any]) -> dict[str, Any]:
         }
 
     signal_freshness = config.get("signal_freshness", {})
+    global_cfg = config.get("global", {})
+    alert_delivery = config.get("alert_delivery", {})
     filters = config.get("filters", {})
     risk = config.get("risk", {})
     sizing = config.get("sizing", {})
@@ -251,6 +253,26 @@ def build_config_safety_report(config: dict[str, Any]) -> dict[str, Any]:
         expected=True,
         label="state_backup.enabled",
     )
+
+    live_requested = (
+        str(global_cfg.get("execution_mode") or "").strip().upper() == "LIVE"
+        or _bool_or_default(global_cfg.get("live_trading_enabled"), False)
+    )
+    require_alert_delivery_for_live = _bool_or_default(
+        safety_cfg.get("require_alert_delivery_for_live"),
+        True,
+    )
+    checks["alert_delivery.required_for_live"] = require_alert_delivery_for_live
+    checks["alert_delivery.enabled"] = _bool_or_default(alert_delivery.get("enabled"), False)
+    if live_requested and require_alert_delivery_for_live:
+        _check_bool(
+            blockers=blockers,
+            checks=checks,
+            section=alert_delivery,
+            key="enabled",
+            expected=True,
+            label="alert_delivery.enabled",
+        )
 
     return {
         "status": "GO" if not blockers else "NO_GO",
