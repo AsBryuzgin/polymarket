@@ -322,5 +322,6 @@ def build_cutover_readiness_report(
             "readiness_status": live_readiness["readiness_status"],
             "blockers": live_readiness["blockers"],
             "warnings": live_readiness["warnings"],
+            "config_safety": live_readiness.get("config_safety", {}),
         },
     }

@@ -18,6 +18,35 @@ class LiveReadinessTests(unittest.TestCase):
             },
             "live_execution": {
                 "require_verified_fill": True,
+                "post_submit_poll_attempts": 5,
+            },
+            "runtime_lock": {
+                "enabled": True,
+                "activate_on_critical_alerts": True,
+            },
+            "state_backup": {
+                "enabled": True,
+            },
+            "risk": {
+                "min_order_size_usd": 0.01,
+                "max_per_trade_pct": 0.05,
+                "max_position_pct": 0.08,
+                "max_portfolio_exposure_pct": 0.90,
+                "max_daily_realized_loss_pct": 0.075,
+            },
+            "filters": {
+                "buy_max_price": 0.96,
+            },
+            "sizing": {
+                "round_up_to_min_order": True,
+                "allow_notional_fallback": False,
+                "allow_budget_fallback": False,
+            },
+            "signal_freshness": {
+                "max_recent_trades": 50,
+                "max_signals_per_cycle": 20,
+                "max_price_drift_abs": 0.02,
+                "max_price_drift_rel": 0.03,
             },
             "reconciliation": {
                 "fetch_exchange_positions": True,
@@ -181,6 +210,31 @@ class LiveReadinessTests(unittest.TestCase):
         self.assertEqual(report["readiness_status"], "GO")
         self.assertEqual(report["funding"]["balance_usd"], 101.0)
         self.assertEqual(report["funding"]["min_live_allowance_usd"], 5.05)
+
+    def test_live_readiness_blocks_stale_runtime_config(self) -> None:
+        config = self._base_config()
+        config["signal_freshness"]["max_recent_trades"] = 3
+        config["signal_freshness"]["max_price_drift_abs"] = 0.01
+
+        report = build_live_readiness_report(
+            config=config,
+            env_health={"env_ok": True, "api_creds_ok": True},
+            open_position_rows=[],
+            processed_signal_rows=[],
+            order_attempt_rows=[],
+            trade_history_rows=[],
+            exchange_position_rows=[],
+            exchange_open_order_rows=[],
+            funding_snapshot={"balance_usd": 101.0, "allowance_usd": 5.05},
+            state_db_path="data/executor_state_paper.db",
+        )
+
+        self.assertEqual(report["readiness_status"], "NO_GO")
+        self.assertIn(
+            "config safety: signal_freshness.max_recent_trades 3 below required 50",
+            report["blockers"],
+        )
+        self.assertEqual(report["config_safety"]["status"], "NO_GO")
 
 
 if __name__ == "__main__":

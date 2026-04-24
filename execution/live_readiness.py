@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import Any
 
 from execution.health_check import build_executor_health_report
+from execution.config_safety import build_config_safety_report
 from execution.order_recovery import build_unverified_order_recovery_report
 from execution.order_router import LIVE_TRADING_ACK, resolve_execution_mode
 from execution.reconciliation import reconcile_executor_state
@@ -136,9 +137,15 @@ def build_live_readiness_report(
         order_attempt_rows=order_attempt_rows,
         order_status_fetcher=lambda _order_id: {},
     )
+    config_safety = build_config_safety_report(config)
 
     blockers: list[str] = []
     warnings: list[str] = []
+
+    if config_safety["status"] == "NO_GO":
+        for blocker in config_safety["blockers"]:
+            blockers.append(f"config safety: {blocker}")
+    warnings.extend(config_safety["warnings"])
 
     if health["health_status"] != "OK":
         blockers.append(f"executor health is {health['health_status']}")
@@ -258,4 +265,5 @@ def build_live_readiness_report(
         },
         "legacy_backfill_pending": len(legacy_backfill_plan),
         "unverified_live_orders": len(unverified_orders),
+        "config_safety": config_safety,
     }

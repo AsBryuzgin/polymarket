@@ -23,6 +23,35 @@ class CutoverReadinessTests(unittest.TestCase):
             },
             "live_execution": {
                 "require_verified_fill": True,
+                "post_submit_poll_attempts": 5,
+            },
+            "runtime_lock": {
+                "enabled": True,
+                "activate_on_critical_alerts": True,
+            },
+            "state_backup": {
+                "enabled": True,
+            },
+            "risk": {
+                "min_order_size_usd": 0.01,
+                "max_per_trade_pct": 0.05,
+                "max_position_pct": 0.08,
+                "max_portfolio_exposure_pct": 0.90,
+                "max_daily_realized_loss_pct": 0.075,
+            },
+            "filters": {
+                "buy_max_price": 0.96,
+            },
+            "sizing": {
+                "round_up_to_min_order": True,
+                "allow_notional_fallback": False,
+                "allow_budget_fallback": False,
+            },
+            "signal_freshness": {
+                "max_recent_trades": 50,
+                "max_signals_per_cycle": 20,
+                "max_price_drift_abs": 0.02,
+                "max_price_drift_rel": 0.03,
             },
             "paper_soak": {
                 "required_mode": "PAPER",

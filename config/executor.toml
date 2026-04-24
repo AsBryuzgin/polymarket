@@ -68,8 +68,23 @@ email_webhook_url_env = "POLY_ALERT_EMAIL_WEBHOOK_URL"
 generic_webhook_url_env = "POLY_ALERT_GENERIC_WEBHOOK_URL"
 
 [state_backup]
-enabled = false
+enabled = true
 dir = "data/backups"
+
+[config_safety]
+enabled = true
+min_recent_trades = 50
+min_signals_per_cycle = 20
+min_price_drift_abs = 0.02
+min_price_drift_rel = 0.03
+min_buy_max_price = 0.96
+max_buy_max_price = 0.99
+max_min_order_size_usd = 0.01
+max_per_trade_pct = 0.05
+max_position_pct = 0.08
+max_portfolio_exposure_pct = 0.90
+max_daily_realized_loss_pct = 0.075
+min_post_submit_poll_attempts = 5
 
 [paper_soak]
 required_mode = "PAPER"
