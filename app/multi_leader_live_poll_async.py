@@ -16,6 +16,7 @@ from collectors.wallet_profiles import WalletProfilesClient
 from execution.builder_auth import load_executor_config
 from execution.copy_worker import process_signal
 from execution.leader_signal_source import latest_fresh_copyable_signal_from_wallet
+from execution.polling import remaining_cycle_sleep_sec
 from execution.state_backup import backup_state_db
 from execution.state_store import init_db
 
@@ -128,6 +129,7 @@ async def main_async() -> None:
 
     try:
         while True:
+            cycle_started_monotonic = time.monotonic()
             cycle_started = time.strftime("%Y-%m-%d %H:%M:%S")
             print(f"\n--- cycle started at {cycle_started} ---")
 
@@ -228,7 +230,12 @@ async def main_async() -> None:
                     print(f"  process_error: {e}")
 
             pprint({"cycle_backup": backup_state_db(config=config, label="after_cycle")})
-            await asyncio.sleep(poll_interval_sec)
+            sleep_sec = remaining_cycle_sleep_sec(
+                cycle_started_monotonic=cycle_started_monotonic,
+                interval_sec=poll_interval_sec,
+            )
+            if sleep_sec > 0:
+                await asyncio.sleep(sleep_sec)
 
     except KeyboardInterrupt:
         print("\nStopped by user.")

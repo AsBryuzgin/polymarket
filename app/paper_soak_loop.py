@@ -12,6 +12,7 @@ if str(ROOT) not in sys.path:
 
 from execution.builder_auth import load_executor_config
 from execution.order_router import resolve_execution_mode
+from execution.polling import remaining_cycle_sleep_sec, sleep_until_next_cycle
 from execution.signal_observation_store import init_signal_observation_table
 from execution.settlement import run_settlement_cycle
 from execution.soak_runner import filter_registry_rows_for_scan, run_soak_cycle, summarize_soak_cycle
@@ -70,6 +71,7 @@ def main() -> None:
     try:
         while True:
             cycle += 1
+            cycle_started_monotonic = time.monotonic()
             registry_rows = list_leader_registry(limit=100000)
             if not registry_rows:
                 print("No leader registry rows found. Run the rebalance/lifecycle step first.")
@@ -89,6 +91,13 @@ def main() -> None:
                 config=config,
                 snapshot_loader=fetch_market_snapshot,
             )
+            cycle_elapsed_sec = time.monotonic() - cycle_started_monotonic
+            sleep_sec = remaining_cycle_sleep_sec(
+                cycle_started_monotonic=cycle_started_monotonic,
+                interval_sec=interval_sec,
+            )
+            summary["cycle_elapsed_sec"] = round(cycle_elapsed_sec, 3)
+            summary["next_sleep_sec"] = round(sleep_sec, 3)
 
             print(f"\n--- paper soak cycle {cycle} at {started} ---")
             pprint(summary)
@@ -99,7 +108,10 @@ def main() -> None:
                 print("Reached max_cycles, stopping.")
                 return
 
-            time.sleep(interval_sec)
+            sleep_until_next_cycle(
+                cycle_started_monotonic=cycle_started_monotonic,
+                interval_sec=interval_sec,
+            )
     except KeyboardInterrupt:
         print("\nStopped by user.")
 

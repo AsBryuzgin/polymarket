@@ -14,6 +14,7 @@ from app.allocation_runtime import resolve_leader_budget_usd, resolve_total_capi
 from execution.builder_auth import load_executor_config
 from execution.copy_worker import process_signal
 from execution.leader_signal_source import latest_fresh_copyable_signal_from_wallet
+from execution.polling import sleep_until_next_cycle
 from execution.state_backup import backup_state_db
 from execution.state_store import init_db
 
@@ -53,6 +54,7 @@ def main() -> None:
 
     try:
         while True:
+            cycle_started_monotonic = time.monotonic()
             cycle_started = time.strftime("%Y-%m-%d %H:%M:%S")
             print(f"\n--- cycle started at {cycle_started} ---")
 
@@ -99,7 +101,10 @@ def main() -> None:
                     print(f"  process_error: {e}")
 
             pprint({"cycle_backup": backup_state_db(config=config, label="after_cycle")})
-            time.sleep(poll_interval_sec)
+            sleep_until_next_cycle(
+                cycle_started_monotonic=cycle_started_monotonic,
+                interval_sec=poll_interval_sec,
+            )
 
     except KeyboardInterrupt:
         print("\nStopped by user.")
