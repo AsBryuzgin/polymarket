@@ -29,6 +29,13 @@ class RawLeaderTrade:
     transaction_hash: str
 
 
+@dataclass
+class CopyableSignalCandidate:
+    signal: LeaderSignal
+    snapshot: dict[str, Any]
+    summary: dict[str, Any]
+
+
 def _safe_float(value: Any) -> float:
     try:
         return float(value) if value is not None else 0.0
@@ -56,30 +63,38 @@ def _position_asset(item: dict[str, Any]) -> str:
     return ""
 
 
-def _leader_position_context(
+def _load_leader_positions(
     *,
     client: WalletProfilesClient,
     wallet: str,
-    token_id: str,
-    side: str,
-    trade_size: float,
     max_pages: int,
-) -> dict[str, Any]:
+) -> tuple[list[dict[str, Any]], str | None]:
     try:
-        positions = client.paginate_current_positions(
+        return client.paginate_current_positions(
             user=wallet,
             page_size=100,
             max_pages=max_pages,
-        )
+        ), None
     except Exception as e:
+        return [], str(e)
+
+
+def _leader_position_context_from_positions(
+    *,
+    positions: list[dict[str, Any]],
+    position_error: str | None,
+    token_id: str,
+    side: str,
+    trade_size: float,
+) -> dict[str, Any]:
+    if position_error:
         return {
             "leader_portfolio_value_usd": None,
             "leader_token_position_size": None,
             "leader_token_position_value_usd": None,
             "leader_exit_fraction": None,
-            "leader_position_context_error": str(e),
+            "leader_position_context_error": position_error,
         }
-
     portfolio_value = 0.0
     token_position_size = 0.0
     token_position_value = 0.0
@@ -103,6 +118,29 @@ def _leader_position_context(
         "leader_exit_fraction": exit_fraction,
         "leader_position_context_error": None,
     }
+
+
+def _leader_position_context(
+    *,
+    client: WalletProfilesClient,
+    wallet: str,
+    token_id: str,
+    side: str,
+    trade_size: float,
+    max_pages: int,
+) -> dict[str, Any]:
+    positions, error = _load_leader_positions(
+        client=client,
+        wallet=wallet,
+        max_pages=max_pages,
+    )
+    return _leader_position_context_from_positions(
+        positions=positions,
+        position_error=error,
+        token_id=token_id,
+        side=side,
+        trade_size=trade_size,
+    )
 
 
 def normalize_trade(item: dict[str, Any]) -> RawLeaderTrade:
@@ -140,53 +178,11 @@ def _price_drift_ok(
     )
 
 
-def latest_fresh_copyable_signal_from_wallet(
-    wallet: str,
-    leader_budget_usd: float,
-) -> tuple[LeaderSignal | None, dict | None, dict]:
-    client = WalletProfilesClient()
-    config = load_executor_config()
-
-    risk = config.get("risk", {})
-    filters = config.get("filters", {})
-    freshness = config.get("signal_freshness", {})
-    exit_cfg = config.get("exit", {})
-
-    preferred_signal_age_sec = int(freshness.get("preferred_signal_age_sec", 30))
-    max_buy_signal_age_sec = int(
-        freshness.get(
-            "max_buy_signal_age_sec",
-            freshness.get("max_copyable_signal_age_sec", 600),
-        )
-    )
-    max_exit_signal_age_sec = int(freshness.get("max_exit_signal_age_sec", 86400))
-    max_recent_trades = int(freshness.get("max_recent_trades", 3))
-    max_price_drift_abs = float(freshness.get("max_price_drift_abs", 0.02))
-    max_price_drift_rel = float(freshness.get("max_price_drift_rel", 0.03))
-    max_position_pages = int(freshness.get("leader_position_context_max_pages", 20))
-
-    ignore_exit_drift = bool(exit_cfg.get("ignore_exit_drift", True))
-    exit_max_spread = float(exit_cfg.get("exit_max_spread", 0.05))
-
-    leader_registry = get_leader_registry(wallet)
-    leader_status = leader_registry["leader_status"] if leader_registry else "ACTIVE"
-
-    trades = client.get_trades(
-        user=wallet,
-        limit=max_recent_trades,
-        offset=0,
-        taker_only=True,
-    )
-
-    normalized = [normalize_trade(x) for x in trades]
-    normalized.sort(key=lambda x: x.timestamp, reverse=True)
-
-    now_ts = int(time.time())
-
-    summary = {
+def _base_summary(*, wallet: str, leader_status: str, checked_trades: int) -> dict[str, Any]:
+    return {
         "wallet": wallet,
         "leader_status": leader_status,
-        "checked_trades": len(normalized),
+        "checked_trades": checked_trades,
         "latest_trade_side": None,
         "latest_trade_age_sec": None,
         "latest_trade_hash": None,
@@ -211,10 +207,80 @@ def latest_fresh_copyable_signal_from_wallet(
         "selected_leader_position_context_error": None,
     }
 
+
+def _dedupe_and_sort_trades(trades: list[dict[str, Any]]) -> list[RawLeaderTrade]:
+    normalized: list[RawLeaderTrade] = []
+    seen: set[str] = set()
+    for item in trades:
+        trade = normalize_trade(item)
+        key = trade.transaction_hash or (
+            f"{trade.asset}:{trade.side}:{trade.timestamp}:{trade.size}:{trade.price}"
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        normalized.append(trade)
+    normalized.sort(key=lambda x: x.timestamp, reverse=True)
+    return normalized
+
+
+def fresh_copyable_signals_from_wallet(
+    wallet: str,
+    leader_budget_usd: float,
+) -> tuple[list[CopyableSignalCandidate], dict]:
+    client = WalletProfilesClient()
+    config = load_executor_config()
+
+    risk = config.get("risk", {})
+    filters = config.get("filters", {})
+    freshness = config.get("signal_freshness", {})
+    exit_cfg = config.get("exit", {})
+
+    preferred_signal_age_sec = int(freshness.get("preferred_signal_age_sec", 30))
+    max_buy_signal_age_sec = int(
+        freshness.get(
+            "max_buy_signal_age_sec",
+            freshness.get("max_copyable_signal_age_sec", 600),
+        )
+    )
+    max_exit_signal_age_sec = int(freshness.get("max_exit_signal_age_sec", 86400))
+    max_recent_trades = int(freshness.get("max_recent_trades", 3))
+    max_signals_per_cycle = max(1, int(freshness.get("max_signals_per_cycle", 1)))
+    max_price_drift_abs = float(freshness.get("max_price_drift_abs", 0.02))
+    max_price_drift_rel = float(freshness.get("max_price_drift_rel", 0.03))
+    max_position_pages = int(freshness.get("leader_position_context_max_pages", 20))
+
+    ignore_exit_drift = bool(exit_cfg.get("ignore_exit_drift", True))
+    exit_max_spread = float(exit_cfg.get("exit_max_spread", 0.05))
+
+    leader_registry = get_leader_registry(wallet)
+    leader_status = leader_registry["leader_status"] if leader_registry else "ACTIVE"
+
+    trades = client.get_trades(
+        user=wallet,
+        limit=max_recent_trades,
+        offset=0,
+        taker_only=True,
+    )
+
+    normalized = _dedupe_and_sort_trades(trades)
+    now_ts = int(time.time())
+    summary = _base_summary(
+        wallet=wallet,
+        leader_status=leader_status,
+        checked_trades=len(normalized),
+    )
+    candidates: list[CopyableSignalCandidate] = []
+    position_cache: tuple[list[dict[str, Any]], str | None] | None = None
+
     for idx, trade in enumerate(normalized):
         age_sec = now_ts - trade.timestamp
         open_position = get_open_position(wallet, trade.asset) if trade.asset else None
         has_open_position = open_position is not None
+        newer_same_token_sell = any(
+            newer.asset == trade.asset and newer.side == "SELL"
+            for newer in normalized[:idx]
+        )
 
         if idx == 0:
             summary["latest_trade_side"] = trade.side
@@ -245,6 +311,12 @@ def latest_fresh_copyable_signal_from_wallet(
             if idx == 0:
                 summary["latest_status"] = "EXIT_ONLY_BUY_BLOCKED"
                 summary["latest_reason"] = "leader is EXIT_ONLY; new buys blocked"
+            continue
+
+        if trade.side == "BUY" and newer_same_token_sell:
+            if idx == 0:
+                summary["latest_status"] = "SUPERSEDED_BY_NEWER_SELL"
+                summary["latest_reason"] = "newer sell for the same token is already visible"
             continue
 
         max_signal_age_sec = (
@@ -351,31 +423,41 @@ def latest_fresh_copyable_signal_from_wallet(
             summary["latest_status"] = selected_status
             summary["latest_reason"] = "copyable"
 
-        summary["selected_trade_hash"] = trade.transaction_hash
-        summary["selected_trade_age_sec"] = age_sec
-        summary["selected_status"] = selected_status
-        summary["selected_reason"] = "copyable"
-        summary["selected_has_open_position"] = has_open_position
-        summary["selected_trade_notional_usd"] = trade_notional_usd
-        position_context = _leader_position_context(
-            client=client,
-            wallet=wallet,
+        if position_cache is None:
+            position_cache = _load_leader_positions(
+                client=client,
+                wallet=wallet,
+                max_pages=max_position_pages,
+            )
+        positions, position_error = position_cache
+        position_context = _leader_position_context_from_positions(
+            positions=positions,
+            position_error=position_error,
             token_id=trade.asset,
             side=trade.side,
             trade_size=trade.size,
-            max_pages=max_position_pages,
         )
-        summary["selected_leader_portfolio_value_usd"] = position_context[
+
+        selected_summary = dict(summary)
+        selected_summary["selected_trade_hash"] = trade.transaction_hash
+        selected_summary["selected_trade_age_sec"] = age_sec
+        selected_summary["selected_status"] = selected_status
+        selected_summary["selected_reason"] = "copyable"
+        selected_summary["selected_has_open_position"] = has_open_position
+        selected_summary["selected_trade_notional_usd"] = trade_notional_usd
+        selected_summary["selected_leader_portfolio_value_usd"] = position_context[
             "leader_portfolio_value_usd"
         ]
-        summary["selected_leader_token_position_size"] = position_context[
+        selected_summary["selected_leader_token_position_size"] = position_context[
             "leader_token_position_size"
         ]
-        summary["selected_leader_token_position_value_usd"] = position_context[
+        selected_summary["selected_leader_token_position_value_usd"] = position_context[
             "leader_token_position_value_usd"
         ]
-        summary["selected_leader_exit_fraction"] = position_context["leader_exit_fraction"]
-        summary["selected_leader_position_context_error"] = position_context[
+        selected_summary["selected_leader_exit_fraction"] = position_context[
+            "leader_exit_fraction"
+        ]
+        selected_summary["selected_leader_position_context_error"] = position_context[
             "leader_position_context_error"
         ]
 
@@ -394,10 +476,32 @@ def latest_fresh_copyable_signal_from_wallet(
             leader_exit_fraction=position_context["leader_exit_fraction"],
         )
 
-        return signal, snapshot, summary
+        candidates.append(
+            CopyableSignalCandidate(
+                signal=signal,
+                snapshot=snapshot,
+                summary=selected_summary,
+            )
+        )
+        if len(candidates) >= max_signals_per_cycle:
+            break
 
     if summary["latest_status"] is None:
         summary["latest_status"] = "NO_USABLE_RECENT_TRADES"
         summary["latest_reason"] = "no usable recent trades"
 
-    return None, None, summary
+    return candidates, summary
+
+
+def latest_fresh_copyable_signal_from_wallet(
+    wallet: str,
+    leader_budget_usd: float,
+) -> tuple[LeaderSignal | None, dict | None, dict]:
+    candidates, summary = fresh_copyable_signals_from_wallet(
+        wallet=wallet,
+        leader_budget_usd=leader_budget_usd,
+    )
+    if not candidates:
+        return None, None, summary
+    candidate = candidates[0]
+    return candidate.signal, candidate.snapshot, candidate.summary

@@ -3,6 +3,7 @@ from __future__ import annotations
 import unittest
 
 from execution.copy_worker import LeaderSignal
+from execution.leader_signal_source import CopyableSignalCandidate
 from execution.soak_runner import filter_registry_rows_for_scan, run_soak_cycle, summarize_soak_cycle
 
 
@@ -122,6 +123,97 @@ class SoakRunnerTests(unittest.TestCase):
         self.assertEqual(rows[0]["process_status"], "NO_SIGNAL")
         self.assertEqual(rows[0]["latest_status"], "SKIPPED_NO_POSITION")
         self.assertIsNone(logged_observations[0]["selected_signal_id"])
+
+    def test_soak_cycle_processes_multiple_signals_for_one_leader(self) -> None:
+        logged_observations = []
+        processed = []
+        newest = LeaderSignal(
+            signal_id="sig-new",
+            leader_wallet="wallet1",
+            token_id="tokenA",
+            side="BUY",
+            leader_budget_usd=10.0,
+            leader_trade_notional_usd=3.0,
+        )
+        oldest = LeaderSignal(
+            signal_id="sig-old",
+            leader_wallet="wallet1",
+            token_id="tokenB",
+            side="BUY",
+            leader_budget_usd=10.0,
+            leader_trade_notional_usd=2.0,
+        )
+
+        def multi_fetcher(*, wallet: str, leader_budget_usd: float):
+            self.assertEqual(wallet, "wallet1")
+            self.assertEqual(leader_budget_usd, 10.0)
+            latest = {
+                "latest_trade_side": "BUY",
+                "latest_trade_age_sec": 3.0,
+                "latest_trade_hash": "sig-new",
+                "latest_status": "FRESH_COPYABLE",
+                "latest_reason": "copyable",
+            }
+            return (
+                [
+                    CopyableSignalCandidate(
+                        signal=newest,
+                        snapshot={
+                            "midpoint": 0.50,
+                            "best_bid": 0.49,
+                            "best_ask": 0.51,
+                            "spread": 0.02,
+                        },
+                        summary={
+                            **latest,
+                            "selected_trade_age_sec": 3.0,
+                            "selected_trade_notional_usd": 3.0,
+                        },
+                    ),
+                    CopyableSignalCandidate(
+                        signal=oldest,
+                        snapshot={
+                            "midpoint": 0.40,
+                            "best_bid": 0.39,
+                            "best_ask": 0.41,
+                            "spread": 0.02,
+                        },
+                        summary={
+                            **latest,
+                            "selected_trade_age_sec": 4.0,
+                            "selected_trade_notional_usd": 2.0,
+                        },
+                    ),
+                ],
+                latest,
+            )
+
+        def processor(selected_signal: LeaderSignal):
+            processed.append(selected_signal.signal_id)
+            return {"status": "PAPER_FILLED_ENTRY", "reason": "ok"}
+
+        rows = run_soak_cycle(
+            registry_rows=[
+                {
+                    "wallet": "wallet1",
+                    "user_name": "leader",
+                    "category": "SPORTS",
+                    "leader_status": "ACTIVE",
+                    "target_budget_usd": 10.0,
+                }
+            ],
+            multi_signal_fetcher=multi_fetcher,
+            signal_processor=processor,
+            observation_logger=lambda **kwargs: logged_observations.append(kwargs),
+        )
+
+        self.assertEqual([row["selected_signal_id"] for row in rows], ["sig-old", "sig-new"])
+        self.assertEqual(processed, ["sig-old", "sig-new"])
+        self.assertEqual(len(logged_observations), 2)
+
+        summary = summarize_soak_cycle(rows)
+        self.assertEqual(summary["leaders_checked"], 1)
+        self.assertEqual(summary["selected_signals"], 2)
 
     def test_soak_cycle_records_source_errors_as_observations(self) -> None:
         logged_observations = []
