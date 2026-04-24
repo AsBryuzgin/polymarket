@@ -88,7 +88,7 @@ max_tokens = 250
 [onchain_shadow]
 enabled = true
 rpc_url_env = "POLYGON_RPC_URL"
-rpc_url = "https://polygon-rpc.com"
+rpc_url = "https://polygon-bor-rpc.publicnode.com"
 chain_id = 137
 poll_interval_sec = 4.0
 confirmation_blocks = 2

@@ -327,7 +327,9 @@ def poll_onchain_shadow_once(config: dict[str, Any], leader_wallets: list[str] |
 
     init_onchain_shadow_tables()
     rpc_env = str(cfg.get("rpc_url_env") or "POLYGON_RPC_URL")
-    rpc_url = os.getenv(rpc_env) or str(cfg.get("rpc_url") or "https://polygon-rpc.com")
+    rpc_url = os.getenv(rpc_env) or str(
+        cfg.get("rpc_url") or "https://polygon-bor-rpc.publicnode.com"
+    )
     timeout_sec = float(cfg.get("timeout_sec", 10.0))
     chain_id = int(cfg.get("chain_id", 137))
     decimals = int(cfg.get("decimals", 6))
