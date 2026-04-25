@@ -1,6 +1,7 @@
 import unittest
+from datetime import datetime, timezone
 
-from signals.wallet_metrics_builder import _current_position_pnl_ratio
+from signals.wallet_metrics_builder import build_wallet_metrics, _current_position_pnl_ratio
 from signals.wallet_scoring import WalletMetrics, score_wallet
 
 
@@ -322,6 +323,111 @@ class TestWalletScoring(unittest.TestCase):
         self.assertTrue(hyper_result.eligible)
         self.assertNotEqual(barely_result.activity_score, hyper_result.activity_score)
         self.assertEqual(barely_result.final_wss, hyper_result.final_wss)
+
+    def test_sell_only_copy_flow_is_filter_not_wss_component(self) -> None:
+        base = dict(
+            age_days=500,
+            closed_positions=160,
+            unique_markets=45,
+            primary_domain_share=0.60,
+            single_market_concentration=0.20,
+            roi_30=0.05,
+            roi_90=0.10,
+            roi_180=0.18,
+            monthly_roi_last_6=[0.03, 0.02, 0.04, 0.01, 0.03, 0.02],
+            negative_monthly_roi_last_12=[-0.01, -0.015],
+            primary_domain_roi_30=0.04,
+            primary_domain_roi_90=0.11,
+            primary_domain_roi_180=0.19,
+            max_drawdown=0.07,
+            longest_loss_streak=2,
+            median_spread=0.01,
+            median_liquidity=22000,
+            slippage_proxy=0.005,
+            delay_sec=40,
+            profit_factor=1.8,
+            largest_win_share=0.20,
+            trades_30d=30,
+            trades_90d=30,
+            days_since_last_trade=1,
+        )
+        sell_only = WalletMetrics(
+            **base,
+            buy_trades_30d=0,
+            sell_trades_30d=30,
+            buy_trade_share_30d=0.0,
+        )
+        mixed_flow = WalletMetrics(
+            **base,
+            buy_trades_30d=5,
+            sell_trades_30d=25,
+            buy_trade_share_30d=5 / 30,
+        )
+
+        sell_only_result = score_wallet(sell_only)
+        mixed_result = score_wallet(mixed_flow)
+
+        self.assertFalse(sell_only_result.eligible)
+        self.assertIn("copy_flow_buy_trades_30d < 1", sell_only_result.filter_reasons)
+        self.assertTrue(mixed_result.eligible)
+        self.assertEqual(sell_only_result.final_wss, mixed_result.final_wss)
+
+    def test_near_sell_only_copy_flow_is_filtered(self) -> None:
+        mostly_sell = WalletMetrics(
+            age_days=500,
+            closed_positions=160,
+            unique_markets=45,
+            primary_domain_share=0.60,
+            single_market_concentration=0.20,
+            roi_30=0.05,
+            roi_90=0.10,
+            roi_180=0.18,
+            monthly_roi_last_6=[0.03, 0.02, 0.04, 0.01, 0.03, 0.02],
+            negative_monthly_roi_last_12=[-0.01, -0.015],
+            primary_domain_roi_30=0.04,
+            primary_domain_roi_90=0.11,
+            primary_domain_roi_180=0.19,
+            max_drawdown=0.07,
+            longest_loss_streak=2,
+            median_spread=0.01,
+            median_liquidity=22000,
+            slippage_proxy=0.005,
+            delay_sec=40,
+            profit_factor=1.8,
+            largest_win_share=0.20,
+            trades_30d=40,
+            trades_90d=40,
+            buy_trades_30d=1,
+            sell_trades_30d=39,
+            buy_trade_share_30d=1 / 40,
+            days_since_last_trade=1,
+        )
+
+        result = score_wallet(mostly_sell)
+
+        self.assertFalse(result.eligible)
+        self.assertIn("copy_flow_buy_share_30d < 0.05", result.filter_reasons)
+
+    def test_metrics_builder_counts_recent_buy_sell_flow(self) -> None:
+        now_ts = int(datetime.now(timezone.utc).timestamp())
+
+        metrics = build_wallet_metrics(
+            profile={"createdAt": "2024-01-01T00:00:00Z"},
+            traded_count=3,
+            current_positions=[],
+            closed_positions=[],
+            trades=[
+                {"timestamp": now_ts - 60, "side": "BUY", "asset": "token-a"},
+                {"timestamp": now_ts - 120, "side": "SELL", "asset": "token-b"},
+                {"timestamp": now_ts - 31 * 24 * 60 * 60, "side": "BUY", "asset": "token-c"},
+            ],
+        )
+
+        self.assertEqual(metrics.trades_30d, 2)
+        self.assertEqual(metrics.trades_90d, 3)
+        self.assertEqual(metrics.buy_trades_30d, 1)
+        self.assertEqual(metrics.sell_trades_30d, 1)
+        self.assertEqual(metrics.buy_trade_share_30d, 0.5)
 
 
 if __name__ == "__main__":

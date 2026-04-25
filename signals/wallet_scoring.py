@@ -7,6 +7,9 @@ from typing import List
 
 
 MIN_COPYABILITY_SCORE = 50.0
+MIN_COPY_FLOW_BUY_TRADES_30D = 1
+MIN_COPY_FLOW_BUY_SHARE_30D = 0.05
+MIN_COPY_FLOW_TRADES_FOR_SHARE_FILTER = 20
 
 
 def clip01(x: float) -> float:
@@ -53,6 +56,9 @@ class WalletMetrics:
     current_position_pnl_ratio: float = 0.0
     trades_30d: int = 0
     trades_90d: int = 0
+    buy_trades_30d: int = 0
+    sell_trades_30d: int = 0
+    buy_trade_share_30d: float = 0.0
     days_since_last_trade: int = 9999
 
 
@@ -95,6 +101,16 @@ def check_wallet_filters(
         reasons.append("days_since_last_trade > 7")
     if copyability is not None and copyability < MIN_COPYABILITY_SCORE:
         reasons.append(f"copyability_score < {MIN_COPYABILITY_SCORE:g}")
+
+    side_trades_30d = metrics.buy_trades_30d + metrics.sell_trades_30d
+    if side_trades_30d > 0 and metrics.sell_trades_30d > 0:
+        if metrics.buy_trades_30d < MIN_COPY_FLOW_BUY_TRADES_30D:
+            reasons.append("copy_flow_buy_trades_30d < 1")
+        elif (
+            side_trades_30d >= MIN_COPY_FLOW_TRADES_FOR_SHARE_FILTER
+            and metrics.buy_trade_share_30d < MIN_COPY_FLOW_BUY_SHARE_30D
+        ):
+            reasons.append(f"copy_flow_buy_share_30d < {MIN_COPY_FLOW_BUY_SHARE_30D:g}")
 
     return len(reasons) == 0, reasons
 

@@ -86,6 +86,9 @@ def score_wallet_from_category_entry(
         "closed_positions_used": len(closed_positions),
         "trades_30d": metrics.trades_30d,
         "trades_90d": metrics.trades_90d,
+        "buy_trades_30d": metrics.buy_trades_30d,
+        "sell_trades_30d": metrics.sell_trades_30d,
+        "buy_trade_share_30d": metrics.buy_trade_share_30d,
         "days_since_last_trade": metrics.days_since_last_trade,
         "median_spread": median_spread,
         "median_liquidity": median_liquidity,
@@ -144,6 +147,9 @@ def main() -> None:
                     "closed_positions_used": 0,
                     "trades_30d": 0,
                     "trades_90d": 0,
+                    "buy_trades_30d": 0,
+                    "sell_trades_30d": 0,
+                    "buy_trade_share_30d": 0.0,
                     "days_since_last_trade": 9999,
                     "median_spread": None,
                     "median_liquidity": None,
@@ -172,6 +178,8 @@ def main() -> None:
             f"eligible={item['eligible']} | "
             f"activity={item['activity_score']} | "
             f"trades30={item['trades_30d']} | "
+            f"buy30={item.get('buy_trades_30d', '')} | "
+            f"sell30={item.get('sell_trades_30d', '')} | "
             f"closed_used={item['closed_positions_used']:>4} | "
             f"spread={item['median_spread']} | "
             f"slip={item['slippage_proxy']} | "

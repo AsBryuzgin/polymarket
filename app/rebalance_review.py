@@ -57,6 +57,9 @@ REVIEW_COLUMNS = [
     "current_position_pnl_ratio",
     "trades_30d",
     "trades_90d",
+    "buy_trades_30d",
+    "sell_trades_30d",
+    "buy_trade_share_30d",
     "days_since_last_trade",
     "median_spread",
     "median_liquidity",
@@ -76,6 +79,9 @@ REQUIRED_SCORING_COLUMNS = [
     "current_position_pnl_ratio",
     "trades_30d",
     "trades_90d",
+    "buy_trades_30d",
+    "sell_trades_30d",
+    "buy_trade_share_30d",
     "days_since_last_trade",
     "median_spread",
     "median_liquidity",
@@ -282,8 +288,13 @@ def write_review_xlsx(rows: list[dict[str, Any]], path: Path) -> None:
             "activity is enforced by hard gates: trades30>=5 and last_trade<=7d",
         ],
         [
+            "copy-flow filter",
+            "display/gate only; not included in WSS",
+            "rejects SELL-only or near SELL-only recent taker flow that cannot open copy entries",
+        ],
+        [
             "hard gates",
-            "age>=120, closed>=40, unique>=15, concentration<=35%, open_pnl>=-25%, trades30>=5, last_trade<=7d, copyability>=50",
+            "age>=120, closed>=40, unique>=15, concentration<=35%, open_pnl>=-25%, trades30>=5, last_trade<=7d, copyability>=50, copy-flow buy presence",
             "",
         ],
     ]
@@ -486,6 +497,9 @@ def _live_fieldnames(rows: list[dict[str, Any]]) -> list[str]:
         "weight",
         "trades_30d",
         "trades_90d",
+        "buy_trades_30d",
+        "sell_trades_30d",
+        "buy_trade_share_30d",
         "days_since_last_trade",
         "median_spread",
         "slippage_proxy",
@@ -534,6 +548,7 @@ def list_manual_candidates(category: str, *, limit: int = 10) -> str:
             f"{idx}. {row.get('user_name')} | WSS {row.get('final_wss')} | "
             f"copy {row.get('copyability_score')} | "
             f"rank {row.get('rank')} | last {row.get('days_since_last_trade')}d | "
+            f"flow BUY/SELL {row.get('buy_trades_30d', '')}/{row.get('sell_trades_30d', '')} | "
             f"openPnL {row.get('current_position_pnl_ratio')}"
         )
     lines.append("")

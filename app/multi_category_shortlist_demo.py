@@ -107,6 +107,9 @@ def score_wallet_from_category_entry(
         "current_position_pnl_ratio": metrics.current_position_pnl_ratio,
         "trades_30d": metrics.trades_30d,
         "trades_90d": metrics.trades_90d,
+        "buy_trades_30d": metrics.buy_trades_30d,
+        "sell_trades_30d": metrics.sell_trades_30d,
+        "buy_trade_share_30d": metrics.buy_trade_share_30d,
         "days_since_last_trade": metrics.days_since_last_trade,
         "closed_positions_used": len(closed_positions),
     }
@@ -171,6 +174,9 @@ def run_category(
                     "current_position_pnl_ratio": 0.0,
                     "trades_30d": 0,
                     "trades_90d": 0,
+                    "buy_trades_30d": 0,
+                    "sell_trades_30d": 0,
+                    "buy_trade_share_30d": 0.0,
                     "days_since_last_trade": 9999,
                     "closed_positions_used": 0,
                 }
@@ -216,6 +222,9 @@ def save_csv(rows: list[dict], path: Path) -> None:
         "current_position_pnl_ratio",
         "trades_30d",
         "trades_90d",
+        "buy_trades_30d",
+        "sell_trades_30d",
+        "buy_trade_share_30d",
         "days_since_last_trade",
         "closed_positions_used",
     ]
@@ -235,6 +244,8 @@ def print_top(rows: list[dict], top_n: int = 5) -> None:
             f"eligible={row['eligible']} | "
             f"activity={row['activity_score']} | "
             f"trades30={row['trades_30d']} | "
+            f"buy30={row.get('buy_trades_30d', '')} | "
+            f"sell30={row.get('sell_trades_30d', '')} | "
             f"spread={row['median_spread']} | "
             f"slip={row['slippage_proxy']} | "
             f"open_pnl={row['current_position_pnl_ratio']} | "

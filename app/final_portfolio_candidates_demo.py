@@ -116,6 +116,9 @@ def save_csv(rows: list[dict], path: Path) -> None:
         "current_position_pnl_ratio",
         "trades_30d",
         "trades_90d",
+        "buy_trades_30d",
+        "sell_trades_30d",
+        "buy_trade_share_30d",
         "days_since_last_trade",
         "closed_positions_used",
     ]

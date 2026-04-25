@@ -54,6 +54,10 @@ def _safe_float(value: Any) -> float:
         return 0.0
 
 
+def _trade_side(item: dict[str, Any]) -> str:
+    return str(item.get("side") or "").strip().upper()
+
+
 def _market_key(item: dict[str, Any]) -> str | None:
     for key in ("slug", "conditionId", "eventSlug", "asset"):
         value = item.get(key)
@@ -284,17 +288,47 @@ def _current_position_pnl_ratio(current_positions: list[dict[str, Any]]) -> floa
 def _activity_stats(
     trades: list[dict[str, Any]],
     now: datetime,
-) -> tuple[int, int, int]:
-    trade_times = [dt for item in trades if (dt := _item_dt(item)) is not None]
-    if not trade_times:
-        return 0, 0, 9999
+) -> tuple[int, int, int, int, float, int]:
+    trade_times: list[datetime] = []
+    buy_trades_30d = 0
+    sell_trades_30d = 0
 
     cutoff_30 = now - timedelta(days=30)
     cutoff_90 = now - timedelta(days=90)
+
+    for item in trades:
+        dt = _item_dt(item)
+        if dt is None:
+            continue
+        trade_times.append(dt)
+
+        if dt >= cutoff_30:
+            side = _trade_side(item)
+            if side == "BUY":
+                buy_trades_30d += 1
+            elif side == "SELL":
+                sell_trades_30d += 1
+
+    if not trade_times:
+        return 0, 0, 0, 0, 0, 9999
+
     trades_30d = sum(1 for dt in trade_times if dt >= cutoff_30)
     trades_90d = sum(1 for dt in trade_times if dt >= cutoff_90)
+    side_trades_30d = buy_trades_30d + sell_trades_30d
+    buy_trade_share_30d = (
+        buy_trades_30d / side_trades_30d
+        if side_trades_30d > 0
+        else 0.0
+    )
     days_since_last_trade = max((now - max(trade_times)).days, 0)
-    return trades_30d, trades_90d, days_since_last_trade
+    return (
+        trades_30d,
+        trades_90d,
+        buy_trades_30d,
+        sell_trades_30d,
+        buy_trade_share_30d,
+        days_since_last_trade,
+    )
 
 
 def build_wallet_metrics(
@@ -318,7 +352,14 @@ def build_wallet_metrics(
         closed_positions=closed_positions,
         trades=trades,
     )
-    trades_30d, trades_90d, days_since_last_trade = _activity_stats(trades, now)
+    (
+        trades_30d,
+        trades_90d,
+        buy_trades_30d,
+        sell_trades_30d,
+        buy_trade_share_30d,
+        days_since_last_trade,
+    ) = _activity_stats(trades, now)
 
     return WalletMetrics(
         age_days=age_days,
@@ -354,6 +395,9 @@ def build_wallet_metrics(
         current_position_pnl_ratio=_current_position_pnl_ratio(current_positions),
         trades_30d=trades_30d,
         trades_90d=trades_90d,
+        buy_trades_30d=buy_trades_30d,
+        sell_trades_30d=sell_trades_30d,
+        buy_trade_share_30d=round(buy_trade_share_30d, 6),
         days_since_last_trade=days_since_last_trade,
     )
 
