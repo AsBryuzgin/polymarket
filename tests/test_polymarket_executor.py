@@ -3,7 +3,7 @@ from __future__ import annotations
 import unittest
 from unittest.mock import patch
 
-from execution.polymarket_executor import preview_market_order
+from execution.polymarket_executor import fetch_market_snapshot, preview_market_order
 
 
 class PolymarketExecutorTests(unittest.TestCase):
@@ -33,6 +33,55 @@ class PolymarketExecutorTests(unittest.TestCase):
         self.assertEqual(captured["amount"], 4.0)
         self.assertEqual(result["order_amount"], 4.0)
         self.assertEqual(result["order_amount_units"], "shares")
+
+    def test_cached_snapshot_is_hydrated_with_order_book_metadata(self) -> None:
+        class Level:
+            def __init__(self, price):
+                self.price = price
+
+        class Book:
+            bids = [Level("0.41")]
+            asks = [Level("0.45")]
+            min_order_size = "5"
+            tick_size = "0.01"
+            neg_risk = False
+
+        class FakeClient:
+            def get_order_book(self, token_id):
+                self.token_id = token_id
+                return Book()
+
+        cached = {
+            "token_id": "tokenA",
+            "side": "BUY",
+            "midpoint": 0.43,
+            "price_quote": 0.45,
+            "best_bid": 0.41,
+            "best_ask": 0.45,
+            "spread": 0.04,
+            "min_order_size": None,
+            "tick_size": None,
+            "neg_risk": None,
+            "source": "market_ws_cache",
+        }
+        config = {
+            "market_cache": {
+                "enabled": True,
+                "max_age_sec": 10.0,
+                "require_orderbook_metadata": True,
+            }
+        }
+
+        with patch("execution.polymarket_executor.load_executor_config", return_value=config), \
+             patch("execution.polymarket_executor.get_market_cache_snapshot", return_value=cached), \
+             patch("execution.polymarket_executor.build_authenticated_client", return_value=FakeClient()):
+            snapshot = fetch_market_snapshot(token_id="tokenA", side="BUY")
+
+        self.assertEqual(snapshot["source"], "market_ws_cache")
+        self.assertEqual(snapshot["price_quote"], 0.45)
+        self.assertEqual(snapshot["min_order_size"], 5.0)
+        self.assertEqual(snapshot["tick_size"], 0.01)
+        self.assertEqual(snapshot["raw_order_book_metadata_source"], "clob_rest")
 
 
 if __name__ == "__main__":

@@ -97,6 +97,37 @@ def build_authenticated_client() -> ClobClient:
     return client
 
 
+def _hydrate_cached_snapshot_with_order_book(
+    *,
+    client: ClobClient,
+    token_id: str,
+    snapshot: dict,
+) -> dict:
+    book = client.get_order_book(token_id)
+    best_bid, best_ask = _extract_best_bid_ask(book)
+    min_order_size = _extract_float_field(book, "min_order_size")
+    tick_size = _extract_float_field(book, "tick_size")
+    neg_risk = _extract_field(book, "neg_risk")
+    last_trade_price = _extract_float_field(book, "last_trade_price")
+
+    hydrated = dict(snapshot)
+    hydrated["min_order_size"] = min_order_size
+    hydrated["tick_size"] = tick_size
+    hydrated["neg_risk"] = neg_risk
+    if hydrated.get("best_bid") is None:
+        hydrated["best_bid"] = best_bid
+    if hydrated.get("best_ask") is None:
+        hydrated["best_ask"] = best_ask
+    if hydrated.get("spread") is None and hydrated.get("best_bid") is not None and hydrated.get("best_ask") is not None:
+        hydrated["spread"] = hydrated["best_ask"] - hydrated["best_bid"]
+    if hydrated.get("midpoint") is None and hydrated.get("best_bid") is not None and hydrated.get("best_ask") is not None:
+        hydrated["midpoint"] = (hydrated["best_bid"] + hydrated["best_ask"]) / 2.0
+    if hydrated.get("last_trade_price") is None:
+        hydrated["last_trade_price"] = last_trade_price
+    hydrated["raw_order_book_metadata_source"] = "clob_rest"
+    return hydrated
+
+
 def fetch_market_snapshot(token_id: str, side: str = "BUY") -> dict:
     config = load_executor_config()
     cache_cfg = config.get("market_cache", {})
@@ -107,7 +138,19 @@ def fetch_market_snapshot(token_id: str, side: str = "BUY") -> dict:
             max_age_sec=float(cache_cfg.get("max_age_sec", 5.0)),
         )
         if cached and cached.get("price_quote") is not None and cached.get("midpoint") is not None:
-            return cached
+            if bool(cache_cfg.get("require_orderbook_metadata", True)):
+                client = build_authenticated_client()
+                try:
+                    return _hydrate_cached_snapshot_with_order_book(
+                        client=client,
+                        token_id=token_id,
+                        snapshot=cached,
+                    )
+                except Exception:
+                    if not bool(cache_cfg.get("fallback_to_rest_on_metadata_error", True)):
+                        raise
+            else:
+                return cached
 
     client = build_authenticated_client()
 

@@ -74,12 +74,14 @@ dir = "data/backups"
 [market_cache]
 enabled = true
 ws_url = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
-max_age_sec = 5.0
-refresh_sec = 60.0
+max_age_sec = 10.0
+refresh_sec = 15.0
 ping_sec = 10.0
 timeout_sec = 5.0
 recent_token_minutes = 360
 max_tokens = 250
+require_orderbook_metadata = true
+fallback_to_rest_on_metadata_error = true
 
 [onchain_shadow]
 enabled = true
