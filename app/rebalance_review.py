@@ -535,6 +535,39 @@ def _candidate_rows_for_category(review: dict[str, Any], category: str) -> list[
     return rows
 
 
+def manual_candidates_for_category(category: str, *, limit: int = 10) -> list[dict[str, str]]:
+    review = load_pending_review()
+    if not review:
+        raise RuntimeError("no pending rebalance review")
+    return _candidate_rows_for_category(review, category)[:limit]
+
+
+def manual_candidate_categories() -> list[str]:
+    review = load_pending_review()
+    if not review:
+        raise RuntimeError("no pending rebalance review")
+    all_csv = Path(review["files"]["all_csv"])
+    best_wss_by_category: dict[str, float] = {}
+    for row in _read_csv(all_csv):
+        if str(row.get("eligible") or "").lower() != "true":
+            continue
+        category = str(row.get("category") or "").upper()
+        if not category:
+            continue
+        best_wss_by_category[category] = max(
+            best_wss_by_category.get(category, float("-inf")),
+            _safe_float(row.get("final_wss")),
+        )
+    return [
+        category
+        for category, _score in sorted(
+            best_wss_by_category.items(),
+            key=lambda item: (item[1], item[0]),
+            reverse=True,
+        )
+    ]
+
+
 def list_manual_candidates(category: str, *, limit: int = 10) -> str:
     review = load_pending_review()
     if not review:
@@ -556,10 +589,17 @@ def list_manual_candidates(category: str, *, limit: int = 10) -> str:
     return "\n".join(lines)
 
 
-def apply_manual_pick(category: str, pick_index: int) -> dict[str, Any]:
+def apply_manual_pick(
+    category: str,
+    pick_index: int,
+    *,
+    review_id: str | None = None,
+) -> dict[str, Any]:
     review = load_pending_review()
     if not review:
         raise RuntimeError("no pending rebalance review")
+    if review_id and review.get("review_id") != review_id:
+        raise RuntimeError(f"pending review id mismatch: {review.get('review_id')} != {review_id}")
 
     candidates = _candidate_rows_for_category(review, category)
     if pick_index < 1 or pick_index > len(candidates):
@@ -624,6 +664,98 @@ def apply_manual_pick(category: str, pick_index: int) -> dict[str, Any]:
         "review": review,
         "chosen": chosen,
         "replaced_category": replaced_category,
+    }
+
+
+def apply_manual_replacement(
+    *,
+    replace_index: int,
+    candidate_category: str,
+    pick_index: int,
+    review_id: str | None = None,
+) -> dict[str, Any]:
+    review = load_pending_review()
+    if not review:
+        raise RuntimeError("no pending rebalance review")
+    if review_id and review.get("review_id") != review_id:
+        raise RuntimeError(f"pending review id mismatch: {review.get('review_id')} != {review_id}")
+
+    candidates = _candidate_rows_for_category(review, candidate_category)
+    if pick_index < 1 or pick_index > len(candidates):
+        raise RuntimeError(f"pick index out of range for {candidate_category}: {pick_index}")
+    chosen = candidates[pick_index - 1]
+
+    live_path = Path(review["files"]["live"])
+    live_rows = _read_csv(live_path)
+    if not live_rows:
+        raise RuntimeError("pending live universe is empty")
+    if replace_index < 1 or replace_index > len(live_rows):
+        raise RuntimeError(f"replace index out of range: {replace_index}")
+
+    replace_idx = replace_index - 1
+    chosen_wallet = str(chosen.get("wallet") or "").lower()
+    duplicate = next(
+        (
+            row
+            for idx, row in enumerate(live_rows)
+            if idx != replace_idx and str(row.get("wallet") or "").lower() == chosen_wallet
+        ),
+        None,
+    )
+    if duplicate is not None:
+        raise RuntimeError(
+            "chosen wallet is already in proposed live universe: "
+            f"{duplicate.get('user_name')} | {duplicate.get('category')}"
+        )
+
+    replaced = dict(live_rows[replace_idx])
+    live_row = dict(chosen)
+    live_row["all_categories"] = chosen.get("all_categories") or chosen.get("category")
+    live_rows[replace_idx] = live_row
+    live_rows = _reweight_live_rows(live_rows)
+    _write_csv(live_rows, live_path, _live_fieldnames(live_rows))
+    _write_csv(
+        [
+            {
+                "category": row.get("category"),
+                "decision": "MANUAL_REVIEW_REPLACEMENT",
+                "selected_wallet": row.get("wallet"),
+                "selected_user_name": row.get("user_name"),
+                "selected_wss": row.get("final_wss"),
+                "selected_weight": row.get("weight"),
+                "reason": "manual replacement in Telegram pending review",
+            }
+            for row in live_rows
+        ],
+        Path(review["files"]["report"]),
+        [
+            "category",
+            "decision",
+            "selected_wallet",
+            "selected_user_name",
+            "selected_wss",
+            "selected_weight",
+            "reason",
+        ],
+    )
+
+    review["manual_overrides"][f"slot_{replace_index}"] = {
+        "replaced_user_name": replaced.get("user_name"),
+        "replaced_wallet": replaced.get("wallet"),
+        "replaced_category": replaced.get("category"),
+        "selected_user_name": chosen.get("user_name"),
+        "selected_wallet": chosen.get("wallet"),
+        "selected_category": chosen.get("category"),
+        "pick_index": pick_index,
+    }
+    review["proposed_live"] = live_rows
+    _set_pending_review(review)
+
+    return {
+        "review": review,
+        "chosen": chosen,
+        "replaced": replaced,
+        "replace_index": replace_index,
     }
 
 

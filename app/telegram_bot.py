@@ -35,11 +35,14 @@ from execution.manual_unwind import (
 from execution.order_router import resolve_execution_mode
 from app.rebalance_review import (
     apply_manual_pick,
+    apply_manual_replacement,
     approve_pending_review,
     build_review_message,
     create_rebalance_review,
     list_manual_candidates,
     load_pending_review,
+    manual_candidate_categories,
+    manual_candidates_for_category,
     reject_pending_review,
 )
 
@@ -281,6 +284,149 @@ def _review_markup(review_id: str) -> dict[str, Any]:
     }
 
 
+def _rebalance_replace_markup(review: dict[str, Any]) -> dict[str, Any]:
+    review_id = str(review.get("review_id") or "")
+    keyboard: list[list[dict[str, str]]] = []
+    for idx, row in enumerate(review.get("proposed_live") or [], start=1):
+        label = (
+            f"{idx}. {row.get('user_name')} | {row.get('category')} | "
+            f"WSS {row.get('final_wss')} | {float(row.get('weight') or 0.0) * 100:.2f}%"
+        )
+        keyboard.append(
+            [
+                {
+                    "text": label[:58],
+                    "callback_data": f"rebalance_replace:{review_id}:{idx}",
+                }
+            ]
+        )
+    keyboard.append(
+        [
+            {"text": "Назад", "callback_data": f"rebalance_back:{review_id}"},
+            {"text": "Отменить", "callback_data": f"rebalance_reject:{review_id}"},
+        ]
+    )
+    return {"inline_keyboard": keyboard}
+
+
+def _build_rebalance_replace_text(review: dict[str, Any]) -> str:
+    lines = [
+        "Кого заменить?",
+        f"review id: {review.get('review_id')}",
+        "",
+        "Сначала выбери текущего кандидата, которого убираем из proposed universe.",
+    ]
+    proposed = review.get("proposed_live") or []
+    if proposed:
+        lines.append("")
+        lines.append("Текущий proposed universe:")
+        for idx, row in enumerate(proposed, start=1):
+            weight = float(row.get("weight") or 0.0) * 100.0
+            lines.append(
+                f"{idx}. {row.get('user_name')} | {row.get('category')} | "
+                f"WSS {row.get('final_wss')} | {weight:.2f}%"
+            )
+    return "\n".join(lines)
+
+
+def _rebalance_category_markup(review_id: str, replace_index: int) -> dict[str, Any]:
+    keyboard: list[list[dict[str, str]]] = []
+    row: list[dict[str, str]] = []
+    for category in manual_candidate_categories():
+        row.append(
+            {
+                "text": category,
+                "callback_data": f"rebalance_category:{review_id}:{replace_index}:{category}",
+            }
+        )
+        if len(row) == 2:
+            keyboard.append(row)
+            row = []
+    if row:
+        keyboard.append(row)
+    keyboard.append(
+        [
+            {"text": "Назад", "callback_data": f"rebalance_manual:{review_id}"},
+            {"text": "Отменить", "callback_data": f"rebalance_reject:{review_id}"},
+        ]
+    )
+    return {"inline_keyboard": keyboard}
+
+
+def _build_rebalance_category_text(review: dict[str, Any], replace_index: int) -> str:
+    proposed = review.get("proposed_live") or []
+    target = proposed[replace_index - 1] if 1 <= replace_index <= len(proposed) else {}
+    lines = [
+        "Из какой категории взять замену?",
+        "",
+        (
+            f"Заменяем: {target.get('user_name', 'n/a')} | "
+            f"{target.get('category', 'n/a')} | WSS {target.get('final_wss', 'n/a')}"
+        ),
+        "",
+        "Можно выбрать любую категорию из свежего top-30.",
+    ]
+    return "\n".join(lines)
+
+
+def _rebalance_candidate_markup(
+    review_id: str,
+    replace_index: int,
+    category: str,
+    *,
+    limit: int = 10,
+) -> dict[str, Any]:
+    keyboard: list[list[dict[str, str]]] = []
+    for idx, row in enumerate(manual_candidates_for_category(category, limit=limit), start=1):
+        label = (
+            f"{idx}. {row.get('user_name')} | WSS {row.get('final_wss')} | "
+            f"copy {row.get('copyability_score')}"
+        )
+        keyboard.append(
+            [
+                {
+                    "text": label[:58],
+                    "callback_data": f"rebalance_pick_any:{review_id}:{replace_index}:{category}:{idx}",
+                }
+            ]
+        )
+    keyboard.append(
+        [
+            {"text": "Назад", "callback_data": f"rebalance_replace:{review_id}:{replace_index}"},
+            {"text": "Отменить", "callback_data": f"rebalance_reject:{review_id}"},
+        ]
+    )
+    return {"inline_keyboard": keyboard}
+
+
+def _build_rebalance_candidate_text(
+    review: dict[str, Any],
+    replace_index: int,
+    category: str,
+    *,
+    limit: int = 10,
+) -> str:
+    proposed = review.get("proposed_live") or []
+    target = proposed[replace_index - 1] if 1 <= replace_index <= len(proposed) else {}
+    rows = manual_candidates_for_category(category, limit=limit)
+    if not rows:
+        return f"Нет eligible кандидатов для {category.upper()}."
+    lines = [
+        f"Кем заменить {target.get('user_name', 'текущего кандидата')}?",
+        f"Категория замены: {category.upper()}",
+        "",
+        "Нажми на кандидата:",
+    ]
+    for idx, row in enumerate(rows, start=1):
+        lines.append(
+            f"{idx}. {row.get('user_name')} | WSS {row.get('final_wss')} | "
+            f"copy {row.get('copyability_score')} | "
+            f"flow BUY/SELL {row.get('buy_trades_30d', '')}/{row.get('sell_trades_30d', '')} | "
+            f"last {row.get('days_since_last_trade')}d"
+        )
+    return "\n".join(lines)
+
+
 def _unwind_scope_label(scope: str) -> str:
     if scope == "ALL":
         return "все лидеры"
@@ -508,31 +654,110 @@ def _handle_callback_query(
             )
         elif action == "rebalance_manual":
             review = load_pending_review()
-            categories = [
-                str(row.get("category"))
-                for row in (review or {}).get("proposed_live", [])
-                if row.get("category")
-            ]
-            lines = [
-                "Ручной выбор включен.",
-                "Посмотреть кандидатов: candidates CATEGORY",
-                "Выбрать: pick CATEGORY N",
-                "",
-                f"Текущие категории: {', '.join(categories) if categories else 'n/a'}",
-                "Пример: candidates FINANCE",
-            ]
+            if not review:
+                raise RuntimeError("no pending rebalance review")
             _answer_callback_query(
                 token=token,
                 callback_query_id=callback_id,
-                text="Manual mode",
+                text="Choose replacement slot",
                 timeout_sec=timeout_sec,
             )
             _send_message(
                 token=token,
                 chat_id=allowed_chat_id,
-                text="\n".join(lines),
+                text=_build_rebalance_replace_text(review),
                 timeout_sec=timeout_sec,
-                reply_markup=KEYBOARD,
+                reply_markup=_rebalance_replace_markup(review),
+            )
+        elif action == "rebalance_back":
+            review = load_pending_review()
+            if not review:
+                raise RuntimeError("no pending rebalance review")
+            _answer_callback_query(
+                token=token,
+                callback_query_id=callback_id,
+                text="Back to review",
+                timeout_sec=timeout_sec,
+            )
+            _send_message(
+                token=token,
+                chat_id=allowed_chat_id,
+                text=build_review_message(review),
+                timeout_sec=timeout_sec,
+                reply_markup=_review_markup(str(review["review_id"])),
+            )
+        elif action == "rebalance_replace":
+            review_id, replace_index_raw = payload.split(":", 1)
+            review = load_pending_review()
+            if not review:
+                raise RuntimeError("no pending rebalance review")
+            if review.get("review_id") != review_id:
+                raise RuntimeError(f"pending review id mismatch: {review.get('review_id')} != {review_id}")
+            replace_index = int(replace_index_raw)
+            _answer_callback_query(
+                token=token,
+                callback_query_id=callback_id,
+                text="Choose source category",
+                timeout_sec=timeout_sec,
+            )
+            _send_message(
+                token=token,
+                chat_id=allowed_chat_id,
+                text=_build_rebalance_category_text(review, replace_index),
+                timeout_sec=timeout_sec,
+                reply_markup=_rebalance_category_markup(review_id, replace_index),
+            )
+        elif action == "rebalance_category":
+            review_id, replace_index_raw, category = payload.split(":", 2)
+            review = load_pending_review()
+            if not review:
+                raise RuntimeError("no pending rebalance review")
+            if review.get("review_id") != review_id:
+                raise RuntimeError(f"pending review id mismatch: {review.get('review_id')} != {review_id}")
+            replace_index = int(replace_index_raw)
+            _answer_callback_query(
+                token=token,
+                callback_query_id=callback_id,
+                text="Choose candidate",
+                timeout_sec=timeout_sec,
+            )
+            _send_message(
+                token=token,
+                chat_id=allowed_chat_id,
+                text=_build_rebalance_candidate_text(review, replace_index, category),
+                timeout_sec=timeout_sec,
+                reply_markup=_rebalance_candidate_markup(review_id, replace_index, category),
+            )
+        elif action == "rebalance_pick_any":
+            review_id, replace_index_raw, category, pick_index_raw = payload.split(":", 3)
+            result = apply_manual_replacement(
+                replace_index=int(replace_index_raw),
+                candidate_category=category,
+                pick_index=int(pick_index_raw),
+                review_id=review_id,
+            )
+            review = result["review"]
+            chosen = result["chosen"]
+            replaced = result["replaced"]
+            _answer_callback_query(
+                token=token,
+                callback_query_id=callback_id,
+                text="Candidate replaced",
+                timeout_sec=timeout_sec,
+            )
+            text = (
+                f"Заменил {replaced.get('user_name')} | {replaced.get('category')} "
+                f"на {chosen.get('user_name')} | {chosen.get('category')} | "
+                f"WSS {chosen.get('final_wss')}.\n\n"
+                f"{build_review_message(review)}\n\n"
+                "Можно подтвердить, отменить или сменить еще одного кандидата."
+            )
+            _send_message(
+                token=token,
+                chat_id=allowed_chat_id,
+                text=text,
+                timeout_sec=timeout_sec,
+                reply_markup=_review_markup(str(review["review_id"])),
             )
         elif action == "unwind_select":
             scope = payload or "ALL"
