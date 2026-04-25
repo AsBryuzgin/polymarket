@@ -59,6 +59,54 @@ class TelegramBotTests(unittest.TestCase):
 
         self.assertEqual(response, "latency report")
 
+    def test_unwind_selection_markup_lists_all_and_leaders(self) -> None:
+        with patch(
+            "app.telegram_bot.list_unwind_targets",
+            return_value=[
+                {
+                    "wallet": "wallet1",
+                    "user_name": "Leader",
+                    "category": "SPORTS",
+                    "positions": 2,
+                    "position_usd": 5.5,
+                }
+            ],
+        ):
+            text = telegram_bot._build_unwind_selection_text({"global": {"execution_mode": "PAPER"}})
+            markup = telegram_bot._unwind_selection_markup()
+
+        self.assertIn("Ручной выход по рынку", text)
+        self.assertEqual(markup["inline_keyboard"][0][0]["callback_data"], "unwind_select:ALL")
+        self.assertEqual(markup["inline_keyboard"][1][0]["callback_data"], "unwind_select:wallet1")
+
+    def test_unwind_confirm_text_uses_preview(self) -> None:
+        with patch(
+            "app.telegram_bot.build_unwind_preview",
+            return_value={
+                "leaders": 1,
+                "positions": 2,
+                "position_usd": 5.5,
+                "leader_names": ["Leader"],
+            },
+        ), patch(
+            "app.telegram_bot.list_unwind_targets",
+            return_value=[
+                {
+                    "wallet": "wallet1",
+                    "user_name": "Leader",
+                    "category": "SPORTS",
+                    "positions": 2,
+                    "position_usd": 5.5,
+                }
+            ],
+        ):
+            text = telegram_bot._build_unwind_confirm_text("wallet1")
+            markup = telegram_bot._unwind_confirm_markup("wallet1")
+
+        self.assertIn("Подтвердить рыночный выход", text)
+        self.assertIn("Leader | SPORTS", text)
+        self.assertEqual(markup["inline_keyboard"][0][0]["callback_data"], "unwind_confirm:wallet1")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -26,6 +26,13 @@ from execution.telegram_reports import (
     build_status_report,
     build_unmarked_report,
 )
+from execution.manual_unwind import (
+    build_unwind_preview,
+    execute_manual_unwind,
+    format_unwind_result,
+    list_unwind_targets,
+)
+from execution.order_router import resolve_execution_mode
 from app.rebalance_review import (
     apply_manual_pick,
     approve_pending_review,
@@ -44,7 +51,7 @@ KEYBOARD = {
         [{"text": "Лидеры"}, {"text": "Активность 24ч"}],
         [{"text": "Блокировки 24ч"}, {"text": "Неоцененные"}],
         [{"text": "Сеттлмент"}, {"text": "Latency"}],
-        [{"text": "Ребаланс"}],
+        [{"text": "Ребаланс"}, {"text": "Выход"}],
         [{"text": "Помощь"}],
     ],
     "resize_keyboard": True,
@@ -126,6 +133,13 @@ def _telegram_env(config: dict[str, Any]) -> tuple[str, str]:
 
 def _api_url(token: str, method: str) -> str:
     return f"https://api.telegram.org/bot{token}/{method}"
+
+
+def _money(value: Any) -> str:
+    try:
+        return f"${float(value):.2f}"
+    except (TypeError, ValueError):
+        return "$0.00"
 
 
 def _load_offset(path: Path = OFFSET_FILE) -> int | None:
@@ -267,6 +281,96 @@ def _review_markup(review_id: str) -> dict[str, Any]:
     }
 
 
+def _unwind_scope_label(scope: str) -> str:
+    if scope == "ALL":
+        return "все лидеры"
+    for target in list_unwind_targets():
+        if str(target.get("wallet") or "").lower() == scope.lower():
+            return f"{target.get('user_name')} | {target.get('category') or 'UNKNOWN'}"
+    return scope
+
+
+def _unwind_selection_markup() -> dict[str, Any]:
+    targets = list_unwind_targets()
+    keyboard = [
+        [
+            {
+                "text": "Все лидеры",
+                "callback_data": "unwind_select:ALL",
+            }
+        ]
+    ]
+    for target in targets[:20]:
+        wallet = str(target.get("wallet") or "")
+        label = (
+            f"{target.get('user_name')} | {target.get('category') or 'UNKNOWN'} | "
+            f"{target.get('positions')} pos | {_money(target.get('position_usd'))}"
+        )
+        keyboard.append([{"text": label[:58], "callback_data": f"unwind_select:{wallet}"}])
+    keyboard.append([{"text": "Отменить", "callback_data": "unwind_cancel:select"}])
+    return {"inline_keyboard": keyboard}
+
+
+def _build_unwind_selection_text(config: dict[str, Any]) -> str:
+    targets = list_unwind_targets()
+    total_positions = sum(int(row.get("positions") or 0) for row in targets)
+    total_usd = sum(float(row.get("position_usd") or 0.0) for row in targets)
+    mode = resolve_execution_mode(config)
+    lines = [
+        "Ручной выход по рынку",
+        f"открытых позиций: {total_positions} | cost basis {_money(total_usd)}",
+        f"режим: {mode}",
+        "",
+        "Выбери лидера или все позиции. Следующий экран попросит подтверждение.",
+    ]
+    if not targets:
+        lines.append("Открытых позиций нет.")
+    return "\n".join(lines)
+
+
+def _unwind_confirm_markup(scope: str) -> dict[str, Any]:
+    return {
+        "inline_keyboard": [
+            [
+                {"text": "Подтвердить выход", "callback_data": f"unwind_confirm:{scope}"},
+                {"text": "Отменить", "callback_data": "unwind_cancel:confirm"},
+            ]
+        ]
+    }
+
+
+def _build_unwind_confirm_text(scope: str) -> str:
+    target_wallet = None if scope == "ALL" else scope
+    preview = build_unwind_preview(target_wallet)
+    leader_names = ", ".join(preview.get("leader_names") or [])
+    lines = [
+        "Подтвердить рыночный выход?",
+        f"scope: {_unwind_scope_label(scope)}",
+        f"лидеров: {preview.get('leaders')} | позиций: {preview.get('positions')} | cost basis {_money(preview.get('position_usd'))}",
+    ]
+    if leader_names:
+        lines.append(f"лидеры: {leader_names}")
+    lines.extend(
+        [
+            "",
+            "После подтверждения бот отправит SELL FOK market order по каждой markable позиции.",
+            "Resolved/no-orderbook позиции будут пропущены и останутся для settlement/redeem.",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def _is_unwind_command(text: str) -> bool:
+    return text.strip().lower() in {
+        "/unwind",
+        "unwind",
+        "выход",
+        "выйти",
+        "закрыть позиции",
+        "продать позиции",
+    }
+
+
 def _is_rebalance_command(text: str) -> bool:
     return text.strip().lower() in {
         "/rebalance",
@@ -370,10 +474,10 @@ def _handle_callback_query(
         return
 
     data = str(callback_query.get("data") or "")
-    action, _, review_id = data.partition(":")
+    action, _, payload = data.partition(":")
     try:
         if action == "rebalance_approve":
-            log = approve_pending_review(review_id or None)
+            log = approve_pending_review(payload or None)
             _answer_callback_query(
                 token=token,
                 callback_query_id=callback_id,
@@ -383,12 +487,12 @@ def _handle_callback_query(
             _send_message(
                 token=token,
                 chat_id=allowed_chat_id,
-                text=f"Rebalance {review_id} применен.\n\n{log[-2500:]}",
+                text=f"Rebalance {payload} применен.\n\n{log[-2500:]}",
                 timeout_sec=timeout_sec,
                 reply_markup=KEYBOARD,
             )
         elif action == "rebalance_reject":
-            text = reject_pending_review(review_id or None)
+            text = reject_pending_review(payload or None)
             _answer_callback_query(
                 token=token,
                 callback_query_id=callback_id,
@@ -430,6 +534,59 @@ def _handle_callback_query(
                 timeout_sec=timeout_sec,
                 reply_markup=KEYBOARD,
             )
+        elif action == "unwind_select":
+            scope = payload or "ALL"
+            _answer_callback_query(
+                token=token,
+                callback_query_id=callback_id,
+                text="Unwind target selected",
+                timeout_sec=timeout_sec,
+            )
+            _send_message(
+                token=token,
+                chat_id=allowed_chat_id,
+                text=_build_unwind_confirm_text(scope),
+                timeout_sec=timeout_sec,
+                reply_markup=_unwind_confirm_markup(scope),
+            )
+        elif action == "unwind_confirm":
+            scope = payload or "ALL"
+            target_wallet = None if scope == "ALL" else scope
+            _answer_callback_query(
+                token=token,
+                callback_query_id=callback_id,
+                text="Unwind started",
+                timeout_sec=timeout_sec,
+            )
+            _send_message(
+                token=token,
+                chat_id=allowed_chat_id,
+                text="Запускаю рыночный выход. Это может занять немного времени.",
+                timeout_sec=timeout_sec,
+                reply_markup=KEYBOARD,
+            )
+            summary = execute_manual_unwind(target_wallet=target_wallet)
+            _send_message(
+                token=token,
+                chat_id=allowed_chat_id,
+                text=format_unwind_result(summary),
+                timeout_sec=timeout_sec,
+                reply_markup=KEYBOARD,
+            )
+        elif action == "unwind_cancel":
+            _answer_callback_query(
+                token=token,
+                callback_query_id=callback_id,
+                text="Unwind cancelled",
+                timeout_sec=timeout_sec,
+            )
+            _send_message(
+                token=token,
+                chat_id=allowed_chat_id,
+                text="Ручной выход отменен.",
+                timeout_sec=timeout_sec,
+                reply_markup=KEYBOARD,
+            )
         else:
             _answer_callback_query(
                 token=token,
@@ -447,7 +604,7 @@ def _handle_callback_query(
         _send_message(
             token=token,
             chat_id=allowed_chat_id,
-            text=f"Rebalance callback failed: {e}",
+            text=f"Telegram callback failed: {e}",
             timeout_sec=timeout_sec,
             reply_markup=KEYBOARD,
         )
@@ -505,6 +662,15 @@ def run_bot(*, poll_sec: float, timeout_sec: float, process_pending: bool) -> No
                         token=token,
                         chat_id=allowed_chat_id,
                         timeout_sec=timeout_sec,
+                    )
+                    continue
+                if _is_unwind_command(text):
+                    _send_message(
+                        token=token,
+                        chat_id=allowed_chat_id,
+                        text=_build_unwind_selection_text(config),
+                        timeout_sec=timeout_sec,
+                        reply_markup=_unwind_selection_markup(),
                     )
                     continue
                 reply_markup = KEYBOARD

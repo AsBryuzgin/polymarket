@@ -237,6 +237,47 @@ def preview_market_order(
     }
 
 
+def preview_market_order_shares(
+    *,
+    token_id: str,
+    share_amount: float,
+    side: str = "SELL",
+) -> dict:
+    if side.upper() != "SELL":
+        raise ValueError("share-based market orders are only supported for SELL")
+
+    client = build_authenticated_client()
+    snapshot = fetch_market_snapshot(token_id=token_id, side=side)
+
+    market_order = MarketOrderArgs(
+        token_id=token_id,
+        amount=float(share_amount),
+        side=_side_constant(side),
+        order_type=OrderType.FOK,
+    )
+
+    signed = client.create_market_order(market_order)
+    amount_usd = float(share_amount) * float(snapshot["price_quote"])
+
+    return {
+        "token_id": token_id,
+        "amount_usd": amount_usd,
+        "order_amount": float(share_amount),
+        "order_amount_units": "shares",
+        "side": side,
+        "midpoint": snapshot["midpoint"],
+        "price_quote": snapshot["price_quote"],
+        "best_bid": snapshot["best_bid"],
+        "best_ask": snapshot["best_ask"],
+        "spread": snapshot["spread"],
+        "min_order_size": snapshot.get("min_order_size"),
+        "tick_size": snapshot.get("tick_size"),
+        "neg_risk": snapshot.get("neg_risk"),
+        "signed_order_type": type(signed).__name__,
+        "signed_order_preview": str(signed)[:500],
+    }
+
+
 def submit_live_market_order(
     token_id: str,
     amount_usd: float,
@@ -267,6 +308,52 @@ def submit_live_market_order(
         "amount_usd": amount_usd,
         "order_amount": order_amount,
         "order_amount_units": "usdc" if side.upper() == "BUY" else "shares",
+        "side": side,
+        "midpoint": snapshot["midpoint"],
+        "price_quote": snapshot["price_quote"],
+        "best_bid": snapshot["best_bid"],
+        "best_ask": snapshot["best_ask"],
+        "spread": snapshot["spread"],
+        "min_order_size": snapshot.get("min_order_size"),
+        "tick_size": snapshot.get("tick_size"),
+        "neg_risk": snapshot.get("neg_risk"),
+        "order_type": "FOK",
+        "signed_order_type": type(signed).__name__,
+        "post_order_response": response,
+    }
+
+
+def submit_live_market_order_shares(
+    *,
+    token_id: str,
+    share_amount: float,
+    side: str = "SELL",
+) -> dict:
+    if side.upper() != "SELL":
+        raise ValueError("share-based market orders are only supported for SELL")
+
+    client = build_authenticated_client()
+    snapshot = fetch_market_snapshot(token_id=token_id, side=side)
+
+    market_order = MarketOrderArgs(
+        token_id=token_id,
+        amount=float(share_amount),
+        side=_side_constant(side),
+        order_type=OrderType.FOK,
+    )
+
+    signed = client.create_market_order(market_order)
+    response = client.post_order(signed, OrderType.FOK)
+    if not isinstance(response, dict):
+        response = {"raw_response": response}
+
+    amount_usd = float(share_amount) * float(snapshot["price_quote"])
+
+    return {
+        "token_id": token_id,
+        "amount_usd": amount_usd,
+        "order_amount": float(share_amount),
+        "order_amount_units": "shares",
         "side": side,
         "midpoint": snapshot["midpoint"],
         "price_quote": snapshot["price_quote"],

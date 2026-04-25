@@ -911,6 +911,7 @@ def build_help_report() -> str:
             "/settlements - resolved позиции и последние redeem-операции",
             "/latency - WebSocket cache и on-chain/Data API lag",
             "/rebalance - прислать review-файлы и запросить подтверждение",
+            "/unwind - ручной рыночный выход по лидеру или всем позициям",
             "candidates CATEGORY - топ кандидатов категории pending-review",
             "pick CATEGORY N - выбрать кандидата вручную",
             "/help - это меню",
