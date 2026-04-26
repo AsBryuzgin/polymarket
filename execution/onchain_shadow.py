@@ -43,6 +43,22 @@ def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
 
 
+def _parse_utc_timestamp(value: Any) -> int:
+    if not value:
+        return 0
+    text = str(value).replace("Z", "+00:00")
+    try:
+        dt = datetime.fromisoformat(text)
+    except ValueError:
+        try:
+            dt = datetime.fromisoformat(text.replace(" ", "T") + "+00:00")
+        except ValueError:
+            return 0
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return int(dt.astimezone(timezone.utc).timestamp())
+
+
 def _strip_0x(value: str) -> str:
     return value[2:] if value.lower().startswith("0x") else value
 
@@ -318,6 +334,86 @@ def record_data_api_trade_seen(
     )
     conn.commit()
     conn.close()
+
+
+def onchain_signal_id(
+    *,
+    transaction_hash: str,
+    token_id: str,
+    side: str,
+) -> str:
+    return f"onchain:{transaction_hash.lower()}:{str(token_id)}:{side.upper()}"
+
+
+def list_recent_onchain_shadow_trades(
+    *,
+    leader_wallet: str,
+    limit: int = 50,
+    max_age_sec: int = 600,
+) -> list[dict[str, Any]]:
+    init_onchain_shadow_tables()
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT
+            transaction_hash,
+            token_id,
+            side,
+            MIN(observed_at) AS observed_at,
+            SUM(size) AS size,
+            SUM(notional_usd) AS notional_usd,
+            COUNT(*) AS raw_fills
+        FROM onchain_shadow_fills
+        WHERE lower(leader_wallet) = lower(?)
+          AND datetime(observed_at) >= datetime('now', ?)
+          AND transaction_hash IS NOT NULL
+          AND transaction_hash != ''
+          AND token_id IS NOT NULL
+          AND token_id != ''
+          AND side IN ('BUY', 'SELL')
+        GROUP BY transaction_hash, token_id, side
+        ORDER BY observed_at DESC
+        LIMIT ?
+        """,
+        (leader_wallet, f"-{int(max_age_sec)} seconds", int(limit)),
+    )
+    rows = [dict(row) for row in cur.fetchall()]
+    conn.close()
+
+    trades: list[dict[str, Any]] = []
+    for row in rows:
+        size = _safe_float(row.get("size"))
+        notional = _safe_float(row.get("notional_usd"))
+        if size <= 0 or notional <= 0:
+            continue
+        transaction_hash = str(row.get("transaction_hash") or "").lower()
+        token_id = str(row.get("token_id") or "")
+        side = str(row.get("side") or "").upper()
+        trades.append(
+            {
+                "proxyWallet": leader_wallet,
+                "side": side,
+                "asset": token_id,
+                "conditionId": "",
+                "size": size,
+                "price": round(notional / size, 8),
+                "timestamp": _parse_utc_timestamp(row.get("observed_at")),
+                "title": "",
+                "slug": "",
+                "eventSlug": "",
+                "outcome": "",
+                "transactionHash": transaction_hash,
+                "signalId": onchain_signal_id(
+                    transaction_hash=transaction_hash,
+                    token_id=token_id,
+                    side=side,
+                ),
+                "source": "onchain_shadow",
+                "rawFills": int(row.get("raw_fills") or 0),
+            }
+        )
+    return trades
 
 
 def poll_onchain_shadow_once(config: dict[str, Any], leader_wallets: list[str] | None = None) -> dict[str, Any]:

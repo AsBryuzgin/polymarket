@@ -263,6 +263,128 @@ class SignalNotionalPassthroughTests(unittest.TestCase):
         self.assertEqual(summary["latest_trade_hash"], "tx-new")
         self.assertEqual(candidates[1].summary["selected_trade_hash"], "tx-old")
 
+    def test_source_can_use_onchain_shadow_trade_before_data_api(self) -> None:
+        fake_snapshot = {
+            "best_ask": 0.40,
+            "best_bid": 0.39,
+            "midpoint": 0.395,
+            "price_quote": 0.40,
+            "spread": 0.01,
+            "token_id": "tokenA",
+        }
+        fake_config = {
+            "risk": {"skip_if_spread_gt": 0.02, "min_order_size_usd": 1.0},
+            "filters": {"buy_min_price": 0.05, "buy_max_price": 0.96},
+            "signal_freshness": {
+                "preferred_signal_age_sec": 30,
+                "max_buy_signal_age_sec": 600,
+                "max_recent_trades": 50,
+                "max_signals_per_cycle": 20,
+                "max_price_drift_abs": 1.0,
+                "max_price_drift_rel": 1.0,
+            },
+            "exit": {"ignore_exit_drift": True, "exit_max_spread": 0.05},
+            "onchain_shadow": {
+                "enabled": True,
+                "use_as_signal_source": True,
+                "signal_limit": 50,
+                "signal_window_sec": 600,
+            },
+        }
+        onchain_trade = {
+            "proxyWallet": "walletA",
+            "side": "BUY",
+            "asset": "tokenA",
+            "conditionId": "",
+            "size": 10.0,
+            "price": 0.40,
+            "timestamp": 1700000000,
+            "title": "",
+            "slug": "",
+            "eventSlug": "",
+            "outcome": "",
+            "transactionHash": "0xtx",
+            "signalId": "onchain:0xtx:tokenA:BUY",
+            "source": "onchain_shadow",
+        }
+
+        with patch("execution.leader_signal_source.load_executor_config", return_value=fake_config), \
+             patch("execution.leader_signal_source.WalletProfilesClient") as MockClient, \
+             patch("execution.leader_signal_source.list_recent_onchain_shadow_trades", return_value=[onchain_trade]), \
+             patch("execution.leader_signal_source.fetch_market_snapshot", return_value=fake_snapshot), \
+             patch("execution.leader_signal_source.get_leader_registry", return_value={"leader_status": "ACTIVE"}), \
+             patch("execution.leader_signal_source.time.time", return_value=1700000005):
+            MockClient.return_value.get_trades.return_value = []
+            MockClient.return_value.paginate_current_positions.return_value = [
+                {"asset": "tokenA", "size": 10.0, "currentValue": 4.0},
+            ]
+
+            candidates, summary = fresh_copyable_signals_from_wallet(
+                wallet="walletA",
+                leader_budget_usd=12.84,
+            )
+
+        self.assertEqual([c.signal.signal_id for c in candidates], ["onchain:0xtx:tokenA:BUY"])
+        self.assertEqual(summary["latest_trade_hash"], "onchain:0xtx:tokenA:BUY")
+        self.assertEqual(candidates[0].summary["selected_trade_hash"], "onchain:0xtx:tokenA:BUY")
+
+    def test_source_skips_data_api_duplicate_after_onchain_signal_processed(self) -> None:
+        state_store.record_signal(
+            signal_id="onchain:0xtx:tokenA:BUY",
+            leader_wallet="walletA",
+            token_id="tokenA",
+            side="BUY",
+            leader_budget_usd=12.84,
+            suggested_amount_usd=1.0,
+            status="PAPER_FILLED_ENTRY",
+            reason="ok",
+        )
+        fake_trades = [
+            {
+                "proxyWallet": "walletA",
+                "side": "BUY",
+                "asset": "tokenA",
+                "conditionId": "condA",
+                "size": 10.0,
+                "price": 0.40,
+                "timestamp": 1700000000,
+                "title": "title",
+                "slug": "slug",
+                "eventSlug": "event-slug",
+                "outcome": "YES",
+                "transactionHash": "0xtx",
+            }
+        ]
+        fake_config = {
+            "risk": {"skip_if_spread_gt": 0.02, "min_order_size_usd": 1.0},
+            "filters": {"buy_min_price": 0.05, "buy_max_price": 0.96},
+            "signal_freshness": {
+                "preferred_signal_age_sec": 30,
+                "max_buy_signal_age_sec": 600,
+                "max_recent_trades": 50,
+                "max_signals_per_cycle": 20,
+                "max_price_drift_abs": 1.0,
+                "max_price_drift_rel": 1.0,
+            },
+            "exit": {"ignore_exit_drift": True, "exit_max_spread": 0.05},
+            "onchain_shadow": {"enabled": True, "use_as_signal_source": False},
+        }
+
+        with patch("execution.leader_signal_source.load_executor_config", return_value=fake_config), \
+             patch("execution.leader_signal_source.WalletProfilesClient") as MockClient, \
+             patch("execution.leader_signal_source.get_leader_registry", return_value={"leader_status": "ACTIVE"}), \
+             patch("execution.leader_signal_source.record_data_api_trade_seen"), \
+             patch("execution.leader_signal_source.time.time", return_value=1700000005):
+            MockClient.return_value.get_trades.return_value = fake_trades
+
+            candidates, summary = fresh_copyable_signals_from_wallet(
+                wallet="walletA",
+                leader_budget_usd=12.84,
+            )
+
+        self.assertEqual(candidates, [])
+        self.assertEqual(summary["latest_status"], "ALREADY_PROCESSED")
+
     def test_source_skips_buy_superseded_by_newer_sell_same_token(self) -> None:
         fake_trades = [
             {

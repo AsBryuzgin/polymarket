@@ -85,6 +85,9 @@ fallback_to_rest_on_metadata_error = true
 
 [onchain_shadow]
 enabled = true
+use_as_signal_source = false
+signal_limit = 50
+signal_window_sec = 600
 rpc_url_env = "POLYGON_RPC_URL"
 rpc_url = "https://polygon-bor-rpc.publicnode.com"
 chain_id = 137

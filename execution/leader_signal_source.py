@@ -10,7 +10,11 @@ from execution.copy_worker import LeaderSignal
 from execution.order_policy import evaluate_order_policy
 from execution.price_drift import price_drift_ok
 from execution.polymarket_executor import fetch_market_snapshot
-from execution.onchain_shadow import record_data_api_trade_seen
+from execution.onchain_shadow import (
+    list_recent_onchain_shadow_trades,
+    onchain_signal_id,
+    record_data_api_trade_seen,
+)
 from execution.state_store import has_signal, get_open_position, get_leader_registry
 
 
@@ -28,6 +32,8 @@ class RawLeaderTrade:
     event_slug: str
     outcome: str
     transaction_hash: str
+    signal_id: str = ""
+    source: str = "data_api"
 
 
 @dataclass
@@ -158,6 +164,8 @@ def normalize_trade(item: dict[str, Any]) -> RawLeaderTrade:
         event_slug=str(item.get("eventSlug") or ""),
         outcome=str(item.get("outcome") or ""),
         transaction_hash=str(item.get("transactionHash") or ""),
+        signal_id=str(item.get("signalId") or item.get("signal_id") or ""),
+        source=str(item.get("source") or "data_api"),
     )
 
 
@@ -209,20 +217,72 @@ def _base_summary(*, wallet: str, leader_status: str, checked_trades: int) -> di
     }
 
 
+def _effective_signal_id(trade: RawLeaderTrade) -> str:
+    return trade.signal_id or trade.transaction_hash
+
+
+def _trade_fingerprint(trade: RawLeaderTrade) -> str:
+    if trade.transaction_hash and trade.asset and trade.side:
+        return f"{trade.transaction_hash.lower()}:{trade.asset}:{trade.side.upper()}"
+    return _effective_signal_id(trade) or (
+        f"{trade.source}:{trade.asset}:{trade.side}:{trade.timestamp}:{trade.size}:{trade.price}"
+    )
+
+
+def _signal_aliases(trade: RawLeaderTrade) -> list[str]:
+    aliases: list[str] = []
+    effective = _effective_signal_id(trade)
+    if effective:
+        aliases.append(effective)
+    if trade.transaction_hash:
+        aliases.append(trade.transaction_hash)
+    if trade.transaction_hash and trade.asset and trade.side:
+        aliases.append(
+            onchain_signal_id(
+                transaction_hash=trade.transaction_hash,
+                token_id=trade.asset,
+                side=trade.side,
+            )
+        )
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for alias in aliases:
+        if alias and alias not in seen:
+            deduped.append(alias)
+            seen.add(alias)
+    return deduped
+
+
+def _has_processed_trade(trade: RawLeaderTrade) -> bool:
+    return any(has_signal(alias) for alias in _signal_aliases(trade))
+
+
 def _dedupe_and_sort_trades(trades: list[dict[str, Any]]) -> list[RawLeaderTrade]:
     normalized: list[RawLeaderTrade] = []
     seen: set[str] = set()
     for item in trades:
         trade = normalize_trade(item)
-        key = trade.transaction_hash or (
-            f"{trade.asset}:{trade.side}:{trade.timestamp}:{trade.size}:{trade.price}"
-        )
+        key = _trade_fingerprint(trade)
         if key in seen:
             continue
         seen.add(key)
         normalized.append(trade)
     normalized.sort(key=lambda x: x.timestamp, reverse=True)
     return normalized
+
+
+def _merge_trade_sources(
+    data_api_trades: list[RawLeaderTrade],
+    onchain_trades: list[RawLeaderTrade],
+) -> list[RawLeaderTrade]:
+    by_fingerprint: dict[str, RawLeaderTrade] = {}
+    for trade in data_api_trades:
+        by_fingerprint[_trade_fingerprint(trade)] = trade
+    for trade in onchain_trades:
+        by_fingerprint[_trade_fingerprint(trade)] = trade
+    merged = list(by_fingerprint.values())
+    merged.sort(key=lambda x: x.timestamp, reverse=True)
+    return merged
 
 
 def fresh_copyable_signals_from_wallet(
@@ -264,9 +324,9 @@ def fresh_copyable_signals_from_wallet(
         taker_only=True,
     )
 
-    normalized = _dedupe_and_sort_trades(trades)
+    data_api_trades = _dedupe_and_sort_trades(trades)
     if bool(config.get("onchain_shadow", {}).get("enabled", False)):
-        for trade in normalized:
+        for trade in data_api_trades:
             record_data_api_trade_seen(
                 transaction_hash=trade.transaction_hash,
                 leader_wallet=wallet,
@@ -274,6 +334,23 @@ def fresh_copyable_signals_from_wallet(
                 side=trade.side,
                 trade_timestamp=trade.timestamp,
             )
+
+    onchain_trades: list[RawLeaderTrade] = []
+    onchain_cfg = config.get("onchain_shadow", {})
+    if bool(onchain_cfg.get("enabled", False)) and bool(
+        onchain_cfg.get("use_as_signal_source", False)
+    ):
+        onchain_limit = int(onchain_cfg.get("signal_limit", max_recent_trades))
+        onchain_window_sec = int(onchain_cfg.get("signal_window_sec", max_buy_signal_age_sec))
+        onchain_trades = _dedupe_and_sort_trades(
+            list_recent_onchain_shadow_trades(
+                leader_wallet=wallet,
+                limit=max(onchain_limit, max_recent_trades),
+                max_age_sec=max(onchain_window_sec, max_buy_signal_age_sec),
+            )
+        )
+
+    normalized = _merge_trade_sources(data_api_trades, onchain_trades)
     now_ts = int(time.time())
     summary = _base_summary(
         wallet=wallet,
@@ -295,7 +372,7 @@ def fresh_copyable_signals_from_wallet(
         if idx == 0:
             summary["latest_trade_side"] = trade.side
             summary["latest_trade_age_sec"] = age_sec
-            summary["latest_trade_hash"] = trade.transaction_hash
+            summary["latest_trade_hash"] = _effective_signal_id(trade)
             summary["latest_token_id"] = trade.asset
             summary["latest_trade_price"] = trade.price
 
@@ -311,7 +388,7 @@ def fresh_copyable_signals_from_wallet(
                 summary["latest_reason"] = "missing asset or transaction_hash"
             continue
 
-        if has_signal(trade.transaction_hash):
+        if _has_processed_trade(trade):
             if idx == 0:
                 summary["latest_status"] = "ALREADY_PROCESSED"
                 summary["latest_reason"] = "already processed"
@@ -449,7 +526,7 @@ def fresh_copyable_signals_from_wallet(
         )
 
         selected_summary = dict(summary)
-        selected_summary["selected_trade_hash"] = trade.transaction_hash
+        selected_summary["selected_trade_hash"] = _effective_signal_id(trade)
         selected_summary["selected_trade_age_sec"] = age_sec
         selected_summary["selected_status"] = selected_status
         selected_summary["selected_reason"] = "copyable"
@@ -472,7 +549,7 @@ def fresh_copyable_signals_from_wallet(
         ]
 
         signal = LeaderSignal(
-            signal_id=trade.transaction_hash,
+            signal_id=_effective_signal_id(trade),
             leader_wallet=wallet,
             token_id=trade.asset,
             side=trade.side,
