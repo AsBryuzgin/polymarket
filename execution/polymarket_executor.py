@@ -7,10 +7,12 @@ from dotenv import load_dotenv
 from py_clob_client_v2.client import ClobClient
 from py_clob_client_v2.clob_types import MarketOrderArgs, OrderType
 
-from execution.builder_auth import load_executor_config, load_executor_env
+from execution.builder_auth import derive_or_create_api_key, load_executor_config, load_executor_env
 from execution.market_cache import get_market_cache_snapshot
 
 load_dotenv()
+
+_API_CREDS_CACHE: dict[tuple[str, int, int, str], object] = {}
 
 
 @dataclass
@@ -92,7 +94,17 @@ def build_authenticated_client() -> ClobClient:
         signature_type=env.signature_type,
         funder=env.funder_address,
     )
-    client.set_api_creds(client.create_or_derive_api_key())
+    cache_key = (
+        env.clob_host,
+        env.chain_id,
+        env.signature_type,
+        env.funder_address.lower(),
+    )
+    creds = _API_CREDS_CACHE.get(cache_key)
+    if creds is None:
+        creds = derive_or_create_api_key(client)
+        _API_CREDS_CACHE[cache_key] = creds
+    client.set_api_creds(creds)
     return client
 
 

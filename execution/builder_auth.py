@@ -7,6 +7,7 @@ import tomllib
 
 from dotenv import load_dotenv
 from py_clob_client_v2.client import ClobClient
+from py_clob_client_v2.clob_types import ApiCreds
 from py_builder_signing_sdk.config import BuilderConfig
 from py_builder_signing_sdk.sdk_types import BuilderApiKeyCreds
 
@@ -78,6 +79,13 @@ def build_clob_client(env: ExecutorEnv) -> ClobClient:
     return client
 
 
+def derive_or_create_api_key(client: ClobClient) -> ApiCreds:
+    try:
+        return client.derive_api_key()
+    except Exception:
+        return client.create_api_key()
+
+
 def build_builder_config(env: ExecutorEnv) -> BuilderConfig | None:
     if not env.builder_api_key or not env.builder_secret or not env.builder_passphrase:
         return None
@@ -126,7 +134,7 @@ def health_snapshot() -> dict:
         return snapshot
 
     try:
-        creds = client.create_or_derive_api_key()
+        creds = derive_or_create_api_key(client)
         snapshot["api_creds_ok"] = True
         snapshot["derived_api_key_present"] = bool(getattr(creds, "api_key", None))
     except Exception as e:
