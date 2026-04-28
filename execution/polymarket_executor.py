@@ -4,9 +4,8 @@ import os
 from dataclasses import dataclass
 from dotenv import load_dotenv
 
-from py_clob_client.client import ClobClient
-from py_clob_client.clob_types import MarketOrderArgs, OrderType
-from py_clob_client.order_builder.constants import BUY, SELL
+from py_clob_client_v2.client import ClobClient
+from py_clob_client_v2.clob_types import MarketOrderArgs, OrderType
 
 from execution.builder_auth import load_executor_config, load_executor_env
 from execution.market_cache import get_market_cache_snapshot
@@ -31,9 +30,9 @@ def load_preview_config() -> PreviewOrderConfig:
 
 def _side_constant(side: str):
     if side == "BUY":
-        return BUY
+        return "BUY"
     if side == "SELL":
-        return SELL
+        return "SELL"
     raise ValueError(f"Unsupported side: {side}")
 
 
@@ -87,13 +86,13 @@ def _extract_float_field(book, key: str) -> float | None:
 def build_authenticated_client() -> ClobClient:
     env = load_executor_env()
     client = ClobClient(
-        env.clob_host,
+        host=env.clob_host,
         key=env.private_key,
         chain_id=env.chain_id,
         signature_type=env.signature_type,
         funder=env.funder_address,
     )
-    client.set_api_creds(client.create_or_derive_api_creds())
+    client.set_api_creds(client.create_or_derive_api_key())
     return client
 
 

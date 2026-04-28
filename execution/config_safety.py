@@ -2,6 +2,11 @@ from __future__ import annotations
 
 from typing import Any
 
+V1_EXCHANGE_ADDRESSES = {
+    "0x4bfb41d5b3570defd03c39a9a4d8de6bd8b8982e",
+    "0xc5d563a36ae78145c45a50134d48a1215220f80a",
+}
+
 
 def _bool_or_default(value: Any, default: bool) -> bool:
     if value is None:
@@ -95,6 +100,7 @@ def build_config_safety_report(config: dict[str, Any]) -> dict[str, Any]:
     live_execution = config.get("live_execution", {})
     runtime_lock = config.get("runtime_lock", {})
     state_backup = config.get("state_backup", {})
+    onchain_shadow = config.get("onchain_shadow", {})
 
     blockers: list[str] = []
     warnings: list[str] = []
@@ -253,6 +259,21 @@ def build_config_safety_report(config: dict[str, Any]) -> dict[str, Any]:
         expected=True,
         label="state_backup.enabled",
     )
+
+    exchange_addresses = onchain_shadow.get("exchange_addresses")
+    if isinstance(exchange_addresses, list):
+        normalized = {
+            str(address).strip().lower()
+            for address in exchange_addresses
+            if str(address).strip()
+        }
+        checks["onchain_shadow.exchange_addresses"] = sorted(normalized)
+        stale = sorted(normalized & V1_EXCHANGE_ADDRESSES)
+        if stale:
+            blockers.append(
+                "onchain_shadow.exchange_addresses still contains deprecated V1 exchange address(es): "
+                + ", ".join(stale)
+            )
 
     live_requested = (
         str(global_cfg.get("execution_mode") or "").strip().upper() == "LIVE"

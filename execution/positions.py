@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from py_clob_client.clob_types import OpenOrderParams
+from py_clob_client_v2.clob_types import OpenOrderParams
 
 from collectors.wallet_profiles import WalletProfilesClient
 from execution.polymarket_executor import build_authenticated_client
@@ -145,7 +145,7 @@ def fetch_exchange_open_orders(token_ids: list[str] | None = None) -> list[dict[
     client = build_authenticated_client()
 
     if not token_ids:
-        raw_orders = client.get_orders()
+        raw_orders = client.get_open_orders()
         if isinstance(raw_orders, dict) and isinstance(raw_orders.get("data"), list):
             raw_orders = raw_orders["data"]
         if not isinstance(raw_orders, list):
@@ -155,7 +155,7 @@ def fetch_exchange_open_orders(token_ids: list[str] | None = None) -> list[dict[
 
     orders: list[dict[str, Any]] = []
     for token_id in token_ids:
-        raw_orders = client.get_orders(OpenOrderParams(asset_id=token_id))
+        raw_orders = client.get_open_orders(OpenOrderParams(asset_id=token_id))
         if isinstance(raw_orders, dict) and isinstance(raw_orders.get("data"), list):
             raw_orders = raw_orders["data"]
         if not isinstance(raw_orders, list):

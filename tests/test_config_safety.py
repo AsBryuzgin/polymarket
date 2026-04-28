@@ -35,6 +35,12 @@ def safe_config() -> dict:
             "activate_on_critical_alerts": True,
         },
         "state_backup": {"enabled": True},
+        "onchain_shadow": {
+            "exchange_addresses": [
+                "0xE111180000d2663C0091e4f400237545B87B996B",
+                "0xe2222d279d744050d28e00520010520000310F59",
+            ]
+        },
     }
 
 
@@ -95,6 +101,20 @@ class ConfigSafetyTests(unittest.TestCase):
 
         self.assertEqual(report["status"], "NO_GO")
         self.assertIn("alert_delivery.enabled must be true", report["blockers"])
+
+    def test_v1_exchange_addresses_are_blocked(self) -> None:
+        config = safe_config()
+        config["onchain_shadow"]["exchange_addresses"] = [
+            "0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E",
+            "0xe2222d279d744050d28e00520010520000310F59",
+        ]
+
+        report = build_config_safety_report(config)
+
+        self.assertEqual(report["status"], "NO_GO")
+        self.assertTrue(
+            any("deprecated V1 exchange address" in blocker for blocker in report["blockers"])
+        )
 
 
 if __name__ == "__main__":

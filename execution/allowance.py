@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
-from py_clob_client.clob_types import AssetType, BalanceAllowanceParams
+from py_clob_client_v2.clob_types import AssetType, BalanceAllowanceParams
 
 from execution.polymarket_executor import build_authenticated_client
 

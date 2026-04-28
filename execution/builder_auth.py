@@ -6,7 +6,7 @@ from pathlib import Path
 import tomllib
 
 from dotenv import load_dotenv
-from py_clob_client.client import ClobClient
+from py_clob_client_v2.client import ClobClient
 from py_builder_signing_sdk.config import BuilderConfig
 from py_builder_signing_sdk.sdk_types import BuilderApiKeyCreds
 
@@ -126,7 +126,7 @@ def health_snapshot() -> dict:
         return snapshot
 
     try:
-        creds = client.create_or_derive_api_creds()
+        creds = client.create_or_derive_api_key()
         snapshot["api_creds_ok"] = True
         snapshot["derived_api_key_present"] = bool(getattr(creds, "api_key", None))
     except Exception as e:
