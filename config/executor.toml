@@ -90,11 +90,22 @@ signal_limit = 50
 signal_window_sec = 600
 rpc_url_env = "POLYGON_RPC_URL"
 rpc_url = "https://polygon-bor-rpc.publicnode.com"
+rpc_url_envs = ["POLYGON_RPC_URL", "POLYGON_RPC_URL_2", "POLYGON_RPC_URL_3"]
+rpc_urls = [
+  "https://polygon.drpc.org",
+  "https://polygon-bor-rpc.publicnode.com",
+  "https://polygon.api.onfinality.io/public",
+  "https://1rpc.io/matic",
+]
 chain_id = 137
 poll_interval_sec = 4.0
 confirmation_blocks = 2
 startup_backfill_blocks = 300
-max_block_range = 500
+max_block_range = 100
+timeout_sec = 4.0
+retries_per_endpoint = 1
+retry_sleep_sec = 0.15
+adaptive_backoff_blocks = 12
 decimals = 6
 exchange_addresses = [
   "0xE111180000d2663C0091e4f400237545B87B996B",

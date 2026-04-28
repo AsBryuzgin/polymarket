@@ -4,6 +4,7 @@ import os
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from urllib.parse import urlparse
 from typing import Any
 
 import requests
@@ -23,6 +24,15 @@ DEFAULT_EXCHANGE_ADDRESSES = [
     "0xe2222d279d744050d28e00520010520000310F59",
 ]
 
+DEFAULT_RPC_URLS = [
+    "https://polygon.drpc.org",
+    "https://polygon-bor-rpc.publicnode.com",
+    "https://polygon.api.onfinality.io/public",
+    "https://1rpc.io/matic",
+]
+
+_LAST_GOOD_RPC_URL: str | None = None
+
 
 @dataclass(frozen=True)
 class DecodedMatchedOrder:
@@ -37,6 +47,14 @@ class DecodedMatchedOrder:
     taker_asset_id: int
     maker_amount_filled: int
     taker_amount_filled: int
+
+
+@dataclass(frozen=True)
+class RpcCallResult:
+    result: Any
+    rpc_url: str
+    attempts: int
+    errors: tuple[str, ...]
 
 
 def _utc_now_iso() -> str:
@@ -94,6 +112,57 @@ def _safe_int(value: Any, default: int = 0) -> int:
         return default
 
 
+def _as_list(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, list):
+        values: list[str] = []
+        for item in value:
+            values.extend(_as_list(item))
+        return values
+    text = str(value).strip()
+    if not text:
+        return []
+    normalized = text.replace("\n", ",").replace(";", ",")
+    return [item.strip() for item in normalized.split(",") if item.strip()]
+
+
+def _dedupe_preserve_order(values: list[str]) -> list[str]:
+    seen: set[str] = set()
+    result: list[str] = []
+    for value in values:
+        key = value.strip()
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        result.append(key)
+    return result
+
+
+def _rpc_url_label(rpc_url: str) -> str:
+    parsed = urlparse(rpc_url)
+    if parsed.netloc:
+        return parsed.netloc
+    return str(rpc_url).split("/", 1)[0]
+
+
+def _configured_rpc_urls(cfg: dict[str, Any]) -> list[str]:
+    urls: list[str] = []
+
+    env_names = _as_list(cfg.get("rpc_url_envs"))
+    legacy_env_name = str(cfg.get("rpc_url_env") or "POLYGON_RPC_URL").strip()
+    if legacy_env_name:
+        env_names.insert(0, legacy_env_name)
+
+    for env_name in _dedupe_preserve_order(env_names):
+        urls.extend(_as_list(os.getenv(env_name)))
+
+    urls.extend(_as_list(cfg.get("rpc_urls")))
+    urls.extend(_as_list(cfg.get("rpc_url")))
+    urls.extend(DEFAULT_RPC_URLS)
+    return _dedupe_preserve_order(urls)
+
+
 def init_onchain_shadow_tables() -> None:
     conn = get_connection()
     cur = conn.cursor()
@@ -136,7 +205,7 @@ def init_onchain_shadow_tables() -> None:
     conn.close()
 
 
-def _rpc(rpc_url: str, method: str, params: list[Any], timeout_sec: float = 10.0) -> Any:
+def _rpc_once(rpc_url: str, method: str, params: list[Any], timeout_sec: float = 10.0) -> Any:
     response = requests.post(
         rpc_url,
         json={"jsonrpc": "2.0", "id": int(time.time() * 1000), "method": method, "params": params},
@@ -149,8 +218,65 @@ def _rpc(rpc_url: str, method: str, params: list[Any], timeout_sec: float = 10.0
     return payload.get("result")
 
 
-def _current_block(rpc_url: str, timeout_sec: float) -> int:
-    return _hex_to_int(str(_rpc(rpc_url, "eth_blockNumber", [], timeout_sec)))
+def _prioritize_rpc_urls(rpc_urls: list[str], preferred_url: str | None) -> list[str]:
+    if not preferred_url or preferred_url not in rpc_urls:
+        return rpc_urls
+    return [preferred_url] + [url for url in rpc_urls if url != preferred_url]
+
+
+def _rpc_with_fallback(
+    rpc_urls: list[str],
+    method: str,
+    params: list[Any],
+    *,
+    timeout_sec: float,
+    retries_per_endpoint: int,
+    retry_sleep_sec: float,
+    preferred_url: str | None = None,
+) -> RpcCallResult:
+    global _LAST_GOOD_RPC_URL
+
+    attempts = 0
+    errors: list[str] = []
+    ordered_urls = _prioritize_rpc_urls(rpc_urls, preferred_url or _LAST_GOOD_RPC_URL)
+
+    for rpc_url in ordered_urls:
+        label = _rpc_url_label(rpc_url)
+        for attempt in range(max(1, int(retries_per_endpoint))):
+            attempts += 1
+            try:
+                result = _rpc_once(rpc_url, method, params, timeout_sec)
+                _LAST_GOOD_RPC_URL = rpc_url
+                return RpcCallResult(
+                    result=result,
+                    rpc_url=rpc_url,
+                    attempts=attempts,
+                    errors=tuple(errors),
+                )
+            except Exception as e:
+                errors.append(f"{label}:{method}:{type(e).__name__}:{e}")
+                if attempt + 1 < max(1, int(retries_per_endpoint)):
+                    time.sleep(max(0.0, retry_sleep_sec))
+
+    raise RuntimeError(f"all RPC endpoints failed for {method}: {' | '.join(errors[-6:])}")
+
+
+def _current_block(
+    rpc_urls: list[str],
+    *,
+    timeout_sec: float,
+    retries_per_endpoint: int,
+    retry_sleep_sec: float,
+) -> tuple[int, RpcCallResult]:
+    call = _rpc_with_fallback(
+        rpc_urls,
+        "eth_blockNumber",
+        [],
+        timeout_sec=timeout_sec,
+        retries_per_endpoint=retries_per_endpoint,
+        retry_sleep_sec=retry_sleep_sec,
+    )
+    return _hex_to_int(str(call.result)), call
 
 
 def _decode_orders_matched_log(log: dict[str, Any], *, decimals: int = 6) -> DecodedMatchedOrder | None:
@@ -416,20 +542,70 @@ def list_recent_onchain_shadow_trades(
     return trades
 
 
+def _record_rpc_success(successes: dict[str, int], rpc_url: str) -> None:
+    label = _rpc_url_label(rpc_url)
+    successes[label] = successes.get(label, 0) + 1
+
+
+def _fetch_logs_for_range(
+    *,
+    rpc_urls: list[str],
+    exchange_addresses: list[str],
+    wallet_topics: list[str],
+    from_block: int,
+    to_block: int,
+    timeout_sec: float,
+    retries_per_endpoint: int,
+    retry_sleep_sec: float,
+    max_block_range: int,
+) -> tuple[list[dict[str, Any]], dict[str, int], list[str], int]:
+    logs_out: list[dict[str, Any]] = []
+    rpc_successes: dict[str, int] = {}
+    rpc_errors: list[str] = []
+    rpc_attempts = 0
+
+    chunk_from = from_block
+    while chunk_from <= to_block:
+        chunk_to = min(to_block, chunk_from + max_block_range - 1)
+        for exchange_address in exchange_addresses:
+            call = _rpc_with_fallback(
+                rpc_urls,
+                "eth_getLogs",
+                [
+                    {
+                        "fromBlock": _int_to_hex_block(chunk_from),
+                        "toBlock": _int_to_hex_block(chunk_to),
+                        "address": exchange_address,
+                        "topics": [ORDER_MATCHED_TOPIC, None, wallet_topics],
+                    }
+                ],
+                timeout_sec=timeout_sec,
+                retries_per_endpoint=retries_per_endpoint,
+                retry_sleep_sec=retry_sleep_sec,
+            )
+            rpc_attempts += call.attempts
+            rpc_errors.extend(call.errors)
+            _record_rpc_success(rpc_successes, call.rpc_url)
+            logs_out.extend(call.result or [])
+        chunk_from = chunk_to + 1
+
+    return logs_out, rpc_successes, rpc_errors, rpc_attempts
+
+
 def poll_onchain_shadow_once(config: dict[str, Any], leader_wallets: list[str] | None = None) -> dict[str, Any]:
     cfg = config.get("onchain_shadow", {})
     if not bool(cfg.get("enabled", False)):
         return {"enabled": False, "status": "DISABLED"}
 
     init_onchain_shadow_tables()
-    rpc_env = str(cfg.get("rpc_url_env") or "POLYGON_RPC_URL")
-    rpc_url = os.getenv(rpc_env) or str(
-        cfg.get("rpc_url") or "https://polygon-bor-rpc.publicnode.com"
-    )
+    rpc_urls = _configured_rpc_urls(cfg)
     timeout_sec = float(cfg.get("timeout_sec", 10.0))
+    retries_per_endpoint = max(1, int(cfg.get("retries_per_endpoint", 1)))
+    retry_sleep_sec = float(cfg.get("retry_sleep_sec", 0.15))
     chain_id = int(cfg.get("chain_id", 137))
     decimals = int(cfg.get("decimals", 6))
     confirmation_blocks = int(cfg.get("confirmation_blocks", 2))
+    adaptive_backoff_blocks = max(0, int(cfg.get("adaptive_backoff_blocks", 12)))
     startup_backfill_blocks = int(cfg.get("startup_backfill_blocks", 300))
     max_block_range = max(1, int(cfg.get("max_block_range", 500)))
     exchange_addresses = [
@@ -443,7 +619,12 @@ def poll_onchain_shadow_once(config: dict[str, Any], leader_wallets: list[str] |
     if not watched_wallets:
         return {"enabled": True, "status": "NO_WALLETS", "inserted": 0, "logs": 0}
 
-    current_block = _current_block(rpc_url, timeout_sec)
+    current_block, current_block_call = _current_block(
+        rpc_urls,
+        timeout_sec=timeout_sec,
+        retries_per_endpoint=retries_per_endpoint,
+        retry_sleep_sec=retry_sleep_sec,
+    )
     to_block = max(0, current_block - confirmation_blocks)
     cursor_key = _cursor_key(chain_id, exchange_addresses)
     cursor = _get_cursor(cursor_key)
@@ -457,6 +638,9 @@ def poll_onchain_shadow_once(config: dict[str, Any], leader_wallets: list[str] |
             "cursor": cursor,
             "inserted": 0,
             "logs": 0,
+            "rpc_endpoints": len(rpc_urls),
+            "rpc_endpoint": _rpc_url_label(current_block_call.rpc_url),
+            "rpc_failover_count": len(current_block_call.errors),
         }
 
     inserted = 0
@@ -464,43 +648,74 @@ def poll_onchain_shadow_once(config: dict[str, Any], leader_wallets: list[str] |
     observed_at = _utc_now_iso()
     wallet_topics = [_topic_address(wallet) for wallet in watched_wallets]
 
-    chunk_from = from_block
-    while chunk_from <= to_block:
-        chunk_to = min(to_block, chunk_from + max_block_range - 1)
-        for exchange_address in exchange_addresses:
-            logs = _rpc(
-                rpc_url,
-                "eth_getLogs",
-                [
-                    {
-                        "fromBlock": _int_to_hex_block(chunk_from),
-                        "toBlock": _int_to_hex_block(chunk_to),
-                        "address": exchange_address,
-                        "topics": [ORDER_MATCHED_TOPIC, None, wallet_topics],
-                    }
-                ],
-                timeout_sec,
-            )
-            for log in logs or []:
-                logs_seen += 1
-                decoded = _decode_orders_matched_log(log, decimals=decimals)
-                if decoded is None:
-                    continue
-                if _insert_shadow_fill(log=log, decoded=decoded, observed_at=observed_at):
-                    inserted += 1
-        chunk_from = chunk_to + 1
+    rpc_errors = list(current_block_call.errors)
+    rpc_successes: dict[str, int] = {}
+    _record_rpc_success(rpc_successes, current_block_call.rpc_url)
+    rpc_attempts = current_block_call.attempts
+    processed_to_block = to_block
+    status = "OK"
 
-    _set_cursor(cursor_key, to_block)
+    try:
+        logs, log_rpc_successes, log_rpc_errors, log_rpc_attempts = _fetch_logs_for_range(
+            rpc_urls=rpc_urls,
+            exchange_addresses=exchange_addresses,
+            wallet_topics=wallet_topics,
+            from_block=from_block,
+            to_block=to_block,
+            timeout_sec=timeout_sec,
+            retries_per_endpoint=retries_per_endpoint,
+            retry_sleep_sec=retry_sleep_sec,
+            max_block_range=max_block_range,
+        )
+    except Exception as first_error:
+        retry_to_block = to_block - adaptive_backoff_blocks
+        if adaptive_backoff_blocks <= 0 or retry_to_block < from_block:
+            raise
+        processed_to_block = retry_to_block
+        status = "OK_BACKOFF"
+        rpc_errors.append(str(first_error))
+        logs, log_rpc_successes, log_rpc_errors, log_rpc_attempts = _fetch_logs_for_range(
+            rpc_urls=rpc_urls,
+            exchange_addresses=exchange_addresses,
+            wallet_topics=wallet_topics,
+            from_block=from_block,
+            to_block=processed_to_block,
+            timeout_sec=timeout_sec,
+            retries_per_endpoint=retries_per_endpoint,
+            retry_sleep_sec=retry_sleep_sec,
+            max_block_range=max(1, min(max_block_range, 50)),
+        )
+
+    rpc_attempts += log_rpc_attempts
+    rpc_errors.extend(log_rpc_errors)
+    for label, count in log_rpc_successes.items():
+        rpc_successes[label] = rpc_successes.get(label, 0) + count
+
+    for log in logs:
+        logs_seen += 1
+        decoded = _decode_orders_matched_log(log, decimals=decimals)
+        if decoded is None:
+            continue
+        if _insert_shadow_fill(log=log, decoded=decoded, observed_at=observed_at):
+            inserted += 1
+
+    _set_cursor(cursor_key, processed_to_block)
     return {
         "enabled": True,
-        "status": "OK",
+        "status": status,
         "current_block": current_block,
         "from_block": from_block,
-        "to_block": to_block,
+        "to_block": processed_to_block,
+        "target_to_block": to_block,
         "leader_wallets": len(watched_wallets),
         "exchange_addresses": len(exchange_addresses),
         "logs": logs_seen,
         "inserted": inserted,
+        "rpc_endpoints": len(rpc_urls),
+        "rpc_successes": rpc_successes,
+        "rpc_attempts": rpc_attempts,
+        "rpc_failover_count": len(rpc_errors),
+        "rpc_errors_sample": rpc_errors[:5],
     }
 
 
