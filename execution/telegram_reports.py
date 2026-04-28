@@ -316,6 +316,45 @@ def _configured_capital_usd(config: dict[str, Any]) -> float | None:
     return capital if capital > 0 else None
 
 
+def _row_mark_value(row: dict[str, Any], field: str) -> float:
+    parsed = _maybe_float(row.get(field))
+    return parsed if parsed is not None else 0.0
+
+
+def _row_open_pnl(row: dict[str, Any], field: str) -> float:
+    return _row_mark_value(row, field) - _safe_float(row.get("position_usd"))
+
+
+def _has_mid_but_no_bid(row: dict[str, Any]) -> bool:
+    return (
+        is_marked(row)
+        and _maybe_float(row.get("mark_value_mid_usd")) is not None
+        and _maybe_float(row.get("mark_value_bid_usd")) is None
+    )
+
+
+def _open_mark_summary(open_rows: list[dict[str, Any]]) -> dict[str, Any]:
+    invested = sum(_safe_float(row.get("position_usd")) for row in open_rows)
+    mark_bid_liquidation = sum(_row_mark_value(row, "mark_value_bid_usd") for row in open_rows)
+    mark_mid = sum(_row_mark_value(row, "mark_value_mid_usd") for row in open_rows)
+    no_bid_rows = [row for row in open_rows if _has_mid_but_no_bid(row)]
+    unmarked_rows = [row for row in open_rows if is_unmarked(row)]
+    settled_rows = [row for row in open_rows if str(row.get("snapshot_status")) == "SETTLED"]
+
+    return {
+        "invested": invested,
+        "mark_bid_liquidation": mark_bid_liquidation,
+        "mark_mid": mark_mid,
+        "pnl_bid_liquidation": mark_bid_liquidation - invested,
+        "pnl_mid": mark_mid - invested,
+        "no_bid_rows": no_bid_rows,
+        "no_bid_invested": sum(_safe_float(row.get("position_usd")) for row in no_bid_rows),
+        "unmarked_rows": unmarked_rows,
+        "unmarked_invested": sum(_safe_float(row.get("position_usd")) for row in unmarked_rows),
+        "settled_rows": settled_rows,
+    }
+
+
 def build_status_report(
     config: dict[str, Any],
     *,
@@ -330,14 +369,12 @@ def build_status_report(
     registry = list_leader_registry(limit=100000)
     observations = list_signal_observations(limit=1)
 
-    invested = sum(_safe_float(row.get("position_usd")) for row in open_rows)
-    marked_rows = [row for row in open_rows if is_marked(row)]
-    settled_rows = [row for row in open_rows if str(row.get("snapshot_status")) == "SETTLED"]
-    unmarked_rows = [row for row in open_rows if is_unmarked(row)]
-    marked_invested = sum(_safe_float(row.get("position_usd")) for row in marked_rows)
-    unmarked_invested = sum(_safe_float(row.get("position_usd")) for row in unmarked_rows)
-    mark_bid = sum(_safe_float(row.get("mark_value_bid_usd")) for row in marked_rows)
-    mark_mid = sum(_safe_float(row.get("mark_value_mid_usd")) for row in marked_rows)
+    mark_summary = _open_mark_summary(open_rows)
+    invested = mark_summary["invested"]
+    settled_rows = mark_summary["settled_rows"]
+    unmarked_rows = mark_summary["unmarked_rows"]
+    unmarked_invested = mark_summary["unmarked_invested"]
+    no_bid_rows = mark_summary["no_bid_rows"]
 
     mode = str(config.get("global", {}).get("execution_mode", "unknown")).lower()
     paper_bankroll = _configured_capital_usd(config) if mode == "paper" else None
@@ -352,8 +389,8 @@ def build_status_report(
         cash = funding.get("balance_usd") if funding else None
         allowance = funding.get("allowance_usd") if funding else None
 
-    total_bid = cash + mark_bid if cash is not None else None
-    total_mid = cash + mark_mid if cash is not None else None
+    total_bid = cash + mark_summary["mark_bid_liquidation"] if cash is not None else None
+    total_mid = cash + mark_summary["mark_mid"] if cash is not None else None
 
     active_leaders = sum(1 for row in registry if row.get("leader_status") == "ACTIVE")
     exit_only_leaders = sum(1 for row in registry if row.get("leader_status") == "EXIT_ONLY")
@@ -379,8 +416,8 @@ def build_status_report(
             f"equity по bid: {_money(total_bid)} | по mid: {_money(total_mid)}",
             (
                 "open PnL по bid/mid: "
-                f"{_money(mark_bid - marked_invested, signed=True)} / "
-                f"{_money(mark_mid - marked_invested, signed=True)}"
+                f"{_money(mark_summary['pnl_bid_liquidation'], signed=True)} / "
+                f"{_money(mark_summary['pnl_mid'], signed=True)}"
             ),
             "",
             "Система",
@@ -400,6 +437,11 @@ def build_status_report(
             f"сумма: {_money(unmarked_invested)}"
         )
         lines.append("детали по неоцененным: /unmarked")
+    if no_bid_rows:
+        lines.append(
+            f"нет bid в стакане: {len(no_bid_rows)} | "
+            f"сумма: {_money(mark_summary['no_bid_invested'])} | bid считает как $0"
+        )
     if settled_rows:
         lines.append(
             f"settlement-marked: {len(settled_rows)} | "
@@ -419,18 +461,17 @@ def build_positions_report(
     if not open_rows:
         return "Открытые позиции\nпозиций нет"
 
-    invested = sum(_safe_float(row.get("position_usd")) for row in open_rows)
-    marked_rows = [row for row in open_rows if is_marked(row)]
-    settled_rows = [row for row in open_rows if str(row.get("snapshot_status")) == "SETTLED"]
-    unmarked_rows = [row for row in open_rows if is_unmarked(row)]
-    marked_invested = sum(_safe_float(row.get("position_usd")) for row in marked_rows)
-    unmarked_invested = sum(_safe_float(row.get("position_usd")) for row in unmarked_rows)
-    mark_bid = sum(_safe_float(row.get("mark_value_bid_usd")) for row in marked_rows)
+    mark_summary = _open_mark_summary(open_rows)
+    invested = mark_summary["invested"]
+    settled_rows = mark_summary["settled_rows"]
+    unmarked_rows = mark_summary["unmarked_rows"]
+    unmarked_invested = mark_summary["unmarked_invested"]
+    no_bid_rows = mark_summary["no_bid_rows"]
     lines = [
         "Открытые позиции",
         (
             f"Всего: {len(open_rows)} | вложено: {_money(invested)} | "
-            f"bid PnL: {_money(mark_bid - marked_invested, signed=True)}"
+            f"bid PnL: {_money(mark_summary['pnl_bid_liquidation'], signed=True)}"
         ),
         "",
     ]
@@ -446,11 +487,13 @@ def build_positions_report(
                 (
                     f"   вход {_money(row.get('position_usd'))} -> bid "
                     f"{_money(row.get('mark_value_bid_usd'))} | PnL "
-                    f"{_money(row.get('unrealized_pnl_bid_usd'), signed=True)}"
+                    f"{_money(_row_open_pnl(row, 'mark_value_bid_usd'), signed=True)}"
                 ),
                 f"   token {_short(str(row.get('token_id')))}",
             ]
         )
+        if _has_mid_but_no_bid(row):
+            lines.append("   bid отсутствует: ликвидационная оценка считает позицию как $0")
         if row.get("snapshot_status") == "SETTLED":
             lines.append(
                 "   оценка: settlement fallback "
@@ -464,6 +507,8 @@ def build_positions_report(
     if snapshot_errors:
         lines.append(f"неоцененные по рынку: {len(snapshot_errors)} | сумма: {_money(unmarked_invested)}")
         lines.append("подробно: /unmarked")
+    if no_bid_rows:
+        lines.append(f"нет bid в стакане: {len(no_bid_rows)} | сумма: {_money(mark_summary['no_bid_invested'])}")
     if settled_rows:
         lines.append(
             f"settlement-marked: {len(settled_rows)} | "
@@ -582,7 +627,9 @@ def build_leaders_report(
             "exits": 0,
             "realized_pnl_usd": 0.0,
             "unrealized_pnl_bid_usd": 0.0,
+            "unrealized_pnl_mid_usd": 0.0,
             "invested_open_usd": 0.0,
+            "no_bid_invested_usd": 0.0,
             "category": "UNKNOWN",
             "name": "UNKNOWN",
         }
@@ -605,8 +652,11 @@ def build_leaders_report(
         leader = registry.get(wallet, {})
         item["name"] = _leader_name({**leader, **row})
         item["category"] = leader.get("category") or item["category"]
-        item["unrealized_pnl_bid_usd"] += _safe_float(row.get("unrealized_pnl_bid_usd"))
+        item["unrealized_pnl_bid_usd"] += _row_open_pnl(row, "mark_value_bid_usd")
+        item["unrealized_pnl_mid_usd"] += _row_open_pnl(row, "mark_value_mid_usd")
         item["invested_open_usd"] += _safe_float(row.get("position_usd"))
+        if _has_mid_but_no_bid(row):
+            item["no_bid_invested_usd"] += _safe_float(row.get("position_usd"))
 
     active_wallets = {
         str(row.get("wallet"))
@@ -623,6 +673,7 @@ def build_leaders_report(
     for wallet, item in grouped.items():
         item["wallet"] = wallet
         item["total_pnl_bid_usd"] = item["realized_pnl_usd"] + item["unrealized_pnl_bid_usd"]
+        item["total_pnl_mid_usd"] = item["realized_pnl_usd"] + item["unrealized_pnl_mid_usd"]
         rows.append(item)
 
     if not rows:
@@ -635,9 +686,10 @@ def build_leaders_report(
             [
                 f"{idx}. {row['name']} | {row['category']}",
                 (
-                    f"   total {_money(row['total_pnl_bid_usd'], signed=True)} | "
+                    f"   total bid {_money(row['total_pnl_bid_usd'], signed=True)} | "
                     f"realized {_money(row['realized_pnl_usd'], signed=True)} | "
-                    f"open {_money(row['unrealized_pnl_bid_usd'], signed=True)}"
+                    f"open bid/mid {_money(row['unrealized_pnl_bid_usd'], signed=True)} / "
+                    f"{_money(row['unrealized_pnl_mid_usd'], signed=True)}"
                 ),
                 (
                     f"   entries {row['entries']} | exits {row['exits']} | "
@@ -645,6 +697,8 @@ def build_leaders_report(
                 ),
             ]
         )
+        if row["no_bid_invested_usd"] > 0:
+            lines.append(f"   no-bid invested {_money(row['no_bid_invested_usd'])}")
 
     return "\n".join(lines)
 

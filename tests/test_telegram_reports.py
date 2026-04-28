@@ -135,9 +135,51 @@ class TelegramReportTests(unittest.TestCase):
                 snapshot_loader=snapshot_loader,
             )
 
-        self.assertIn("open PnL по bid/mid: +$1.00 / +$1.50", report)
+        self.assertIn("open PnL по bid/mid: $-4.00 / $-3.50", report)
         self.assertIn("неоцененные по рынку: 1 | сумма: $5.00", report)
         self.assertIn("детали по неоцененным: /unmarked", report)
+
+    def test_status_report_flags_no_bid_positions(self) -> None:
+        def snapshot_loader(token_id: str, _side: str):
+            if token_id == "tokenB":
+                return {"best_bid": None, "best_ask": 0.51, "midpoint": 0.50}
+            return {"best_bid": 0.60, "midpoint": 0.65}
+
+        with (
+            patch("execution.telegram_reports.init_db"),
+            patch("execution.telegram_reports.init_signal_observation_table"),
+            patch("execution.telegram_reports.list_open_positions") as positions,
+            patch("execution.telegram_reports.list_leader_registry") as registry,
+            patch("execution.telegram_reports.list_signal_observations") as observations,
+            patch("execution.telegram_reports._load_latest_alert_count", return_value=0),
+        ):
+            positions.return_value = [
+                {
+                    "leader_wallet": "wallet1",
+                    "token_id": "tokenA",
+                    "position_usd": 5.0,
+                    "avg_entry_price": 0.50,
+                },
+                {
+                    "leader_wallet": "wallet2",
+                    "token_id": "tokenB",
+                    "position_usd": 5.0,
+                    "avg_entry_price": 0.50,
+                },
+            ]
+            registry.return_value = []
+            observations.return_value = []
+
+            report = build_status_report(
+                {
+                    "global": {"execution_mode": "paper"},
+                    "capital": {"total_capital_usd": 100.0},
+                },
+                snapshot_loader=snapshot_loader,
+            )
+
+        self.assertIn("open PnL по bid/mid: $-4.00 / +$1.50", report)
+        self.assertIn("нет bid в стакане: 1 | сумма: $5.00 | bid считает как $0", report)
 
     def test_status_report_counts_settlement_fallback_as_marked(self) -> None:
         def snapshot_loader(token_id: str, _side: str):
@@ -273,6 +315,39 @@ class TelegramReportTests(unittest.TestCase):
 
         self.assertIn("Лидеры по PnL бота", report)
         self.assertIn("Leader", report)
+
+    def test_leaders_report_counts_no_bid_open_pnl_consistently(self) -> None:
+        def snapshot_loader(_token_id: str, _side: str):
+            return {"best_bid": None, "best_ask": 0.51, "midpoint": 0.50}
+
+        with (
+            patch("execution.telegram_reports.init_db"),
+            patch("execution.telegram_reports.list_trade_history") as history,
+            patch("execution.telegram_reports.list_open_positions") as positions,
+            patch("execution.telegram_reports.list_leader_registry") as registry,
+        ):
+            history.return_value = []
+            positions.return_value = [
+                {
+                    "leader_wallet": "wallet1",
+                    "token_id": "tokenB",
+                    "position_usd": 5.0,
+                    "avg_entry_price": 0.50,
+                }
+            ]
+            registry.return_value = [
+                {
+                    "wallet": "wallet1",
+                    "user_name": "Leader",
+                    "category": "ECONOMICS",
+                    "leader_status": "ACTIVE",
+                }
+            ]
+
+            report = build_leaders_report(snapshot_loader=snapshot_loader)
+
+        self.assertIn("open bid/mid $-5.00 / $0.00", report)
+        self.assertIn("no-bid invested $5.00", report)
 
     def test_blocks_report_shows_observation_and_unique_counts(self) -> None:
         now = datetime(2026, 4, 22, tzinfo=timezone.utc)
