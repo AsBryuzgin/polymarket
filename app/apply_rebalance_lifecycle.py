@@ -11,7 +11,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from app.allocation_runtime import resolve_leader_budget_usd, resolve_total_capital_usd
+from execution.budget_accounting import compute_active_budget_plan, resolve_budget_total_capital_usd
 from execution.builder_auth import load_executor_config
 from execution.state_store import (
     delete_leader_registry_row,
@@ -59,9 +59,10 @@ def main() -> None:
     executor_cfg = load_executor_config()
     rebalance_cfg = load_rebalance_config(REBALANCE_CONFIG)
     grace_days = load_grace_days(rebalance_cfg)
-    total_capital_usd = resolve_total_capital_usd(
+    total_capital_usd = resolve_budget_total_capital_usd(
         executor_config=executor_cfg,
         rebalance_config=rebalance_cfg,
+        open_positions=list_open_positions(limit=100000),
         allow_zero_collateral_balance=True,
     )
     if total_capital_usd <= 0:
@@ -79,6 +80,20 @@ def main() -> None:
     open_positions = list_open_positions(limit=100000)
 
     open_position_wallets = {row["leader_wallet"] for row in open_positions}
+    active_budget_rows = [
+        {
+            **row,
+            "leader_status": "ACTIVE",
+            "target_weight": float(row["weight"]),
+        }
+        for row in live_rows
+    ]
+    budget_plan = compute_active_budget_plan(
+        total_capital_usd=total_capital_usd,
+        registry_rows=active_budget_rows,
+        open_positions=open_positions,
+    )
+    budget_by_wallet = {row["wallet"]: row for row in budget_plan["allocations"]}
 
     report = []
 
@@ -87,8 +102,9 @@ def main() -> None:
         wallet = row["wallet"]
         category = row["category"]
         user_name = row["user_name"]
-        weight = float(row["weight"])
-        budget = resolve_leader_budget_usd(row, total_capital_usd=total_capital_usd)
+        allocation = budget_by_wallet.get(wallet, {})
+        weight = float(allocation.get("target_weight", row["weight"]))
+        budget = float(allocation.get("target_budget_usd", 0.0))
 
         previous = current_registry.get(wallet)
         previous_status = previous["leader_status"] if previous else None
@@ -160,6 +176,8 @@ def main() -> None:
 
     print("=== APPLY REBALANCE LIFECYCLE ===")
     pprint(report)
+    print("\n=== ACTIVE BUDGET PLAN ===")
+    pprint(budget_plan)
     print("\n=== CURRENT LEADER REGISTRY ===")
     pprint(list_leader_registry(limit=500))
 

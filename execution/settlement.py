@@ -14,6 +14,7 @@ from eth_utils import keccak
 from py_builder_relayer_client.client import RelayClient
 from py_builder_relayer_client.models import OperationType, SafeTransaction
 
+from execution.budget_accounting import refresh_active_budgets_from_config
 from execution.builder_auth import build_builder_config, load_executor_env
 from execution.market_diagnostics import lookup_token_market
 from execution.order_router import LIVE_TRADING_ACK, resolve_execution_mode
@@ -49,6 +50,16 @@ MarketLookup = Callable[[str], dict[str, Any] | None]
 OpenPositionsLoader = Callable[[int], list[dict[str, Any]]]
 ExchangePositionsLoader = Callable[[str], list[dict[str, Any]]]
 SleepFn = Callable[[float], None]
+
+
+def _refresh_active_budgets_after_exit(config: dict[str, Any]) -> dict[str, Any]:
+    try:
+        return refresh_active_budgets_from_config(config=config)
+    except Exception as e:
+        return {
+            "status": "ERROR",
+            "reason": str(e),
+        }
 
 
 @dataclass(frozen=True)
@@ -627,9 +638,16 @@ def _finalize_candidate(
             )
         closed_rows += 1
 
+    budget_rebalance = (
+        _refresh_active_budgets_after_exit(config)
+        if closed_rows > 0
+        else {"status": "SKIPPED", "reason": "no closed rows"}
+    )
+
     return {
         "closed_rows": closed_rows,
         "payout_usd": round(payout_total, 8),
+        "budget_rebalance": budget_rebalance,
     }
 
 

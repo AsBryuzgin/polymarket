@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, asdict
 from datetime import datetime
 
+from execution.budget_accounting import refresh_active_budgets_from_config
 from execution.builder_auth import load_executor_config
 from execution.order_policy import evaluate_order_policy
 from execution.order_router import (
@@ -176,6 +177,16 @@ def _safe_bool(value, default: bool = False) -> bool:
         if normalized in {"0", "false", "no", "off"}:
             return False
     return bool(value)
+
+
+def _refresh_active_budgets_after_exit(config: dict) -> dict:
+    try:
+        return refresh_active_budgets_from_config(config=config)
+    except Exception as e:
+        return {
+            "status": "ERROR",
+            "reason": str(e),
+        }
 
 
 def _open_wallet_exposure_usd(leader_wallet: str) -> float:
@@ -589,6 +600,7 @@ def process_signal(signal: LeaderSignal) -> dict:
             status=status,
             reason="ok",
         )
+        budget_rebalance = _refresh_active_budgets_after_exit(config)
 
         return {
             "signal": asdict(signal),
@@ -602,6 +614,7 @@ def process_signal(signal: LeaderSignal) -> dict:
             "realized_pnl_pct": realized_pnl_pct,
             "holding_minutes": holding_minutes,
             "position_after_usd": position_after_usd,
+            "budget_rebalance": budget_rebalance,
         }
 
     policy = evaluate_order_policy(
