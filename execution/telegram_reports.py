@@ -355,6 +355,14 @@ def _open_mark_summary(open_rows: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+def _realized_pnl_from_history() -> float:
+    return sum(
+        _safe_float(row.get("realized_pnl_usd"))
+        for row in list_trade_history(limit=100000)
+        if row.get("event_type") == "EXIT"
+    )
+
+
 def build_status_report(
     config: dict[str, Any],
     *,
@@ -382,9 +390,11 @@ def build_status_report(
     funding_error = None
 
     if paper_bankroll is not None:
-        cash = max(paper_bankroll - invested, 0.0)
+        paper_realized_pnl = _realized_pnl_from_history()
+        cash = max(paper_bankroll + paper_realized_pnl - invested, 0.0)
         allowance = None
     else:
+        paper_realized_pnl = None
         funding, funding_error = _funding_snapshot(config)
         cash = funding.get("balance_usd") if funding else None
         allowance = funding.get("allowance_usd") if funding else None
@@ -406,6 +416,7 @@ def build_status_report(
     ]
     if paper_bankroll is not None:
         lines.append(f"банкролл paper: {_money(paper_bankroll)}")
+        lines.append(f"realized PnL paper: {_money(paper_realized_pnl, signed=True)}")
     lines.extend(
         [
             f"свободно без открытых позиций: {_money(cash)}",

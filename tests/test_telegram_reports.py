@@ -31,6 +31,7 @@ class TelegramReportTests(unittest.TestCase):
             patch("execution.telegram_reports.init_signal_observation_table"),
             patch("execution.telegram_reports.fetch_collateral_balance_allowance") as funding,
             patch("execution.telegram_reports.list_open_positions") as positions,
+            patch("execution.telegram_reports.list_trade_history") as history,
             patch("execution.telegram_reports.list_leader_registry") as registry,
             patch("execution.telegram_reports.list_signal_observations") as observations,
             patch("execution.telegram_reports._load_latest_alert_count", return_value=0),
@@ -68,6 +69,7 @@ class TelegramReportTests(unittest.TestCase):
             patch("execution.telegram_reports.init_signal_observation_table"),
             patch("execution.telegram_reports.fetch_collateral_balance_allowance") as funding,
             patch("execution.telegram_reports.list_open_positions") as positions,
+            patch("execution.telegram_reports.list_trade_history") as history,
             patch("execution.telegram_reports.list_leader_registry") as registry,
             patch("execution.telegram_reports.list_signal_observations") as observations,
             patch("execution.telegram_reports._load_latest_alert_count", return_value=0),
@@ -82,6 +84,12 @@ class TelegramReportTests(unittest.TestCase):
             ]
             registry.return_value = []
             observations.return_value = []
+            history.return_value = [
+                {
+                    "event_type": "EXIT",
+                    "realized_pnl_usd": 2.0,
+                }
+            ]
 
             report = build_status_report(
                 {
@@ -93,8 +101,9 @@ class TelegramReportTests(unittest.TestCase):
 
         funding.assert_not_called()
         self.assertIn("банкролл paper: $100.00", report)
-        self.assertIn("свободно без открытых позиций: $95.00", report)
-        self.assertIn("equity по bid: $101.00", report)
+        self.assertIn("realized PnL paper: +$2.00", report)
+        self.assertIn("свободно без открытых позиций: $97.00", report)
+        self.assertIn("equity по bid: $103.00", report)
 
     def test_status_report_separates_unmarked_snapshot_errors(self) -> None:
         def snapshot_loader(token_id: str, _side: str):
@@ -106,6 +115,7 @@ class TelegramReportTests(unittest.TestCase):
             patch("execution.telegram_reports.init_db"),
             patch("execution.telegram_reports.init_signal_observation_table"),
             patch("execution.telegram_reports.list_open_positions") as positions,
+            patch("execution.telegram_reports.list_trade_history", return_value=[]),
             patch("execution.telegram_reports.list_leader_registry") as registry,
             patch("execution.telegram_reports.list_signal_observations") as observations,
             patch("execution.telegram_reports._load_latest_alert_count", return_value=0),
@@ -149,6 +159,7 @@ class TelegramReportTests(unittest.TestCase):
             patch("execution.telegram_reports.init_db"),
             patch("execution.telegram_reports.init_signal_observation_table"),
             patch("execution.telegram_reports.list_open_positions") as positions,
+            patch("execution.telegram_reports.list_trade_history", return_value=[]),
             patch("execution.telegram_reports.list_leader_registry") as registry,
             patch("execution.telegram_reports.list_signal_observations") as observations,
             patch("execution.telegram_reports._load_latest_alert_count", return_value=0),
@@ -191,6 +202,7 @@ class TelegramReportTests(unittest.TestCase):
             patch("execution.telegram_reports.init_db"),
             patch("execution.telegram_reports.init_signal_observation_table"),
             patch("execution.telegram_reports.list_open_positions") as positions,
+            patch("execution.telegram_reports.list_trade_history", return_value=[]),
             patch("execution.telegram_reports.list_leader_registry") as registry,
             patch("execution.telegram_reports.list_signal_observations") as observations,
             patch("execution.telegram_reports._load_latest_alert_count", return_value=0),
