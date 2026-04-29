@@ -60,7 +60,7 @@ processing_warning_minutes = 2.0
 processing_critical_minutes = 10.0
 
 [alert_delivery]
-enabled = false
+enabled = true
 send_empty_alerts = false
 notify_trades = true
 title = "Polymarket live bot alert"
@@ -89,7 +89,7 @@ fallback_to_rest_on_metadata_error = true
 
 [onchain_shadow]
 enabled = true
-use_as_signal_source = false
+use_as_signal_source = true
 signal_limit = 50
 signal_window_sec = 600
 rpc_url_env = "POLYGON_RPC_URL"
