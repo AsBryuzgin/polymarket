@@ -166,6 +166,34 @@ class PolymarketExecutorTests(unittest.TestCase):
         self.assertEqual(snapshot["best_bid"], 0.47)
         self.assertIsNone(snapshot["best_ask"])
 
+    def test_sell_quote_fallback_does_not_lift_bid_above_midpoint(self) -> None:
+        class Book:
+            bids = []
+            asks = []
+            min_order_size = "5"
+            tick_size = "0.01"
+            neg_risk = False
+
+        class FakeClient:
+            def get_midpoint(self, token_id):
+                return {"mid": "0.50"}
+
+            def get_price(self, token_id, side):
+                return {"price": "1.00"}
+
+            def get_order_book(self, token_id):
+                return Book()
+
+        config = {"market_cache": {"enabled": False}}
+
+        with patch("execution.polymarket_executor.load_executor_config", return_value=config), \
+             patch("execution.polymarket_executor.build_authenticated_client", return_value=FakeClient()):
+            snapshot = fetch_market_snapshot(token_id="tokenA", side="SELL")
+
+        self.assertEqual(snapshot["price_quote"], 1.0)
+        self.assertIsNone(snapshot["best_bid"])
+        self.assertIsNone(snapshot["best_ask"])
+
 
 if __name__ == "__main__":
     unittest.main()

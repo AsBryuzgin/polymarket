@@ -116,10 +116,21 @@ def _extract_api_price(response, key: str) -> float | None:
 def _fill_quote_side_fallback(snapshot: dict) -> dict:
     side = str(snapshot.get("side") or "").upper()
     price_quote = _safe_float(snapshot.get("price_quote"))
+    midpoint = _safe_float(snapshot.get("midpoint"))
     hydrated = dict(snapshot)
-    if side == "SELL" and hydrated.get("best_bid") is None and price_quote is not None:
+    if (
+        side == "SELL"
+        and hydrated.get("best_bid") is None
+        and price_quote is not None
+        and (midpoint is None or price_quote <= midpoint)
+    ):
         hydrated["best_bid"] = price_quote
-    if side == "BUY" and hydrated.get("best_ask") is None and price_quote is not None:
+    if (
+        side == "BUY"
+        and hydrated.get("best_ask") is None
+        and price_quote is not None
+        and (midpoint is None or price_quote >= midpoint)
+    ):
         hydrated["best_ask"] = price_quote
     return hydrated
 
@@ -216,9 +227,19 @@ def fetch_market_snapshot(token_id: str, side: str = "BUY") -> dict:
 
     mid_value = _extract_api_price(mid, "mid")
     quote_value = _extract_api_price(price_quote, "price")
-    if side.upper() == "SELL" and best_bid is None and quote_value is not None:
+    if (
+        side.upper() == "SELL"
+        and best_bid is None
+        and quote_value is not None
+        and (mid_value is None or quote_value <= mid_value)
+    ):
         best_bid = quote_value
-    if side.upper() == "BUY" and best_ask is None and quote_value is not None:
+    if (
+        side.upper() == "BUY"
+        and best_ask is None
+        and quote_value is not None
+        and (mid_value is None or quote_value >= mid_value)
+    ):
         best_ask = quote_value
 
     spread_value = None
