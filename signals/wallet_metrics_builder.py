@@ -341,6 +341,9 @@ def build_wallet_metrics(
     median_liquidity: float = 10000.0,
     slippage_proxy: float = 0.01,
     delay_sec: float = 60.0,
+    leaderboard_week_pnl: float | None = None,
+    leaderboard_month_pnl: float | None = None,
+    copyability_score_override: float | None = None,
 ) -> WalletMetrics:
     now = datetime.now(timezone.utc)
 
@@ -376,6 +379,7 @@ def build_wallet_metrics(
             closed_positions=closed_positions,
             trades=trades,
         ),
+        roi_7=_window_roi(closed_positions, now, 7),
         roi_30=_window_roi(closed_positions, now, 30),
         roi_90=_window_roi(closed_positions, now, 90),
         roi_180=_window_roi(closed_positions, now, 180),
@@ -399,6 +403,9 @@ def build_wallet_metrics(
         sell_trades_30d=sell_trades_30d,
         buy_trade_share_30d=round(buy_trade_share_30d, 6),
         days_since_last_trade=days_since_last_trade,
+        leaderboard_week_pnl=leaderboard_week_pnl,
+        leaderboard_month_pnl=leaderboard_month_pnl,
+        copyability_score_override=copyability_score_override,
     )
 
 

@@ -31,6 +31,7 @@ FINAL_ALLOCATION_FILE = SHORTLIST_DIR / "final_portfolio_allocation.csv"
 LIVE_FILE = SHORTLIST_DIR / "live_portfolio_allocation.csv"
 REPORT_FILE = SHORTLIST_DIR / "live_rebalance_report.csv"
 STATE_FILE = Path("data/rebalance_state.json")
+SCORING_VERSION = "wss_v2_hard_gates_2026_04_29"
 
 REVIEW_COLUMNS = [
     "category",
@@ -39,6 +40,8 @@ REVIEW_COLUMNS = [
     "user_name",
     "wallet",
     "leaderboard_pnl",
+    "leaderboard_week_pnl",
+    "leaderboard_month_pnl",
     "leaderboard_volume",
     "eligible",
     "filter_reasons",
@@ -50,11 +53,15 @@ REVIEW_COLUMNS = [
     "drawdown_score",
     "specialization_score",
     "copyability_score",
+    "copyability_score_raw",
+    "copyability_smoothing_samples",
     "return_quality_score",
     "track_record_multiplier",
     "data_depth_multiplier",
     "activity_score",
     "current_position_pnl_ratio",
+    "roi_7",
+    "roi_30",
     "trades_30d",
     "trades_90d",
     "buy_trades_30d",
@@ -72,11 +79,15 @@ REQUIRED_SCORING_COLUMNS = [
     "drawdown_score",
     "specialization_score",
     "copyability_score",
+    "copyability_score_raw",
+    "copyability_smoothing_samples",
     "return_quality_score",
     "track_record_multiplier",
     "data_depth_multiplier",
     "activity_score",
     "current_position_pnl_ratio",
+    "roi_7",
+    "roi_30",
     "trades_30d",
     "trades_90d",
     "buy_trades_30d",
@@ -87,6 +98,8 @@ REQUIRED_SCORING_COLUMNS = [
     "median_liquidity",
     "slippage_proxy",
     "closed_positions_used",
+    "leaderboard_week_pnl",
+    "leaderboard_month_pnl",
 ]
 
 
@@ -285,7 +298,12 @@ def write_review_xlsx(rows: list[dict[str, Any]], path: Path) -> None:
         [
             "activity_score",
             "display only; not included in WSS",
-            "activity is enforced by hard gates: trades30>=5 and last_trade<=7d",
+            "activity is enforced by hard gates: trades30>=30 and last_trade<=5d",
+        ],
+        [
+            "recent PnL gates",
+            "gate only; not included in WSS",
+            "leader must have positive week and month signal from leaderboard PnL or closed-position ROI",
         ],
         [
             "copy-flow filter",
@@ -294,7 +312,7 @@ def write_review_xlsx(rows: list[dict[str, Any]], path: Path) -> None:
         ],
         [
             "hard gates",
-            "age>=120, closed>=40, unique>=15, concentration<=35%, open_pnl>=-25%, trades30>=5, last_trade<=7d, copyability>=50, copy-flow buy presence",
+            "age>=120, closed>=40, unique>=15, concentration<=35%, open_pnl>=-10%, trades30>=30, last_trade<=5d, copyability>=60, positive week/month PnL, copy-flow buy presence",
             "",
         ],
     ]
@@ -446,6 +464,7 @@ def create_rebalance_review(*, refresh: bool = True) -> dict[str, Any]:
     live_rows = _read_csv(paths["live"])
     review = {
         "review_id": review_id,
+        "scoring_version": SCORING_VERSION,
         "status": "PENDING",
         "created_at": datetime.now(timezone.utc).isoformat(),
         "manual_overrides": {},
@@ -464,6 +483,8 @@ def load_pending_review() -> dict[str, Any] | None:
         return None
     review = json.loads(PENDING_FILE.read_text(encoding="utf-8"))
     if review.get("status") != "PENDING":
+        return None
+    if review.get("scoring_version") != SCORING_VERSION:
         return None
     return review
 
@@ -492,6 +513,8 @@ def _live_fieldnames(rows: list[dict[str, Any]]) -> list[str]:
         "final_wss",
         "activity_score",
         "leaderboard_pnl",
+        "leaderboard_week_pnl",
+        "leaderboard_month_pnl",
         "leaderboard_volume",
         "raw_weight",
         "weight",
@@ -504,6 +527,10 @@ def _live_fieldnames(rows: list[dict[str, Any]]) -> list[str]:
         "median_spread",
         "slippage_proxy",
         "current_position_pnl_ratio",
+        "roi_7",
+        "roi_30",
+        "copyability_score_raw",
+        "copyability_smoothing_samples",
     ]
     seen = list(preferred)
     for row in rows:

@@ -13,6 +13,7 @@ class TestWalletScoring(unittest.TestCase):
             unique_markets=45,
             primary_domain_share=0.60,
             single_market_concentration=0.20,
+            roi_7=0.02,
             roi_30=0.05,
             roi_90=0.10,
             roi_180=0.18,
@@ -29,8 +30,8 @@ class TestWalletScoring(unittest.TestCase):
             delay_sec=40,
             profit_factor=1.8,
             largest_win_share=0.20,
-            trades_30d=12,
-            trades_90d=30,
+            trades_30d=40,
+            trades_90d=80,
             days_since_last_trade=2,
         )
 
@@ -40,6 +41,7 @@ class TestWalletScoring(unittest.TestCase):
             unique_markets=18,
             primary_domain_share=0.36,
             single_market_concentration=0.34,
+            roi_7=0.02,
             roi_30=0.35,
             roi_90=-0.10,
             roi_180=0.50,
@@ -73,6 +75,7 @@ class TestWalletScoring(unittest.TestCase):
             unique_markets=6,
             primary_domain_share=0.30,
             single_market_concentration=0.50,
+            roi_7=0.02,
             roi_30=0.08,
             roi_90=0.00,
             roi_180=0.00,
@@ -89,7 +92,7 @@ class TestWalletScoring(unittest.TestCase):
             delay_sec=30,
             profit_factor=2.0,
             largest_win_share=0.10,
-            trades_30d=5,
+            trades_30d=30,
             trades_90d=10,
             days_since_last_trade=3,
         )
@@ -106,6 +109,7 @@ class TestWalletScoring(unittest.TestCase):
             unique_markets=45,
             primary_domain_share=0.60,
             single_market_concentration=0.20,
+            roi_7=0.02,
             roi_30=0.05,
             roi_90=0.10,
             roi_180=0.18,
@@ -130,8 +134,8 @@ class TestWalletScoring(unittest.TestCase):
         result = score_wallet(inactive)
 
         self.assertFalse(result.eligible)
-        self.assertIn("trades_30d < 5", result.filter_reasons)
-        self.assertIn("days_since_last_trade > 7", result.filter_reasons)
+        self.assertIn("trades_30d < 30", result.filter_reasons)
+        self.assertIn("days_since_last_trade > 5", result.filter_reasons)
 
     def test_filter_rejects_recently_stale_wallet(self) -> None:
         stale = WalletMetrics(
@@ -140,6 +144,7 @@ class TestWalletScoring(unittest.TestCase):
             unique_markets=45,
             primary_domain_share=0.60,
             single_market_concentration=0.20,
+            roi_7=0.02,
             roi_30=0.05,
             roi_90=0.10,
             roi_180=0.18,
@@ -165,7 +170,7 @@ class TestWalletScoring(unittest.TestCase):
         result = score_wallet(stale)
 
         self.assertFalse(result.eligible)
-        self.assertIn("days_since_last_trade > 7", result.filter_reasons)
+        self.assertIn("days_since_last_trade > 5", result.filter_reasons)
 
     def test_filter_rejects_large_current_position_drawdown(self) -> None:
         underwater = WalletMetrics(
@@ -174,6 +179,7 @@ class TestWalletScoring(unittest.TestCase):
             unique_markets=45,
             primary_domain_share=0.60,
             single_market_concentration=0.20,
+            roi_7=0.02,
             roi_30=0.05,
             roi_90=0.10,
             roi_180=0.18,
@@ -191,15 +197,15 @@ class TestWalletScoring(unittest.TestCase):
             profit_factor=1.8,
             largest_win_share=0.20,
             current_position_pnl_ratio=-0.40,
-            trades_30d=12,
-            trades_90d=30,
+            trades_30d=40,
+            trades_90d=80,
             days_since_last_trade=2,
         )
 
         result = score_wallet(underwater)
 
         self.assertFalse(result.eligible)
-        self.assertIn("current_position_pnl_ratio < -0.25", result.filter_reasons)
+        self.assertIn("current_position_pnl_ratio < -0.10", result.filter_reasons)
 
     def test_filter_rejects_low_copyability_wallet(self) -> None:
         poor_copyability = WalletMetrics(
@@ -208,6 +214,7 @@ class TestWalletScoring(unittest.TestCase):
             unique_markets=45,
             primary_domain_share=0.60,
             single_market_concentration=0.20,
+            roi_7=0.02,
             roi_30=0.05,
             roi_90=0.10,
             roi_180=0.18,
@@ -225,8 +232,8 @@ class TestWalletScoring(unittest.TestCase):
             profit_factor=1.8,
             largest_win_share=0.20,
             current_position_pnl_ratio=0.0,
-            trades_30d=12,
-            trades_90d=30,
+            trades_30d=40,
+            trades_90d=80,
             days_since_last_trade=2,
         )
 
@@ -234,7 +241,7 @@ class TestWalletScoring(unittest.TestCase):
 
         self.assertLess(result.copyability_score, 50.0)
         self.assertFalse(result.eligible)
-        self.assertIn("copyability_score < 50", result.filter_reasons)
+        self.assertIn("copyability_score < 60", result.filter_reasons)
 
     def test_low_primary_domain_share_is_penalty_not_hard_filter(self) -> None:
         broad_generalist = WalletMetrics(
@@ -243,6 +250,7 @@ class TestWalletScoring(unittest.TestCase):
             unique_markets=45,
             primary_domain_share=0.20,
             single_market_concentration=0.20,
+            roi_7=0.02,
             roi_30=0.05,
             roi_90=0.10,
             roi_180=0.18,
@@ -260,8 +268,8 @@ class TestWalletScoring(unittest.TestCase):
             profit_factor=1.8,
             largest_win_share=0.20,
             current_position_pnl_ratio=0.0,
-            trades_30d=12,
-            trades_90d=30,
+            trades_30d=40,
+            trades_90d=80,
             days_since_last_trade=2,
         )
 
@@ -295,6 +303,7 @@ class TestWalletScoring(unittest.TestCase):
             unique_markets=45,
             primary_domain_share=0.60,
             single_market_concentration=0.20,
+            roi_7=0.02,
             roi_30=0.05,
             roi_90=0.10,
             roi_180=0.18,
@@ -313,8 +322,8 @@ class TestWalletScoring(unittest.TestCase):
             largest_win_share=0.20,
             days_since_last_trade=2,
         )
-        barely_active = WalletMetrics(**base, trades_30d=5, trades_90d=5)
-        hyper_active = WalletMetrics(**base, trades_30d=300, trades_90d=300)
+        barely_active = WalletMetrics(**base, trades_30d=30, trades_90d=30)
+        hyper_active = WalletMetrics(**base, trades_30d=300, trades_90d=800)
 
         barely_result = score_wallet(barely_active)
         hyper_result = score_wallet(hyper_active)
@@ -331,6 +340,7 @@ class TestWalletScoring(unittest.TestCase):
             unique_markets=45,
             primary_domain_share=0.60,
             single_market_concentration=0.20,
+            roi_7=0.02,
             roi_30=0.05,
             roi_90=0.10,
             roi_180=0.18,
@@ -348,7 +358,7 @@ class TestWalletScoring(unittest.TestCase):
             profit_factor=1.8,
             largest_win_share=0.20,
             trades_30d=30,
-            trades_90d=30,
+            trades_90d=80,
             days_since_last_trade=1,
         )
         sell_only = WalletMetrics(
@@ -359,7 +369,7 @@ class TestWalletScoring(unittest.TestCase):
         )
         mixed_flow = WalletMetrics(
             **base,
-            buy_trades_30d=5,
+            buy_trades_30d=30,
             sell_trades_30d=25,
             buy_trade_share_30d=5 / 30,
         )
@@ -368,7 +378,7 @@ class TestWalletScoring(unittest.TestCase):
         mixed_result = score_wallet(mixed_flow)
 
         self.assertFalse(sell_only_result.eligible)
-        self.assertIn("copy_flow_buy_trades_30d < 1", sell_only_result.filter_reasons)
+        self.assertIn("copy_flow_buy_trades_30d < 3", sell_only_result.filter_reasons)
         self.assertTrue(mixed_result.eligible)
         self.assertEqual(sell_only_result.final_wss, mixed_result.final_wss)
 
@@ -379,6 +389,7 @@ class TestWalletScoring(unittest.TestCase):
             unique_markets=45,
             primary_domain_share=0.60,
             single_market_concentration=0.20,
+            roi_7=0.02,
             roi_30=0.05,
             roi_90=0.10,
             roi_180=0.18,
@@ -397,16 +408,16 @@ class TestWalletScoring(unittest.TestCase):
             largest_win_share=0.20,
             trades_30d=40,
             trades_90d=40,
-            buy_trades_30d=1,
-            sell_trades_30d=39,
-            buy_trade_share_30d=1 / 40,
+            buy_trades_30d=3,
+            sell_trades_30d=37,
+            buy_trade_share_30d=3 / 40,
             days_since_last_trade=1,
         )
 
         result = score_wallet(mostly_sell)
 
         self.assertFalse(result.eligible)
-        self.assertIn("copy_flow_buy_share_30d < 0.05", result.filter_reasons)
+        self.assertIn("copy_flow_buy_share_30d < 0.1", result.filter_reasons)
 
     def test_metrics_builder_counts_recent_buy_sell_flow(self) -> None:
         now_ts = int(datetime.now(timezone.utc).timestamp())

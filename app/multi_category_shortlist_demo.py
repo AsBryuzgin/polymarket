@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 import sys
+from dataclasses import replace
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -16,6 +17,7 @@ from signals.shortlist_helpers import (
     paginate_recent_closed_positions,
     estimate_copyability_inputs,
 )
+from signals.copyability_history import record_copyability_score
 
 OUTPUT_DIR = Path("data/shortlists")
 
@@ -36,11 +38,14 @@ EXPERIMENTAL_CATEGORIES = [
 
 TIME_PERIOD = "MONTH"
 CANDIDATE_LIMIT = 30
+WEEK_LOOKUP_LIMIT = 250
 
 
 def score_wallet_from_category_entry(
     wallet_client: WalletProfilesClient,
     entry: dict,
+    *,
+    leaderboard_week_pnl: float | None = None,
 ) -> dict:
     wallet = entry["proxy_wallet"]
 
@@ -77,8 +82,17 @@ def score_wallet_from_category_entry(
         median_liquidity=median_liquidity,
         slippage_proxy=slippage_proxy,
         delay_sec=delay_sec,
+        leaderboard_week_pnl=leaderboard_week_pnl,
+        leaderboard_month_pnl=entry["pnl"],
     )
 
+    raw_copyability_score = score_wallet(metrics).copyability_score
+    smoothed_copyability_score, copyability_smoothing_samples = record_copyability_score(
+        wallet=wallet,
+        category=entry["leaderboard_category"],
+        score=raw_copyability_score,
+    )
+    metrics = replace(metrics, copyability_score_override=smoothed_copyability_score)
     score = score_wallet(metrics)
 
     return {
@@ -88,6 +102,8 @@ def score_wallet_from_category_entry(
         "user_name": entry["user_name"],
         "wallet": wallet,
         "leaderboard_pnl": entry["pnl"],
+        "leaderboard_week_pnl": leaderboard_week_pnl,
+        "leaderboard_month_pnl": entry["pnl"],
         "leaderboard_volume": entry["volume"],
         "eligible": score.eligible,
         "final_wss": score.final_wss,
@@ -96,6 +112,8 @@ def score_wallet_from_category_entry(
         "drawdown_score": score.drawdown_score,
         "specialization_score": score.specialization_score,
         "copyability_score": score.copyability_score,
+        "copyability_score_raw": raw_copyability_score,
+        "copyability_smoothing_samples": copyability_smoothing_samples,
         "activity_score": score.activity_score,
         "return_quality_score": score.return_quality_score,
         "track_record_multiplier": score.track_record_multiplier,
@@ -105,6 +123,8 @@ def score_wallet_from_category_entry(
         "median_liquidity": median_liquidity,
         "slippage_proxy": slippage_proxy,
         "current_position_pnl_ratio": metrics.current_position_pnl_ratio,
+        "roi_7": metrics.roi_7,
+        "roi_30": metrics.roi_30,
         "trades_30d": metrics.trades_30d,
         "trades_90d": metrics.trades_90d,
         "buy_trades_30d": metrics.buy_trades_30d,
@@ -128,6 +148,22 @@ def run_category(
         offset=0,
     )
 
+    try:
+        week_rows = leaderboard_client.get_leaderboard(
+            category=category,
+            time_period="WEEK",
+            order_by="PNL",
+            limit=WEEK_LOOKUP_LIMIT,
+            offset=0,
+        )
+    except Exception:
+        week_rows = []
+    week_pnl_by_wallet = {
+        str(row.get("proxyWallet") or "").lower(): float(row.get("pnl", 0) or 0)
+        for row in week_rows
+        if row.get("proxyWallet")
+    }
+
     candidates = [
         leaderboard_client.normalize_entry(row, category=category, time_period=TIME_PERIOD)
         for row in rows
@@ -144,7 +180,11 @@ def run_category(
         print(f"[{idx}/{len(candidates)}] {category} | {user_name} | {wallet}")
 
         try:
-            result = score_wallet_from_category_entry(wallet_client, entry)
+            result = score_wallet_from_category_entry(
+                wallet_client,
+                entry,
+                leaderboard_week_pnl=week_pnl_by_wallet.get(str(wallet).lower()),
+            )
             results.append(result)
         except Exception as e:
             results.append(
@@ -155,6 +195,8 @@ def run_category(
                     "user_name": user_name,
                     "wallet": wallet,
                     "leaderboard_pnl": entry["pnl"],
+                    "leaderboard_week_pnl": week_pnl_by_wallet.get(str(wallet).lower()),
+                    "leaderboard_month_pnl": entry["pnl"],
                     "leaderboard_volume": entry["volume"],
                     "eligible": False,
                     "final_wss": -1.0,
@@ -163,6 +205,8 @@ def run_category(
                     "drawdown_score": -1.0,
                     "specialization_score": -1.0,
                     "copyability_score": -1.0,
+                    "copyability_score_raw": -1.0,
+                    "copyability_smoothing_samples": 0,
                     "activity_score": -1.0,
                     "return_quality_score": -1.0,
                     "track_record_multiplier": -1.0,
@@ -172,6 +216,8 @@ def run_category(
                     "median_liquidity": None,
                     "slippage_proxy": None,
                     "current_position_pnl_ratio": 0.0,
+                    "roi_7": 0.0,
+                    "roi_30": 0.0,
                     "trades_30d": 0,
                     "trades_90d": 0,
                     "buy_trades_30d": 0,
@@ -203,6 +249,8 @@ def save_csv(rows: list[dict], path: Path) -> None:
         "user_name",
         "wallet",
         "leaderboard_pnl",
+        "leaderboard_week_pnl",
+        "leaderboard_month_pnl",
         "leaderboard_volume",
         "eligible",
         "final_wss",
@@ -211,6 +259,8 @@ def save_csv(rows: list[dict], path: Path) -> None:
         "drawdown_score",
         "specialization_score",
         "copyability_score",
+        "copyability_score_raw",
+        "copyability_smoothing_samples",
         "activity_score",
         "return_quality_score",
         "track_record_multiplier",
@@ -220,6 +270,8 @@ def save_csv(rows: list[dict], path: Path) -> None:
         "median_liquidity",
         "slippage_proxy",
         "current_position_pnl_ratio",
+        "roi_7",
+        "roi_30",
         "trades_30d",
         "trades_90d",
         "buy_trades_30d",
@@ -244,6 +296,8 @@ def print_top(rows: list[dict], top_n: int = 5) -> None:
             f"eligible={row['eligible']} | "
             f"activity={row['activity_score']} | "
             f"trades30={row['trades_30d']} | "
+            f"week_pnl={row.get('leaderboard_week_pnl')} | "
+            f"month_pnl={round(float(row.get('leaderboard_month_pnl') or row['leaderboard_pnl']), 2)} | "
             f"buy30={row.get('buy_trades_30d', '')} | "
             f"sell30={row.get('sell_trades_30d', '')} | "
             f"spread={row['median_spread']} | "

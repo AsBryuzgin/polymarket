@@ -180,11 +180,15 @@ def save_csv(rows: list[dict], path: Path) -> None:
         "drawdown_score",
         "specialization_score",
         "copyability_score",
+        "copyability_score_raw",
+        "copyability_smoothing_samples",
         "activity_score",
         "return_quality_score",
         "track_record_multiplier",
         "data_depth_multiplier",
         "leaderboard_pnl",
+        "leaderboard_week_pnl",
+        "leaderboard_month_pnl",
         "leaderboard_volume",
         "raw_weight",
         "weight",
@@ -197,6 +201,8 @@ def save_csv(rows: list[dict], path: Path) -> None:
         "median_spread",
         "slippage_proxy",
         "current_position_pnl_ratio",
+        "roi_7",
+        "roi_30",
     ]
 
     with path.open("w", encoding="utf-8", newline="") as f:
@@ -216,11 +222,15 @@ def save_csv(rows: list[dict], path: Path) -> None:
                     "drawdown_score": row.get("drawdown_score", ""),
                     "specialization_score": row.get("specialization_score", ""),
                     "copyability_score": row.get("copyability_score", ""),
+                    "copyability_score_raw": row.get("copyability_score_raw", ""),
+                    "copyability_smoothing_samples": row.get("copyability_smoothing_samples", ""),
                     "activity_score": row.get("activity_score", ""),
                     "return_quality_score": row.get("return_quality_score", ""),
                     "track_record_multiplier": row.get("track_record_multiplier", ""),
                     "data_depth_multiplier": row.get("data_depth_multiplier", ""),
                     "leaderboard_pnl": round(row["leaderboard_pnl"], 2),
+                    "leaderboard_week_pnl": row.get("leaderboard_week_pnl", ""),
+                    "leaderboard_month_pnl": row.get("leaderboard_month_pnl", ""),
                     "leaderboard_volume": round(row["leaderboard_volume"], 2),
                     "raw_weight": round(row["raw_weight"], 6),
                     "weight": round(row["weight"], 6),
@@ -233,6 +243,8 @@ def save_csv(rows: list[dict], path: Path) -> None:
                     "median_spread": row.get("median_spread", ""),
                     "slippage_proxy": row.get("slippage_proxy", ""),
                     "current_position_pnl_ratio": row.get("current_position_pnl_ratio", ""),
+                    "roi_7": row.get("roi_7", ""),
+                    "roi_30": row.get("roi_30", ""),
                 }
             )
 

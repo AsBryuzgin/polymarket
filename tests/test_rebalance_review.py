@@ -128,6 +128,7 @@ class RebalanceReviewTests(unittest.TestCase):
 
             review = {
                 "review_id": "test",
+                "scoring_version": rebalance_review.SCORING_VERSION,
                 "status": "PENDING",
                 "manual_overrides": {},
                 "files": {"all_csv": str(all_csv), "live": str(live_csv), "report": str(report_csv)},
@@ -219,6 +220,7 @@ class RebalanceReviewTests(unittest.TestCase):
 
             review = {
                 "review_id": "test",
+                "scoring_version": rebalance_review.SCORING_VERSION,
                 "status": "PENDING",
                 "manual_overrides": {},
                 "files": {"all_csv": str(all_csv), "live": str(live_csv), "report": str(report_csv)},
@@ -269,6 +271,7 @@ class RebalanceReviewTests(unittest.TestCase):
                 json.dumps(
                     {
                         "review_id": "stale",
+                        "scoring_version": rebalance_review.SCORING_VERSION,
                         "status": "PENDING",
                         "files": {
                             "all_csv": str(all_csv),
