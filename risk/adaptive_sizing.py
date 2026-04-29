@@ -181,6 +181,30 @@ def _executed_entries(
     return count, round(amount, 8)
 
 
+def _budget_skip_multiplier(
+    *,
+    budget_skips: int,
+    entry_count: int,
+    cfg: dict[str, Any],
+) -> tuple[float, float, str]:
+    attempts = budget_skips + entry_count
+    min_samples = int(_safe_float(cfg.get("min_budget_skip_samples"), 10))
+    ratio_start = _safe_float(cfg.get("budget_skip_ratio_start"), 0.20)
+    floor = _safe_float(cfg.get("min_budget_skip_multiplier"), 0.25)
+
+    if attempts < min_samples:
+        return 1.0, 0.0, "insufficient budget skip history"
+
+    skip_ratio = budget_skips / attempts if attempts > 0 else 0.0
+    if skip_ratio <= ratio_start:
+        return 1.0, round(skip_ratio, 8), "budget skip ratio ok"
+
+    span = max(1.0 - ratio_start, 1e-9)
+    progress = min((skip_ratio - ratio_start) / span, 1.0)
+    multiplier = 1.0 - progress * (1.0 - floor)
+    return round(max(floor, multiplier), 8), round(skip_ratio, 8), "budget skip pressure"
+
+
 def _utilization_multiplier(utilization: float, cfg: dict[str, Any]) -> float:
     start = _safe_float(cfg.get("utilization_throttle_start"), 0.60)
     full = _safe_float(cfg.get("utilization_throttle_full"), 0.90)
@@ -255,18 +279,12 @@ def compute_adaptive_sizing_decision(
     target_capacity = max(budget * target_turnover, 0.0)
 
     if usable_demand_signals >= min_signals and demand_usd > target_capacity > 0:
-        historical_multiplier = target_capacity / demand_usd
-        historical_multiplier = max(min_historical, min(max_historical, historical_multiplier))
-        historical_reason = "historical demand pressure"
+        demand_multiplier = target_capacity / demand_usd
+        demand_multiplier = max(min_historical, min(max_historical, demand_multiplier))
+        demand_reason = "historical demand pressure"
     else:
-        historical_multiplier = 1.0
-        historical_reason = "insufficient pressure history"
-
-    utilization_mult = _utilization_multiplier(utilization, cfg)
-    raw_multiplier = historical_multiplier * utilization_mult
-    min_multiplier = _safe_float(cfg.get("min_multiplier"), 0.10)
-    max_multiplier = _safe_float(cfg.get("max_multiplier"), 1.0)
-    multiplier = max(min_multiplier, min(max_multiplier, raw_multiplier))
+        demand_multiplier = 1.0
+        demand_reason = "insufficient pressure history"
 
     skipped_by_budget = _processed_budget_skips(
         leader_wallet=leader_wallet,
@@ -278,6 +296,24 @@ def compute_adaptive_sizing_decision(
         trade_history=trade_history,
         since=since,
     )
+    skip_multiplier, skip_ratio, skip_reason = _budget_skip_multiplier(
+        budget_skips=skipped_by_budget,
+        entry_count=entry_count,
+        cfg=cfg,
+    )
+
+    historical_multiplier = min(demand_multiplier, skip_multiplier)
+    historical_reason = (
+        demand_reason
+        if demand_multiplier <= skip_multiplier
+        else skip_reason
+    )
+
+    utilization_mult = _utilization_multiplier(utilization, cfg)
+    raw_multiplier = historical_multiplier * utilization_mult
+    min_multiplier = _safe_float(cfg.get("min_multiplier"), 0.10)
+    max_multiplier = _safe_float(cfg.get("max_multiplier"), 1.0)
+    multiplier = max(min_multiplier, min(max_multiplier, raw_multiplier))
 
     reasons = []
     if historical_multiplier < 1.0:
@@ -297,8 +333,12 @@ def compute_adaptive_sizing_decision(
         "selected_buy_demand_usd": demand_usd,
         "target_capacity_usd": round(target_capacity, 8),
         "budget_skips": skipped_by_budget,
+        "budget_skip_ratio": skip_ratio,
+        "budget_skip_multiplier": skip_multiplier,
         "executed_entries": entry_count,
         "executed_entry_amount_usd": entry_amount,
+        "demand_multiplier": demand_multiplier,
+        "budget_skip_multiplier_reason": skip_reason,
         "historical_multiplier_reason": historical_reason,
     }
 

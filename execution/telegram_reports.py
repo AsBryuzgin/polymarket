@@ -910,6 +910,8 @@ def build_sizing_report(config: dict[str, Any] | None = None) -> str:
                 "demand": _safe_float(details.get("selected_buy_demand_usd")),
                 "target_capacity": _safe_float(details.get("target_capacity_usd")),
                 "budget_skips": int(_safe_float(details.get("budget_skips"))),
+                "budget_skip_ratio": _safe_float(details.get("budget_skip_ratio")),
+                "budget_skip_multiplier": _safe_float(details.get("budget_skip_multiplier")) or 1.0,
                 "entries": int(_safe_float(details.get("executed_entries"))),
                 "entry_amount": _safe_float(details.get("executed_entry_amount_usd")),
             }
@@ -947,7 +949,7 @@ def build_sizing_report(config: dict[str, Any] | None = None) -> str:
                 ),
                 (
                     f"   entries {row['entries']} / {_money(row['entry_amount'])} "
-                    f"| budget skips {row['budget_skips']} | {row['reason']}"
+                    f"| budget skips {row['budget_skips']} ({_pct(row['budget_skip_ratio'])}) | {row['reason']}"
                 ),
             ]
         )

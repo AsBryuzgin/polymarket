@@ -83,6 +83,50 @@ class AdaptiveSizingTests(unittest.TestCase):
         self.assertEqual(decision.utilization_multiplier, 0.25)
         self.assertEqual(decision.multiplier, 0.25)
 
+    def test_budget_skip_pressure_reduces_multiplier(self) -> None:
+        config = {
+            "adaptive_sizing": {
+                "enabled": True,
+                "min_budget_skip_samples": 10,
+                "budget_skip_ratio_start": 0.20,
+                "min_budget_skip_multiplier": 0.25,
+            },
+        }
+        processed = [
+            {
+                "leader_wallet": "wallet1",
+                "side": "BUY",
+                "status": "SKIPPED_RISK",
+                "reason": "wallet exposure above leader budget",
+                "created_at": "2026-04-29 10:00:00",
+            }
+            for _idx in range(8)
+        ]
+        history = [
+            {
+                "leader_wallet": "wallet1",
+                "event_type": "ENTRY",
+                "amount_usd": 1.0,
+                "event_time": "2026-04-29 10:00:00",
+            }
+            for _idx in range(2)
+        ]
+
+        decision = compute_adaptive_sizing_decision(
+            leader_wallet="wallet1",
+            leader_budget_usd=20.0,
+            config=config,
+            open_positions=[],
+            observations=[],
+            processed_signals=processed,
+            trade_history=history,
+            now=datetime(2026, 4, 29, 12, 0, tzinfo=timezone.utc),
+        )
+
+        self.assertLess(decision.historical_multiplier, 1.0)
+        self.assertEqual(decision.details["budget_skip_ratio"], 0.8)
+        self.assertAlmostEqual(decision.multiplier, 0.4375)
+
     def test_copy_worker_applies_adaptive_multiplier_to_buy_size(self) -> None:
         log_signal_observation(
             leader_wallet="wallet1",
