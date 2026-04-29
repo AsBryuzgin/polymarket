@@ -22,6 +22,7 @@ from execution.telegram_reports import (
     build_latency_report,
     build_leaders_report,
     build_positions_report,
+    build_sizing_report,
     build_settlements_report,
     build_status_report,
     build_unmarked_report,
@@ -53,7 +54,8 @@ KEYBOARD = {
         [{"text": "Статус"}, {"text": "Позиции"}],
         [{"text": "Лидеры"}, {"text": "Активность 24ч"}],
         [{"text": "Блокировки 24ч"}, {"text": "Неоцененные"}],
-        [{"text": "Сеттлмент"}, {"text": "Latency"}],
+        [{"text": "Сайзинг"}, {"text": "Latency"}],
+        [{"text": "Сеттлмент"}],
         [{"text": "Ребаланс"}, {"text": "Выход"}],
         [{"text": "Помощь"}],
     ],
@@ -267,6 +269,8 @@ def _build_response(text: str, config: dict[str, Any]) -> str:
         return build_settlements_report(config)
     if normalized in {"/latency", "latency", "задержка", "источники"}:
         return build_latency_report(config)
+    if normalized in {"/sizing", "sizing", "сайзинг", "размеры", "эффективность"}:
+        return build_sizing_report(config)
     return "Не понял команду. Нажми Помощь или отправь /help."
 
 

@@ -236,6 +236,22 @@ class RiskGuardTests(unittest.TestCase):
         self.assertEqual(decision.amount_usd, 0.45)
         self.assertEqual(decision.source, "leader_trade_budget_fraction")
 
+    def test_signal_sizing_applies_adaptive_multiplier(self) -> None:
+        decision = compute_signal_copy_amount(
+            leader_budget_usd=12.0,
+            remaining_leader_budget_usd=12.0,
+            leader_trade_notional_usd=50.0,
+            leader_trade_notional_copy_fraction=0.20,
+            leader_portfolio_value_usd=1000.0,
+            min_order_size_usd=0.01,
+            max_per_trade_usd=10.0,
+            adaptive_size_multiplier=0.50,
+        )
+
+        self.assertTrue(decision.allowed)
+        self.assertEqual(decision.amount_usd, 0.3)
+        self.assertTrue(decision.details["adaptive_size_multiplier_applied"])
+
     def test_signal_sizing_does_not_round_up_to_minimum(self) -> None:
         decision = compute_signal_copy_amount(
             leader_budget_usd=12.0,

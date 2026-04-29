@@ -22,8 +22,10 @@ from execution.state_store import (
     init_db,
     list_leader_registry,
     list_open_positions,
+    list_processed_signals,
     list_trade_history,
 )
+from risk.adaptive_sizing import compute_adaptive_sizing_decision
 
 
 SnapshotLoader = Callable[[str, str], dict[str, Any]]
@@ -862,6 +864,97 @@ def build_latency_report(config: dict[str, Any] | None = None) -> str:
     return "\n".join(lines)
 
 
+def build_sizing_report(config: dict[str, Any] | None = None) -> str:
+    init_db()
+    init_signal_observation_table()
+    config = config or {}
+
+    registry = [
+        row
+        for row in list_leader_registry(limit=100000)
+        if str(row.get("leader_status") or "").upper() == "ACTIVE"
+    ]
+    if not registry:
+        return "Sizing / эффективность капитала\nнет ACTIVE лидеров"
+
+    open_positions = list_open_positions(limit=100000)
+    observations = list_signal_observations(limit=100000)
+    processed_signals = list_processed_signals(limit=100000)
+    trade_history = list_trade_history(limit=100000)
+
+    rows = []
+    for row in registry:
+        decision = compute_adaptive_sizing_decision(
+            leader_wallet=str(row.get("wallet") or ""),
+            leader_budget_usd=_safe_float(row.get("target_budget_usd")),
+            config=config,
+            open_positions=open_positions,
+            observations=observations,
+            processed_signals=processed_signals,
+            trade_history=trade_history,
+        )
+        details = decision.details
+        rows.append(
+            {
+                "name": _leader_name(row),
+                "category": row.get("category") or "UNKNOWN",
+                "budget": _safe_float(row.get("target_budget_usd")),
+                "multiplier": decision.multiplier,
+                "historical": decision.historical_multiplier,
+                "utilization_multiplier": decision.utilization_multiplier,
+                "reason": decision.reason,
+                "open_exposure": _safe_float(details.get("open_exposure_usd")),
+                "utilization": _safe_float(details.get("utilization")),
+                "selected_buy_signals": int(_safe_float(details.get("selected_buy_signals"))),
+                "usable_demand_signals": int(_safe_float(details.get("usable_demand_signals"))),
+                "demand": _safe_float(details.get("selected_buy_demand_usd")),
+                "target_capacity": _safe_float(details.get("target_capacity_usd")),
+                "budget_skips": int(_safe_float(details.get("budget_skips"))),
+                "entries": int(_safe_float(details.get("executed_entries"))),
+                "entry_amount": _safe_float(details.get("executed_entry_amount_usd")),
+            }
+        )
+
+    rows.sort(
+        key=lambda row: (
+            row["multiplier"],
+            -row["budget_skips"],
+            -row["utilization"],
+        )
+    )
+
+    lines = [
+        "Sizing / эффективность капитала",
+        "Пояснение: multiplier умножает BUY размер. Чем ниже, тем сильнее бот дробит входы.",
+        "",
+    ]
+    for idx, row in enumerate(rows[:8], start=1):
+        pressure = row["demand"] / row["target_capacity"] if row["target_capacity"] > 0 else 0.0
+        lines.extend(
+            [
+                f"{idx}. {row['name']} | {row['category']}",
+                (
+                    f"   budget {_money(row['budget'])} | open {_money(row['open_exposure'])} "
+                    f"| util {_pct(row['utilization'])}"
+                ),
+                (
+                    f"   multiplier {row['multiplier']:.2f} "
+                    f"(hist {row['historical']:.2f} x util {row['utilization_multiplier']:.2f})"
+                ),
+                (
+                    f"   BUY signals {row['selected_buy_signals']} | demand {_money(row['demand'])} "
+                    f"| target {_money(row['target_capacity'])} | pressure {pressure:.1f}x"
+                ),
+                (
+                    f"   entries {row['entries']} / {_money(row['entry_amount'])} "
+                    f"| budget skips {row['budget_skips']} | {row['reason']}"
+                ),
+            ]
+        )
+
+    return "\n".join(lines)
+
+
 def build_blocks_report(*, now: datetime | None = None) -> str:
     init_db()
     init_signal_observation_table()
@@ -975,6 +1068,7 @@ def build_help_report() -> str:
             "/unmarked - позиции без текущего рыночного mark-to-market",
             "/settlements - resolved позиции и последние redeem-операции",
             "/latency - WebSocket cache и on-chain/Data API lag",
+            "/sizing - adaptive sizing, utilization и budget pressure по лидерам",
             "/rebalance - прислать review-файлы и запросить подтверждение",
             "/unwind - ручной рыночный выход по лидеру или всем позициям",
             "candidates CATEGORY - топ кандидатов категории pending-review",

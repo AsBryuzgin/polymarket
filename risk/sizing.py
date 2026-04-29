@@ -32,6 +32,7 @@ def compute_signal_copy_amount(
     leader_portfolio_value_usd: float | None = None,
     leader_exit_fraction: float | None = None,
     max_leader_trade_budget_fraction: float | None = None,
+    adaptive_size_multiplier: float | None = None,
     round_up_to_min_order: bool = False,
     allow_notional_fallback: bool = False,
     allow_budget_fallback: bool = False,
@@ -51,6 +52,9 @@ def compute_signal_copy_amount(
     portfolio_value = _safe_float(leader_portfolio_value_usd)
     exit_fraction = _safe_float(leader_exit_fraction)
     max_budget_fraction = _safe_float(max_leader_trade_budget_fraction)
+    adaptive_multiplier = _safe_float(adaptive_size_multiplier, 1.0)
+    if adaptive_multiplier <= 0:
+        adaptive_multiplier = 1.0
     side = side.upper()
 
     details = {
@@ -63,6 +67,7 @@ def compute_signal_copy_amount(
         "leader_portfolio_value_usd": portfolio_value,
         "leader_exit_fraction": exit_fraction,
         "max_leader_trade_budget_fraction": max_budget_fraction,
+        "adaptive_size_multiplier": adaptive_multiplier,
         "round_up_to_min_order": bool(round_up_to_min_order),
         "allow_notional_fallback": bool(allow_notional_fallback),
         "allow_budget_fallback": bool(allow_budget_fallback),
@@ -129,6 +134,14 @@ def compute_signal_copy_amount(
 
     if raw_amount <= 0:
         return CopySizeDecision(False, 0.0, source, "computed amount <= 0", details)
+
+    if side == "BUY" and adaptive_multiplier != 1.0:
+        raw_amount *= adaptive_multiplier
+        details = {
+            **details,
+            "adaptive_size_multiplier_applied": True,
+            "adaptive_raw_amount_usd": raw_amount,
+        }
 
     amount = min(max_trade, raw_amount, budget)
     details = {

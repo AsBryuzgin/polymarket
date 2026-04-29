@@ -27,8 +27,16 @@ from execution.state_store import (
     get_leader_registry,
     log_trade_event,
     list_open_positions,
+    list_processed_signals,
+    list_trade_history,
 )
+from execution.signal_observation_store import list_signal_observations
 from execution.trade_notifications import send_trade_notification
+from risk.adaptive_sizing import (
+    adaptive_sizing_enabled,
+    compute_adaptive_sizing_decision,
+    neutral_adaptive_sizing_decision,
+)
 from risk.guards import build_runtime_risk_limits, evaluate_entry_risk
 from risk.sizing import compute_signal_copy_amount
 
@@ -199,6 +207,28 @@ def _open_wallet_exposure_usd(leader_wallet: str) -> float:
         except (TypeError, ValueError):
             continue
     return round(total, 8)
+
+
+def _adaptive_sizing_for_buy(config: dict, signal: LeaderSignal) -> dict:
+    if signal.side.upper() != "BUY" or not adaptive_sizing_enabled(config):
+        return neutral_adaptive_sizing_decision(
+            "adaptive sizing disabled",
+            enabled=False,
+        ).to_dict()
+    try:
+        return compute_adaptive_sizing_decision(
+            leader_wallet=signal.leader_wallet,
+            leader_budget_usd=signal.leader_budget_usd,
+            config=config,
+            open_positions=list_open_positions(limit=100000),
+            observations=list_signal_observations(limit=100000),
+            processed_signals=list_processed_signals(limit=100000),
+            trade_history=list_trade_history(limit=100000),
+        ).to_dict()
+    except Exception as e:
+        return neutral_adaptive_sizing_decision(
+            f"adaptive sizing unavailable: {e}"
+        ).to_dict()
 
 
 def _snapshot_min_order_size_usd(snapshot: dict, configured_min_order_usd: float) -> float:
@@ -675,6 +705,7 @@ def process_signal(signal: LeaderSignal) -> dict:
 
     wallet_exposure_usd = _open_wallet_exposure_usd(signal.leader_wallet)
     remaining_leader_budget_usd = max(signal.leader_budget_usd - wallet_exposure_usd, 0.0)
+    adaptive_sizing = _adaptive_sizing_for_buy(config, signal)
 
     size_decision = compute_signal_copy_amount(
         leader_budget_usd=signal.leader_budget_usd,
@@ -686,6 +717,7 @@ def process_signal(signal: LeaderSignal) -> dict:
         side=signal.side,
         leader_portfolio_value_usd=signal.leader_portfolio_value_usd,
         max_leader_trade_budget_fraction=max_leader_trade_budget_fraction,
+        adaptive_size_multiplier=float(adaptive_sizing.get("multiplier") or 1.0),
         round_up_to_min_order=round_up_to_min_order,
         allow_notional_fallback=allow_notional_fallback,
         allow_budget_fallback=allow_budget_fallback,
@@ -708,6 +740,7 @@ def process_signal(signal: LeaderSignal) -> dict:
             "status": "SKIPPED_SIZING",
             "reason": size_decision.reason,
             "sizing": asdict(size_decision),
+            "adaptive_sizing": adaptive_sizing,
         }
 
     amount_usd = size_decision.amount_usd
@@ -738,6 +771,7 @@ def process_signal(signal: LeaderSignal) -> dict:
             "status": "SKIPPED_DRIFT",
             "reason": drift_reason,
             "suggested_amount_usd": amount_usd,
+            "adaptive_sizing": adaptive_sizing,
         }
 
     risk_decision = evaluate_entry_risk(
@@ -768,6 +802,7 @@ def process_signal(signal: LeaderSignal) -> dict:
             "reason": risk_decision.reason,
             "suggested_amount_usd": amount_usd,
             "risk": asdict(risk_decision),
+            "adaptive_sizing": adaptive_sizing,
         }
 
     execution = _execute_with_recorded_attempt(
@@ -796,6 +831,7 @@ def process_signal(signal: LeaderSignal) -> dict:
             "reason": execution.reason,
             "suggested_amount_usd": amount_usd,
             "execution": asdict(execution),
+            "adaptive_sizing": adaptive_sizing,
         }
 
     executed_amount_usd = execution.fill_amount_usd or amount_usd
@@ -828,7 +864,10 @@ def process_signal(signal: LeaderSignal) -> dict:
         realized_pnl_usd=None,
         realized_pnl_pct=None,
         holding_minutes=None,
-        notes=f"{execution.mode.lower()} entry generated | sizing={sizing_source}",
+        notes=(
+            f"{execution.mode.lower()} entry generated | sizing={sizing_source} "
+            f"| adaptive_multiplier={float(adaptive_sizing.get('multiplier') or 1.0):.4f}"
+        ),
     )
 
     entry_status = _entry_success_signal_status(execution)
@@ -866,4 +905,5 @@ def process_signal(signal: LeaderSignal) -> dict:
         "suggested_amount_usd": executed_amount_usd,
         "preview_order": execution.raw_response,
         "execution": asdict(execution),
+        "adaptive_sizing": adaptive_sizing,
     }

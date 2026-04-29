@@ -172,6 +172,19 @@ allow_notional_fallback = false
 allow_budget_fallback = false
 max_leader_trade_budget_fraction = 0.25
 
+[adaptive_sizing]
+enabled = true
+lookback_hours = 24.0
+target_budget_turnover = 0.85
+min_buy_signals_for_history = 5
+min_historical_multiplier = 0.20
+max_historical_multiplier = 1.0
+utilization_throttle_start = 0.60
+utilization_throttle_full = 0.90
+min_utilization_multiplier = 0.25
+min_multiplier = 0.10
+max_multiplier = 1.0
+
 [signal_freshness]
 preferred_signal_age_sec = 30
 max_buy_signal_age_sec = 600
