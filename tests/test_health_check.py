@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 
-from execution.health_check import build_executor_health_report
+from execution.health_check import build_executor_health_report, _processing_age_counts
 
 
 class ExecutorHealthCheckTests(unittest.TestCase):
@@ -30,25 +31,56 @@ class ExecutorHealthCheckTests(unittest.TestCase):
         self.assertEqual(report["health_status"], "BLOCKED")
         self.assertIn("live trading ack is missing or invalid", report["blockers"])
 
-    def test_stuck_processing_is_warning(self) -> None:
-        report = build_executor_health_report(
-            config={"global": {"simulation": True, "preview_mode": True}},
-            env_health={"env_ok": False},
-            open_position_rows=[],
-            processed_signal_rows=[
+    def test_recent_processing_is_not_health_warning(self) -> None:
+        slow, stuck = _processing_age_counts(
+            [
                 {
                     "signal_id": "sig1",
-                    "leader_wallet": "wallet1",
-                    "token_id": "tokenA",
                     "status": "PROCESSING",
+                    "created_at": "2026-04-18 09:59:30",
                 }
             ],
-            order_attempt_rows=[],
-            trade_history_rows=[],
+            warning_minutes=2.0,
+            critical_minutes=10.0,
+            now=datetime(2026, 4, 18, 10, 0, tzinfo=timezone.utc),
         )
 
-        self.assertEqual(report["health_status"], "WARN")
-        self.assertEqual(report["state"]["processed_status_counts"]["PROCESSING"], 1)
+        self.assertEqual(slow, 0)
+        self.assertEqual(stuck, 0)
+
+    def test_slow_processing_is_warning(self) -> None:
+        slow, stuck = _processing_age_counts(
+            [
+                {
+                    "signal_id": "sig1",
+                    "status": "PROCESSING",
+                    "created_at": "2026-04-18 09:55:00",
+                }
+            ],
+            warning_minutes=2.0,
+            critical_minutes=10.0,
+            now=datetime(2026, 4, 18, 10, 0, tzinfo=timezone.utc),
+        )
+
+        self.assertEqual(slow, 1)
+        self.assertEqual(stuck, 0)
+
+    def test_stuck_processing_is_blocker(self) -> None:
+        slow, stuck = _processing_age_counts(
+            [
+                {
+                    "signal_id": "sig1",
+                    "status": "PROCESSING",
+                    "created_at": "2026-04-18 09:45:00",
+                }
+            ],
+            warning_minutes=2.0,
+            critical_minutes=10.0,
+            now=datetime(2026, 4, 18, 10, 0, tzinfo=timezone.utc),
+        )
+
+        self.assertEqual(slow, 0)
+        self.assertEqual(stuck, 1)
 
     def test_filled_signal_without_attempt_is_warning(self) -> None:
         report = build_executor_health_report(

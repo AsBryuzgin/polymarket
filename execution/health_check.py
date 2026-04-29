@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -33,6 +34,62 @@ def _bool_or_default(value: Any, default: bool) -> bool:
     return bool(value)
 
 
+def _safe_float(value: Any, default: float) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _parse_timestamp(value: Any) -> datetime | None:
+    if not value:
+        return None
+    if isinstance(value, datetime):
+        dt = value
+    else:
+        text = str(value).strip()
+        if not text:
+            return None
+        try:
+            dt = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        except ValueError:
+            try:
+                dt = datetime.strptime(text, "%Y-%m-%d %H:%M:%S")
+            except ValueError:
+                return None
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+def _row_age_minutes(row: dict[str, Any], *, now: datetime) -> float | None:
+    for key in ("updated_at", "created_at", "event_time", "observed_at"):
+        dt = _parse_timestamp(row.get(key))
+        if dt is not None:
+            return max((now - dt).total_seconds() / 60.0, 0.0)
+    return None
+
+
+def _processing_age_counts(
+    rows: list[dict[str, Any]],
+    *,
+    warning_minutes: float,
+    critical_minutes: float,
+    now: datetime,
+) -> tuple[int, int]:
+    warning_count = 0
+    critical_count = 0
+    for row in rows:
+        if str(row.get("status") or "") != "PROCESSING":
+            continue
+        age_minutes = _row_age_minutes(row, now=now)
+        if age_minutes is None or age_minutes >= critical_minutes:
+            critical_count += 1
+        elif age_minutes >= warning_minutes:
+            warning_count += 1
+    return warning_count, critical_count
+
+
 def build_executor_health_report(
     *,
     config: dict[str, Any],
@@ -51,6 +108,16 @@ def build_executor_health_report(
         state_db_path=Path(state_db_path) if state_db_path else state_store.DB_PATH,
     )
     runtime_lock = read_runtime_lock(config)
+    alert_cfg = config.get("alerts", {})
+    processing_warning_minutes = _safe_float(
+        alert_cfg.get("processing_warning_minutes"),
+        2.0,
+    )
+    processing_critical_minutes = _safe_float(
+        alert_cfg.get("processing_critical_minutes"),
+        10.0,
+    )
+    now = datetime.now(timezone.utc)
 
     live_enabled = _bool_or_default(global_cfg.get("live_trading_enabled"), False)
     live_ack = str(global_cfg.get("live_trading_ack", ""))
@@ -115,8 +182,22 @@ def build_executor_health_report(
             if not funding_probe.allowed:
                 blockers.append(f"live funding preflight failed: {funding_probe.reason}")
 
-    if reconciliation.summary.get("stuck_processing_signals", 0) > 0:
-        warnings.append("processed_signals contains stuck PROCESSING rows")
+    slow_processing, stuck_processing = _processing_age_counts(
+        processed_signal_rows,
+        warning_minutes=processing_warning_minutes,
+        critical_minutes=processing_critical_minutes,
+        now=now,
+    )
+    if stuck_processing > 0:
+        blockers.append(
+            f"processed_signals contains {stuck_processing} PROCESSING row(s) older than "
+            f"{processing_critical_minutes:g}m"
+        )
+    elif slow_processing > 0:
+        warnings.append(
+            f"processed_signals contains {slow_processing} PROCESSING row(s) older than "
+            f"{processing_warning_minutes:g}m"
+        )
     if reconciliation.summary.get("nonfinal_order_attempts", 0) > 0:
         warnings.append("order_attempts contains non-final rows")
     if reconciliation.summary.get("position_mismatches", 0) > 0:
