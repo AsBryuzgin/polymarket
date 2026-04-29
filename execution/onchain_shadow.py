@@ -15,7 +15,8 @@ from execution.state_store import get_connection, list_leader_registry
 
 
 ORDER_MATCHED_SIGNATURE = (
-    "OrdersMatched(bytes32,address,uint256,uint256,uint256,uint256)"
+    # CLOB v2 emits taker-only fills as OrdersMatched(takerOrderHash, takerOrderMaker, ...).
+    "OrdersMatched(bytes32,address,uint8,uint256,uint256,uint256)"
 )
 ORDER_MATCHED_TOPIC = "0x" + keccak(text=ORDER_MATCHED_SIGNATURE).hex()
 
@@ -290,24 +291,30 @@ def _decode_orders_matched_log(log: dict[str, Any], *, decimals: int = 6) -> Dec
     leader_wallet = _address_from_topic(str(topics[2]))
     data = bytes.fromhex(_strip_0x(str(log.get("data") or "0x")))
     try:
-        maker_asset_id, taker_asset_id, maker_amount_filled, taker_amount_filled = decode(
-            ["uint256", "uint256", "uint256", "uint256"],
+        side_raw, token_id_raw, maker_amount_filled, taker_amount_filled = decode(
+            ["uint8", "uint256", "uint256", "uint256"],
             data,
         )
     except Exception:
         return None
 
     scale = 10 ** int(decimals)
-    if int(maker_asset_id) == 0 and int(taker_asset_id) > 0:
+    side_int = int(side_raw)
+    token_id_int = int(token_id_raw)
+    if side_int == 0 and token_id_int > 0:
         side = "BUY"
-        token_id = str(int(taker_asset_id))
+        token_id = str(token_id_int)
         notional_usd = int(maker_amount_filled) / scale
         size = int(taker_amount_filled) / scale
-    elif int(taker_asset_id) == 0 and int(maker_asset_id) > 0:
+        maker_asset_id = 0
+        taker_asset_id = token_id_int
+    elif side_int == 1 and token_id_int > 0:
         side = "SELL"
-        token_id = str(int(maker_asset_id))
+        token_id = str(token_id_int)
         notional_usd = int(taker_amount_filled) / scale
         size = int(maker_amount_filled) / scale
+        maker_asset_id = token_id_int
+        taker_asset_id = 0
     else:
         return None
 

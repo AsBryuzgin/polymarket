@@ -19,6 +19,12 @@ def _topic_address(address: str) -> str:
 
 
 class OnchainShadowTests(unittest.TestCase):
+    def test_uses_clob_v2_orders_matched_topic(self) -> None:
+        self.assertEqual(
+            ORDER_MATCHED_TOPIC,
+            "0x174b3811690657c217184f89418266767c87e4805d09680c39fc9c031c0cab7c",
+        )
+
     def test_decodes_buy_orders_matched_log(self) -> None:
         leader = "0x1234567890abcdef1234567890abcdef12345678"
         token_id = 12345
@@ -30,7 +36,7 @@ class OnchainShadowTests(unittest.TestCase):
             ],
             "data": "0x"
             + encode(
-                ["uint256", "uint256", "uint256", "uint256"],
+                ["uint8", "uint256", "uint256", "uint256"],
                 [0, token_id, 2_000_000, 4_000_000],
             ).hex(),
         }
@@ -56,8 +62,8 @@ class OnchainShadowTests(unittest.TestCase):
             ],
             "data": "0x"
             + encode(
-                ["uint256", "uint256", "uint256", "uint256"],
-                [token_id, 0, 3_000_000, 750_000],
+                ["uint8", "uint256", "uint256", "uint256"],
+                [1, token_id, 3_000_000, 750_000],
             ).hex(),
         }
 
