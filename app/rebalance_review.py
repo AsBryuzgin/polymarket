@@ -31,7 +31,7 @@ FINAL_ALLOCATION_FILE = SHORTLIST_DIR / "final_portfolio_allocation.csv"
 LIVE_FILE = SHORTLIST_DIR / "live_portfolio_allocation.csv"
 REPORT_FILE = SHORTLIST_DIR / "live_rebalance_report.csv"
 STATE_FILE = Path("data/rebalance_state.json")
-SCORING_VERSION = "wss_v2_hard_gates_2026_04_29"
+SCORING_VERSION = "wss_v2_hard_gates_mentions_2026_04_29"
 
 REVIEW_COLUMNS = [
     "category",
