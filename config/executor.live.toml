@@ -148,7 +148,7 @@ require_isolated_db = true
 [reconciliation]
 fetch_exchange_positions = true
 fetch_exchange_open_orders = true
-position_qty_tolerance = 0.000001
+position_qty_tolerance = 0.0001
 
 [filters]
 buy_min_price = 0.05
