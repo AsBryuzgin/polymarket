@@ -78,7 +78,11 @@ def resolve_allocation_caps(
 def load_csv(path: Path) -> list[dict]:
     with path.open("r", encoding="utf-8", newline="") as f:
         reader = csv.DictReader(f)
-        rows = list(reader)
+        rows = [
+            row
+            for row in reader
+            if str(row.get("eligible", "true")).strip().lower() == "true"
+        ]
 
     for row in rows:
         row["final_wss"] = float(row["final_wss"])
@@ -201,6 +205,8 @@ def save_csv(rows: list[dict], path: Path) -> None:
         "median_spread",
         "slippage_proxy",
         "current_position_pnl_ratio",
+        "total_pnl_ratio",
+        "open_loss_exposure",
         "roi_7",
         "roi_30",
     ]
@@ -243,6 +249,8 @@ def save_csv(rows: list[dict], path: Path) -> None:
                     "median_spread": row.get("median_spread", ""),
                     "slippage_proxy": row.get("slippage_proxy", ""),
                     "current_position_pnl_ratio": row.get("current_position_pnl_ratio", ""),
+                    "total_pnl_ratio": row.get("total_pnl_ratio", ""),
+                    "open_loss_exposure": row.get("open_loss_exposure", ""),
                     "roi_7": row.get("roi_7", ""),
                     "roi_30": row.get("roi_30", ""),
                 }

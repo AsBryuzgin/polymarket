@@ -57,6 +57,8 @@ class WalletMetrics:
     largest_win_share: float
     roi_7: float = 0.0
     current_position_pnl_ratio: float = 0.0
+    total_pnl_ratio: float = 0.0
+    open_loss_exposure: float = 0.0
     trades_30d: int = 0
     trades_90d: int = 0
     buy_trades_30d: int = 0
@@ -134,17 +136,23 @@ def check_wallet_filters(
 
 
 def consistency_score(metrics: WalletMetrics) -> float:
-    pwr = (
+    realized_positive_windows = (
         0.1 * float(metrics.roi_7 > 0)
         + 0.2 * float(metrics.roi_30 > 0)
         + 0.3 * float(metrics.roi_90 > 0)
         + 0.4 * float(metrics.roi_180 > 0)
     )
+    total_pnl_score = clip01((metrics.total_pnl_ratio + 0.02) / 0.14)
     rs = 1.0 - clip01(
         safe_std([metrics.roi_7, metrics.roi_30, metrics.roi_90, metrics.roi_180]) / 0.15
     )
     mc = clip01((safe_median(metrics.monthly_roi_last_6) + 0.02) / 0.07)
-    return 100.0 * (0.50 * pwr + 0.30 * rs + 0.20 * mc)
+    return 100.0 * (
+        0.40 * realized_positive_windows
+        + 0.20 * total_pnl_score
+        + 0.25 * rs
+        + 0.15 * mc
+    )
 
 
 def drawdown_control_score(metrics: WalletMetrics) -> float:
@@ -152,7 +160,15 @@ def drawdown_control_score(metrics: WalletMetrics) -> float:
     ls_score = 1.0 - clip01(metrics.longest_loss_streak / 6.0)
     dv_std = safe_std(metrics.negative_monthly_roi_last_12)
     dv_score = 1.0 - clip01(dv_std / 0.10)
-    return 100.0 * (0.50 * mdd_score + 0.30 * ls_score + 0.20 * dv_score)
+    open_pnl_score = clip01((metrics.current_position_pnl_ratio + 0.10) / 0.20)
+    open_loss_score = 1.0 - clip01(metrics.open_loss_exposure / 0.75)
+    return 100.0 * (
+        0.40 * mdd_score
+        + 0.25 * ls_score
+        + 0.15 * dv_score
+        + 0.10 * open_pnl_score
+        + 0.10 * open_loss_score
+    )
 
 
 def specialization_score(metrics: WalletMetrics) -> float:
@@ -196,9 +212,15 @@ def activity_score(metrics: WalletMetrics) -> float:
 
 def return_quality_score(metrics: WalletMetrics) -> float:
     roi_180_score = clip01(metrics.roi_180 / 0.25)
+    total_pnl_score = clip01(metrics.total_pnl_ratio / 0.25)
     pf_score = clip01(metrics.profit_factor / 2.5)
     lw_score = 1.0 - clip01(metrics.largest_win_share / 0.40)
-    return 100.0 * (0.40 * roi_180_score + 0.30 * pf_score + 0.30 * lw_score)
+    return 100.0 * (
+        0.25 * roi_180_score
+        + 0.25 * total_pnl_score
+        + 0.25 * pf_score
+        + 0.25 * lw_score
+    )
 
 
 def track_record_multiplier(metrics: WalletMetrics) -> float:

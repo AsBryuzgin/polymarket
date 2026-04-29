@@ -12,7 +12,7 @@ OUTPUT_FILE = SHORTLIST_DIR / "final_portfolio_candidates.csv"
 
 CORE_QUOTA_PER_CATEGORY = 2
 EXPERIMENTAL_QUOTA_PER_CATEGORY = 1
-MIN_WSS = 60.0
+MIN_WSS = 55.0
 EPS = 1e-9
 
 
@@ -118,6 +118,8 @@ def save_csv(rows: list[dict], path: Path) -> None:
         "median_liquidity",
         "slippage_proxy",
         "current_position_pnl_ratio",
+        "total_pnl_ratio",
+        "open_loss_exposure",
         "roi_7",
         "roi_30",
         "trades_30d",

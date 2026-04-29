@@ -1,11 +1,133 @@
 import unittest
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
-from signals.wallet_metrics_builder import build_wallet_metrics, _current_position_pnl_ratio
+from signals.wallet_metrics_builder import (
+    build_wallet_metrics,
+    _current_position_pnl_ratio,
+    _primary_domain_stats,
+    _profit_factor,
+    _single_market_concentration,
+    _total_pnl_ratio,
+)
 from signals.wallet_scoring import WalletMetrics, score_wallet
 
 
 class TestWalletScoring(unittest.TestCase):
+    def test_profit_factor_caps_wallets_with_no_losses(self) -> None:
+        self.assertEqual(
+            _profit_factor(
+                [
+                    {"realizedPnl": 10.0},
+                    {"realizedPnl": 20.0},
+                ]
+            ),
+            3.0,
+        )
+        self.assertEqual(_profit_factor([{"realizedPnl": 0.0}]), 0.0)
+
+    def test_concentration_uses_notional_not_record_count(self) -> None:
+        current_positions = [
+            {
+                "slug": "nba-finals",
+                "initialValue": 900.0,
+                "currentValue": 910.0,
+                "cashPnl": 10.0,
+            }
+        ]
+        small_macro_trades = [
+            {
+                "slug": f"cpi-print-{idx}",
+                "size": 1.0,
+                "price": 1.0,
+            }
+            for idx in range(9)
+        ]
+
+        primary_domain, primary_share = _primary_domain_stats(
+            current_positions=current_positions,
+            closed_positions=[],
+            trades=small_macro_trades,
+        )
+        market_concentration = _single_market_concentration(
+            current_positions=current_positions,
+            closed_positions=[],
+            trades=small_macro_trades,
+        )
+
+        self.assertEqual(primary_domain, "sports")
+        self.assertGreater(primary_share, 0.98)
+        self.assertGreater(market_concentration, 0.98)
+
+    def test_total_pnl_ratio_includes_current_open_positions(self) -> None:
+        now = datetime.now(timezone.utc)
+        ratio = _total_pnl_ratio(
+            closed_positions=[
+                {
+                    "timestamp": int((now - timedelta(days=2)).timestamp()),
+                    "realizedPnl": 20.0,
+                    "totalBought": 100.0,
+                }
+            ],
+            current_positions=[
+                {
+                    "initialValue": 100.0,
+                    "cashPnl": -30.0,
+                    "redeemable": False,
+                }
+            ],
+            now=now,
+        )
+
+        self.assertEqual(ratio, -0.05)
+
+    def test_open_losses_reduce_wss_before_hard_filter_threshold(self) -> None:
+        base = dict(
+            age_days=500,
+            closed_positions=160,
+            unique_markets=45,
+            primary_domain_share=0.60,
+            single_market_concentration=0.20,
+            roi_7=0.02,
+            roi_30=0.05,
+            roi_90=0.10,
+            roi_180=0.18,
+            monthly_roi_last_6=[0.03, 0.02, 0.04, 0.01, 0.03, 0.02],
+            negative_monthly_roi_last_12=[-0.01, -0.015],
+            primary_domain_roi_30=0.04,
+            primary_domain_roi_90=0.11,
+            primary_domain_roi_180=0.19,
+            max_drawdown=0.07,
+            longest_loss_streak=2,
+            median_spread=0.01,
+            median_liquidity=22000,
+            slippage_proxy=0.005,
+            delay_sec=40,
+            profit_factor=1.8,
+            largest_win_share=0.20,
+            trades_30d=40,
+            trades_90d=80,
+            days_since_last_trade=2,
+        )
+        clean = WalletMetrics(
+            **base,
+            current_position_pnl_ratio=0.02,
+            total_pnl_ratio=0.10,
+            open_loss_exposure=0.0,
+        )
+        hidden_loss = WalletMetrics(
+            **base,
+            current_position_pnl_ratio=-0.09,
+            total_pnl_ratio=-0.02,
+            open_loss_exposure=1.0,
+        )
+
+        clean_result = score_wallet(clean)
+        hidden_loss_result = score_wallet(hidden_loss)
+
+        self.assertTrue(clean_result.eligible)
+        self.assertTrue(hidden_loss_result.eligible)
+        self.assertLess(hidden_loss_result.final_wss, clean_result.final_wss)
+
     def test_stable_wallet_scores_higher(self) -> None:
         stable = WalletMetrics(
             age_days=500,

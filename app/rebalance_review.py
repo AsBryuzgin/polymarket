@@ -31,7 +31,7 @@ FINAL_ALLOCATION_FILE = SHORTLIST_DIR / "final_portfolio_allocation.csv"
 LIVE_FILE = SHORTLIST_DIR / "live_portfolio_allocation.csv"
 REPORT_FILE = SHORTLIST_DIR / "live_rebalance_report.csv"
 STATE_FILE = Path("data/rebalance_state.json")
-SCORING_VERSION = "wss_v2_hard_gates_mentions_2026_04_29"
+SCORING_VERSION = "wss_v3_open_pnl_2026_04_29"
 
 REVIEW_COLUMNS = [
     "category",
@@ -60,6 +60,8 @@ REVIEW_COLUMNS = [
     "data_depth_multiplier",
     "activity_score",
     "current_position_pnl_ratio",
+    "total_pnl_ratio",
+    "open_loss_exposure",
     "roi_7",
     "roi_30",
     "trades_30d",
@@ -86,6 +88,8 @@ REQUIRED_SCORING_COLUMNS = [
     "data_depth_multiplier",
     "activity_score",
     "current_position_pnl_ratio",
+    "total_pnl_ratio",
+    "open_loss_exposure",
     "roi_7",
     "roi_30",
     "trades_30d",
@@ -284,11 +288,11 @@ def _review_rows_with_formulas(rows: list[dict[str, Any]]) -> list[list[Any]]:
 def write_review_xlsx(rows: list[dict[str, Any]], path: Path) -> None:
     formula_rows = [
         ["metric", "weight", "meaning"],
-        ["consistency_score", 0.35, "ROI sign, ROI stability, median monthly ROI"],
-        ["drawdown_score", 0.25, "max drawdown, losing streak, downside volatility"],
+        ["consistency_score", 0.35, "realized ROI signs/stability plus total PnL including current open positions"],
+        ["drawdown_score", 0.25, "closed-position drawdown proxy plus current open PnL and losing open exposure"],
         ["specialization_score", 0.20, "domain focus and single-market concentration penalty"],
         ["copyability_score", 0.10, "spread, liquidity, slippage proxy, delay"],
-        ["return_quality_score", 0.10, "ROI 180, profit factor, largest-win dependency"],
+        ["return_quality_score", 0.10, "ROI 180, total PnL, capped profit factor, largest-win dependency"],
         ["raw_wss", "weighted strategy quality score", "does not include track-record confidence haircut"],
         [
             "final_wss",
@@ -312,7 +316,7 @@ def write_review_xlsx(rows: list[dict[str, Any]], path: Path) -> None:
         ],
         [
             "hard gates",
-            "age>=120, closed>=40, unique>=15, concentration<=35%, open_pnl>=-10%, trades30>=30, last_trade<=5d, copyability>=60, positive week/month PnL, copy-flow buy presence",
+            "age>=120, closed>=40, unique>=15, notional concentration<=35%, open_pnl>=-10%, trades30>=30, last_trade<=5d, copyability>=60, positive week/month PnL, copy-flow buy presence",
             "",
         ],
     ]
@@ -527,6 +531,8 @@ def _live_fieldnames(rows: list[dict[str, Any]]) -> list[str]:
         "median_spread",
         "slippage_proxy",
         "current_position_pnl_ratio",
+        "total_pnl_ratio",
+        "open_loss_exposure",
         "roi_7",
         "roi_30",
         "copyability_score_raw",
@@ -609,7 +615,8 @@ def list_manual_candidates(category: str, *, limit: int = 10) -> str:
             f"copy {row.get('copyability_score')} | "
             f"rank {row.get('rank')} | last {row.get('days_since_last_trade')}d | "
             f"flow BUY/SELL {row.get('buy_trades_30d', '')}/{row.get('sell_trades_30d', '')} | "
-            f"openPnL {row.get('current_position_pnl_ratio')}"
+            f"openPnL {row.get('current_position_pnl_ratio')} | "
+            f"totalPnL {row.get('total_pnl_ratio')}"
         )
     lines.append("")
     lines.append(f"Чтобы выбрать: pick {category.upper()} 1")

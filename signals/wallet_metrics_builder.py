@@ -1,12 +1,14 @@
 from __future__ import annotations
 
-from collections import Counter, defaultdict
+from collections import defaultdict
 from dataclasses import asdict
 from datetime import datetime, timezone, timedelta
 from typing import Any
 
 from signals.domain_classifier import classify_domain
 from signals.wallet_scoring import WalletMetrics
+
+PROFIT_FACTOR_CAP = 3.0
 
 
 def _parse_iso_dt(value: str | None) -> datetime | None:
@@ -156,7 +158,7 @@ def _profit_factor(closed_positions: list[dict[str, Any]]) -> float:
             gross_loss += abs(pnl)
 
     if gross_loss == 0:
-        return gross_profit if gross_profit > 0 else 0.0
+        return PROFIT_FACTOR_CAP if gross_profit > 0 else 0.0
 
     return gross_profit / gross_loss
 
@@ -210,18 +212,18 @@ def _primary_domain_stats(
     closed_positions: list[dict[str, Any]],
     trades: list[dict[str, Any]],
 ) -> tuple[str, float]:
-    domain_counter: Counter[str] = Counter()
+    domain_counter: defaultdict[str, float] = defaultdict(float)
     all_items = list(current_positions) + list(closed_positions) + list(trades)
 
     for item in all_items:
-        domain_counter[_item_domain(item)] += 1
+        domain_counter[_item_domain(item)] += _item_notional_weight(item)
 
     total = sum(domain_counter.values())
     if total == 0:
         return "other", 0.0
 
-    primary_domain, count = domain_counter.most_common(1)[0]
-    return primary_domain, count / total
+    primary_domain, weight = max(domain_counter.items(), key=lambda item: item[1])
+    return primary_domain, weight / total
 
 
 def _single_market_concentration(
@@ -229,19 +231,32 @@ def _single_market_concentration(
     closed_positions: list[dict[str, Any]],
     trades: list[dict[str, Any]],
 ) -> float:
-    market_counter: Counter[str] = Counter()
+    market_counter: defaultdict[str, float] = defaultdict(float)
     all_items = list(current_positions) + list(closed_positions) + list(trades)
 
     for item in all_items:
         key = _market_key(item)
         if key:
-            market_counter[key] += 1
+            market_counter[key] += _item_notional_weight(item)
 
     total = sum(market_counter.values())
     if total == 0:
         return 1.0
 
-    return market_counter.most_common(1)[0][1] / total
+    return max(market_counter.values()) / total
+
+
+def _item_notional_weight(item: dict[str, Any]) -> float:
+    size = abs(_safe_float(item.get("size")))
+    price = abs(_safe_float(item.get("price")))
+    trade_notional = size * price if size > 0 and price > 0 else 0.0
+    return max(
+        abs(_safe_float(item.get("currentValue"))),
+        abs(_safe_float(item.get("initialValue"))),
+        abs(_safe_float(item.get("totalBought"))),
+        trade_notional,
+        1.0,
+    )
 
 
 def _infer_unique_markets(
@@ -278,6 +293,70 @@ def _current_position_pnl_ratio(current_positions: list[dict[str, Any]]) -> floa
             continue
         exposure += initial_value
         pnl += cash_pnl
+
+    if exposure <= 0:
+        return 0.0
+
+    return pnl / exposure
+
+
+def _current_position_pnl_stats(current_positions: list[dict[str, Any]]) -> tuple[float, float, float]:
+    exposure = 0.0
+    pnl = 0.0
+    losing_exposure = 0.0
+
+    for item in current_positions:
+        if item.get("redeemable"):
+            continue
+        initial_value = abs(_safe_float(item.get("initialValue")))
+        cash_pnl = _safe_float(item.get("cashPnl"))
+        if initial_value <= 0:
+            current_value = abs(_safe_float(item.get("currentValue")))
+            total_bought = abs(_safe_float(item.get("totalBought")))
+            initial_value = max(current_value, total_bought)
+        if initial_value <= 0:
+            continue
+        exposure += initial_value
+        pnl += cash_pnl
+        if cash_pnl < 0:
+            losing_exposure += initial_value
+
+    if exposure <= 0:
+        return 0.0, 0.0, 0.0
+
+    return pnl / exposure, losing_exposure / exposure, exposure
+
+
+def _total_pnl_ratio(
+    closed_positions: list[dict[str, Any]],
+    current_positions: list[dict[str, Any]],
+    now: datetime,
+    days: int = 180,
+) -> float:
+    cutoff = now - timedelta(days=days)
+    pnl = 0.0
+    exposure = 0.0
+
+    for item in closed_positions:
+        ts = _parse_unix_ts(item.get("timestamp"))
+        if ts is None or ts < cutoff:
+            continue
+        pnl += _safe_float(item.get("realizedPnl"))
+        exposure += abs(_safe_float(item.get("totalBought")))
+
+    for item in current_positions:
+        if item.get("redeemable"):
+            continue
+        initial_value = abs(_safe_float(item.get("initialValue")))
+        if initial_value <= 0:
+            initial_value = max(
+                abs(_safe_float(item.get("currentValue"))),
+                abs(_safe_float(item.get("totalBought"))),
+            )
+        if initial_value <= 0:
+            continue
+        exposure += initial_value
+        pnl += _safe_float(item.get("cashPnl"))
 
     if exposure <= 0:
         return 0.0
@@ -363,6 +442,9 @@ def build_wallet_metrics(
         buy_trade_share_30d,
         days_since_last_trade,
     ) = _activity_stats(trades, now)
+    current_position_pnl_ratio, open_loss_exposure, _open_exposure = _current_position_pnl_stats(
+        current_positions
+    )
 
     return WalletMetrics(
         age_days=age_days,
@@ -396,7 +478,14 @@ def build_wallet_metrics(
         delay_sec=delay_sec,
         profit_factor=_profit_factor(closed_positions),
         largest_win_share=_largest_win_share(closed_positions),
-        current_position_pnl_ratio=_current_position_pnl_ratio(current_positions),
+        current_position_pnl_ratio=current_position_pnl_ratio,
+        total_pnl_ratio=_total_pnl_ratio(
+            closed_positions=closed_positions,
+            current_positions=current_positions,
+            now=now,
+            days=180,
+        ),
+        open_loss_exposure=open_loss_exposure,
         trades_30d=trades_30d,
         trades_90d=trades_90d,
         buy_trades_30d=buy_trades_30d,

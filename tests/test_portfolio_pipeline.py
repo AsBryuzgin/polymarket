@@ -9,6 +9,7 @@ from app.final_portfolio_candidates_demo import (
     deduplicate_wallets,
     save_csv as save_candidates_csv,
 )
+from app.portfolio_allocation_demo import load_csv as load_allocation_csv
 
 
 class PortfolioPipelineTests(unittest.TestCase):
@@ -35,6 +36,8 @@ class PortfolioPipelineTests(unittest.TestCase):
                         "median_liquidity": 10000.0,
                         "slippage_proxy": 0.005,
                         "current_position_pnl_ratio": 0.10,
+                        "total_pnl_ratio": 0.08,
+                        "open_loss_exposure": 0.20,
                         "trades_30d": 12,
                         "trades_90d": 30,
                         "days_since_last_trade": 1,
@@ -50,6 +53,53 @@ class PortfolioPipelineTests(unittest.TestCase):
         self.assertEqual(rows[0]["activity_score"], "100.0")
         self.assertEqual(rows[0]["trades_30d"], "12")
         self.assertEqual(rows[0]["current_position_pnl_ratio"], "0.1")
+        self.assertEqual(rows[0]["total_pnl_ratio"], "0.08")
+        self.assertEqual(rows[0]["open_loss_exposure"], "0.2")
+
+    def test_allocation_loader_defensively_filters_ineligible_rows(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "final_portfolio_candidates.csv"
+            with path.open("w", encoding="utf-8", newline="") as f:
+                writer = csv.DictWriter(
+                    f,
+                    fieldnames=[
+                        "wallet",
+                        "user_name",
+                        "category",
+                        "final_wss",
+                        "leaderboard_pnl",
+                        "leaderboard_volume",
+                        "eligible",
+                    ],
+                )
+                writer.writeheader()
+                writer.writerows(
+                    [
+                        {
+                            "wallet": "eligible-wallet",
+                            "user_name": "Good",
+                            "category": "FINANCE",
+                            "final_wss": "70",
+                            "leaderboard_pnl": "100",
+                            "leaderboard_volume": "1000",
+                            "eligible": "True",
+                        },
+                        {
+                            "wallet": "ineligible-wallet",
+                            "user_name": "Bad",
+                            "category": "FINANCE",
+                            "final_wss": "95",
+                            "leaderboard_pnl": "1000",
+                            "leaderboard_volume": "10000",
+                            "eligible": "False",
+                        },
+                    ]
+                )
+
+            rows = load_allocation_csv(path)
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["wallet"], "eligible-wallet")
 
     def test_deduplicate_wallets_prefers_better_rank_when_wss_ties(self) -> None:
         rows = deduplicate_wallets(

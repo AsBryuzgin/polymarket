@@ -123,6 +123,8 @@ def score_wallet_from_category_entry(
         "median_liquidity": median_liquidity,
         "slippage_proxy": slippage_proxy,
         "current_position_pnl_ratio": metrics.current_position_pnl_ratio,
+        "total_pnl_ratio": metrics.total_pnl_ratio,
+        "open_loss_exposure": metrics.open_loss_exposure,
         "roi_7": metrics.roi_7,
         "roi_30": metrics.roi_30,
         "trades_30d": metrics.trades_30d,
@@ -216,6 +218,8 @@ def run_category(
                     "median_liquidity": None,
                     "slippage_proxy": None,
                     "current_position_pnl_ratio": 0.0,
+                    "total_pnl_ratio": 0.0,
+                    "open_loss_exposure": 0.0,
                     "roi_7": 0.0,
                     "roi_30": 0.0,
                     "trades_30d": 0,
@@ -270,6 +274,8 @@ def save_csv(rows: list[dict], path: Path) -> None:
         "median_liquidity",
         "slippage_proxy",
         "current_position_pnl_ratio",
+        "total_pnl_ratio",
+        "open_loss_exposure",
         "roi_7",
         "roi_30",
         "trades_30d",
@@ -303,6 +309,7 @@ def print_top(rows: list[dict], top_n: int = 5) -> None:
             f"spread={row['median_spread']} | "
             f"slip={row['slippage_proxy']} | "
             f"open_pnl={row['current_position_pnl_ratio']} | "
+            f"total_pnl={row.get('total_pnl_ratio')} | "
             f"pnl={round(row['leaderboard_pnl'], 2)} | "
             f"wallet={row['wallet']}"
         )
