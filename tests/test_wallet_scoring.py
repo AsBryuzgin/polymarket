@@ -128,6 +128,82 @@ class TestWalletScoring(unittest.TestCase):
         self.assertTrue(hidden_loss_result.eligible)
         self.assertLess(hidden_loss_result.final_wss, clean_result.final_wss)
 
+    def test_profile_week_and_month_pnl_are_hard_gates_when_available(self) -> None:
+        metrics = WalletMetrics(
+            age_days=500,
+            closed_positions=160,
+            unique_markets=45,
+            primary_domain_share=0.60,
+            single_market_concentration=0.20,
+            roi_7=0.02,
+            roi_30=0.05,
+            roi_90=0.10,
+            roi_180=0.18,
+            monthly_roi_last_6=[0.03, 0.02, 0.04, 0.01, 0.03, 0.02],
+            negative_monthly_roi_last_12=[-0.01, -0.015],
+            primary_domain_roi_30=0.04,
+            primary_domain_roi_90=0.11,
+            primary_domain_roi_180=0.19,
+            max_drawdown=0.07,
+            longest_loss_streak=2,
+            median_spread=0.01,
+            median_liquidity=22000,
+            slippage_proxy=0.005,
+            delay_sec=40,
+            profit_factor=1.8,
+            largest_win_share=0.20,
+            trades_30d=40,
+            trades_90d=80,
+            days_since_last_trade=2,
+            leaderboard_week_pnl=1000.0,
+            leaderboard_month_pnl=5000.0,
+            profile_week_pnl=-1.0,
+            profile_month_pnl=100.0,
+        )
+
+        result = score_wallet(metrics)
+
+        self.assertFalse(result.eligible)
+        self.assertIn("profile_week_pnl <= 0", result.filter_reasons)
+
+    def test_profile_month_pnl_is_hard_gate_when_available(self) -> None:
+        metrics = WalletMetrics(
+            age_days=500,
+            closed_positions=160,
+            unique_markets=45,
+            primary_domain_share=0.60,
+            single_market_concentration=0.20,
+            roi_7=0.02,
+            roi_30=0.05,
+            roi_90=0.10,
+            roi_180=0.18,
+            monthly_roi_last_6=[0.03, 0.02, 0.04, 0.01, 0.03, 0.02],
+            negative_monthly_roi_last_12=[-0.01, -0.015],
+            primary_domain_roi_30=0.04,
+            primary_domain_roi_90=0.11,
+            primary_domain_roi_180=0.19,
+            max_drawdown=0.07,
+            longest_loss_streak=2,
+            median_spread=0.01,
+            median_liquidity=22000,
+            slippage_proxy=0.005,
+            delay_sec=40,
+            profit_factor=1.8,
+            largest_win_share=0.20,
+            trades_30d=40,
+            trades_90d=80,
+            days_since_last_trade=2,
+            leaderboard_week_pnl=1000.0,
+            leaderboard_month_pnl=5000.0,
+            profile_week_pnl=100.0,
+            profile_month_pnl=-1.0,
+        )
+
+        result = score_wallet(metrics)
+
+        self.assertFalse(result.eligible)
+        self.assertIn("profile_month_pnl <= 0", result.filter_reasons)
+
     def test_stable_wallet_scores_higher(self) -> None:
         stable = WalletMetrics(
             age_days=500,

@@ -11,10 +11,12 @@ class WalletProfilesClient:
         self,
         gamma_base_url: str | None = None,
         data_base_url: str | None = None,
+        user_pnl_base_url: str | None = None,
         timeout: int = 20,
     ) -> None:
         self.gamma_base_url = (gamma_base_url or settings.gamma_base_url).rstrip("/")
         self.data_base_url = (data_base_url or settings.data_base_url).rstrip("/")
+        self.user_pnl_base_url = (user_pnl_base_url or settings.user_pnl_base_url).rstrip("/")
         self.timeout = timeout
 
     def _get_gamma(self, path: str, params: dict[str, Any]) -> Any:
@@ -25,6 +27,12 @@ class WalletProfilesClient:
 
     def _get_data(self, path: str, params: dict[str, Any]) -> Any:
         url = f"{self.data_base_url}/{path.lstrip('/')}"
+        response = requests.get(url, params=params, timeout=self.timeout)
+        response.raise_for_status()
+        return response.json()
+
+    def _get_user_pnl(self, path: str, params: dict[str, Any]) -> Any:
+        url = f"{self.user_pnl_base_url}/{path.lstrip('/')}"
         response = requests.get(url, params=params, timeout=self.timeout)
         response.raise_for_status()
         return response.json()
@@ -89,6 +97,37 @@ class WalletProfilesClient:
                 "takerOnly": str(taker_only).lower(),
             },
         )
+
+    def get_user_pnl_history(
+        self,
+        user: str,
+        interval: str = "1w",
+        fidelity: str = "3h",
+    ) -> list[dict[str, Any]]:
+        data = self._get_user_pnl(
+            "/user-pnl",
+            {
+                "user_address": user,
+                "interval": interval,
+                "fidelity": fidelity,
+            },
+        )
+        if not isinstance(data, list):
+            raise ValueError("Unexpected user-pnl response format")
+        return data
+
+    def get_user_pnl_delta(
+        self,
+        user: str,
+        interval: str = "1w",
+        fidelity: str = "3h",
+    ) -> float | None:
+        history = self.get_user_pnl_history(
+            user=user,
+            interval=interval,
+            fidelity=fidelity,
+        )
+        return self.summarize_user_pnl_delta(history)
 
     def paginate_current_positions(
         self,
@@ -183,6 +222,19 @@ class WalletProfilesClient:
     @staticmethod
     def summarize_total_markets_traded(payload: dict[str, Any]) -> int:
         return int(payload.get("traded", 0) or 0)
+
+    @staticmethod
+    def summarize_user_pnl_delta(history: list[dict[str, Any]]) -> float | None:
+        clean = []
+        for item in history:
+            try:
+                clean.append((int(item["t"]), float(item["p"])))
+            except (KeyError, TypeError, ValueError):
+                continue
+        if len(clean) < 2:
+            return None
+        clean.sort(key=lambda item: item[0])
+        return clean[-1][1] - clean[0][1]
 
     @staticmethod
     def _market_key(item: dict[str, Any]) -> str | None:

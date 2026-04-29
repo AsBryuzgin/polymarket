@@ -17,6 +17,12 @@ from signals.shortlist_helpers import (
 )
 
 
+def _require_profile_pnl(value: float | None, label: str) -> float:
+    if value is None:
+        raise RuntimeError(f"{label} unavailable")
+    return value
+
+
 def score_wallet_from_category_entry(
     wallet_client: WalletProfilesClient,
     entry: dict[str, object],
@@ -50,6 +56,10 @@ def score_wallet_from_category_entry(
         current_positions=current_positions,
         trades=trades,
     )
+    profile_week_pnl = wallet_client.get_user_pnl_delta(wallet, interval="1w", fidelity="3h")
+    profile_month_pnl = wallet_client.get_user_pnl_delta(wallet, interval="1m", fidelity="1d")
+    profile_week_pnl = _require_profile_pnl(profile_week_pnl, "profile_week_pnl")
+    profile_month_pnl = _require_profile_pnl(profile_month_pnl, "profile_month_pnl")
 
     metrics = build_wallet_metrics(
         profile=profile,
@@ -61,6 +71,8 @@ def score_wallet_from_category_entry(
         median_liquidity=median_liquidity,
         slippage_proxy=slippage_proxy,
         delay_sec=delay_sec,
+        profile_week_pnl=profile_week_pnl,
+        profile_month_pnl=profile_month_pnl,
     )
 
     score = score_wallet(metrics)
@@ -71,6 +83,8 @@ def score_wallet_from_category_entry(
         "wallet": wallet,
         "leaderboard_pnl": entry["pnl"],
         "leaderboard_volume": entry["volume"],
+        "profile_week_pnl": profile_week_pnl,
+        "profile_month_pnl": profile_month_pnl,
         "eligible": score.eligible,
         "final_wss": score.final_wss,
         "raw_wss": score.raw_wss,
@@ -141,6 +155,8 @@ def main() -> None:
                     "wallet": wallet,
                     "leaderboard_pnl": entry["pnl"],
                     "leaderboard_volume": entry["volume"],
+                    "profile_week_pnl": None,
+                    "profile_month_pnl": None,
                     "eligible": False,
                     "final_wss": -1.0,
                     "raw_wss": -1.0,
@@ -182,6 +198,8 @@ def main() -> None:
             f"eligible={item['eligible']} | "
             f"activity={item['activity_score']} | "
             f"trades30={item['trades_30d']} | "
+            f"profile_week={item.get('profile_week_pnl')} | "
+            f"profile_month={item.get('profile_month_pnl')} | "
             f"buy30={item.get('buy_trades_30d', '')} | "
             f"sell30={item.get('sell_trades_30d', '')} | "
             f"closed_used={item['closed_positions_used']:>4} | "

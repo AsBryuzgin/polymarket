@@ -31,7 +31,7 @@ FINAL_ALLOCATION_FILE = SHORTLIST_DIR / "final_portfolio_allocation.csv"
 LIVE_FILE = SHORTLIST_DIR / "live_portfolio_allocation.csv"
 REPORT_FILE = SHORTLIST_DIR / "live_rebalance_report.csv"
 STATE_FILE = Path("data/rebalance_state.json")
-SCORING_VERSION = "wss_v3_open_pnl_2026_04_29"
+SCORING_VERSION = "wss_v4_profile_pnl_gates_2026_04_29"
 
 REVIEW_COLUMNS = [
     "category",
@@ -42,6 +42,8 @@ REVIEW_COLUMNS = [
     "leaderboard_pnl",
     "leaderboard_week_pnl",
     "leaderboard_month_pnl",
+    "profile_week_pnl",
+    "profile_month_pnl",
     "leaderboard_volume",
     "eligible",
     "filter_reasons",
@@ -104,6 +106,8 @@ REQUIRED_SCORING_COLUMNS = [
     "closed_positions_used",
     "leaderboard_week_pnl",
     "leaderboard_month_pnl",
+    "profile_week_pnl",
+    "profile_month_pnl",
 ]
 
 
@@ -307,7 +311,7 @@ def write_review_xlsx(rows: list[dict[str, Any]], path: Path) -> None:
         [
             "recent PnL gates",
             "gate only; not included in WSS",
-            "leader must have positive week and month signal from leaderboard PnL or closed-position ROI",
+            "leader must have positive profile week and month PnL when profile PnL data is available; otherwise falls back to leaderboard PnL or closed-position ROI",
         ],
         [
             "copy-flow filter",
@@ -519,6 +523,8 @@ def _live_fieldnames(rows: list[dict[str, Any]]) -> list[str]:
         "leaderboard_pnl",
         "leaderboard_week_pnl",
         "leaderboard_month_pnl",
+        "profile_week_pnl",
+        "profile_month_pnl",
         "leaderboard_volume",
         "raw_weight",
         "weight",
@@ -614,6 +620,7 @@ def list_manual_candidates(category: str, *, limit: int = 10) -> str:
             f"{idx}. {row.get('user_name')} | WSS {row.get('final_wss')} | "
             f"copy {row.get('copyability_score')} | "
             f"rank {row.get('rank')} | last {row.get('days_since_last_trade')}d | "
+            f"profile 1W/1M {row.get('profile_week_pnl')}/{row.get('profile_month_pnl')} | "
             f"flow BUY/SELL {row.get('buy_trades_30d', '')}/{row.get('sell_trades_30d', '')} | "
             f"openPnL {row.get('current_position_pnl_ratio')} | "
             f"totalPnL {row.get('total_pnl_ratio')}"

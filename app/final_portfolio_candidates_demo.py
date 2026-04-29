@@ -109,6 +109,8 @@ def save_csv(rows: list[dict], path: Path) -> None:
         "leaderboard_pnl",
         "leaderboard_week_pnl",
         "leaderboard_month_pnl",
+        "profile_week_pnl",
+        "profile_month_pnl",
         "leaderboard_volume",
         "rank",
         "time_period",

@@ -67,6 +67,8 @@ class WalletMetrics:
     days_since_last_trade: int = 9999
     leaderboard_week_pnl: float | None = None
     leaderboard_month_pnl: float | None = None
+    profile_week_pnl: float | None = None
+    profile_month_pnl: float | None = None
     copyability_score_override: float | None = None
 
 
@@ -109,18 +111,27 @@ def check_wallet_filters(
         reasons.append(f"days_since_last_trade > {MAX_DAYS_SINCE_LAST_TRADE:g}")
     if copyability is not None and copyability < MIN_COPYABILITY_SCORE:
         reasons.append(f"copyability_score < {MIN_COPYABILITY_SCORE:g}")
-    week_positive = (
-        (metrics.leaderboard_week_pnl is not None and metrics.leaderboard_week_pnl > 0)
-        or metrics.roi_7 > 0
-    )
-    month_positive = (
-        (metrics.leaderboard_month_pnl is not None and metrics.leaderboard_month_pnl > 0)
-        or metrics.roi_30 > 0
-    )
-    if not week_positive:
-        reasons.append("recent_week_pnl <= 0")
-    if not month_positive:
-        reasons.append("recent_month_pnl <= 0")
+    if metrics.profile_week_pnl is not None:
+        if metrics.profile_week_pnl <= 0:
+            reasons.append("profile_week_pnl <= 0")
+    else:
+        week_positive = (
+            (metrics.leaderboard_week_pnl is not None and metrics.leaderboard_week_pnl > 0)
+            or metrics.roi_7 > 0
+        )
+        if not week_positive:
+            reasons.append("recent_week_pnl <= 0")
+
+    if metrics.profile_month_pnl is not None:
+        if metrics.profile_month_pnl <= 0:
+            reasons.append("profile_month_pnl <= 0")
+    else:
+        month_positive = (
+            (metrics.leaderboard_month_pnl is not None and metrics.leaderboard_month_pnl > 0)
+            or metrics.roi_30 > 0
+        )
+        if not month_positive:
+            reasons.append("recent_month_pnl <= 0")
 
     side_trades_30d = metrics.buy_trades_30d + metrics.sell_trades_30d
     if side_trades_30d > 0 and metrics.sell_trades_30d > 0:

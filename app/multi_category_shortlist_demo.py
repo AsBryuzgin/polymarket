@@ -41,6 +41,12 @@ CANDIDATE_LIMIT = 30
 WEEK_LOOKUP_LIMIT = 250
 
 
+def _require_profile_pnl(value: float | None, label: str) -> float:
+    if value is None:
+        raise RuntimeError(f"{label} unavailable")
+    return value
+
+
 def score_wallet_from_category_entry(
     wallet_client: WalletProfilesClient,
     entry: dict,
@@ -71,6 +77,10 @@ def score_wallet_from_category_entry(
         current_positions=current_positions,
         trades=trades,
     )
+    profile_week_pnl = wallet_client.get_user_pnl_delta(wallet, interval="1w", fidelity="3h")
+    profile_month_pnl = wallet_client.get_user_pnl_delta(wallet, interval="1m", fidelity="1d")
+    profile_week_pnl = _require_profile_pnl(profile_week_pnl, "profile_week_pnl")
+    profile_month_pnl = _require_profile_pnl(profile_month_pnl, "profile_month_pnl")
 
     metrics = build_wallet_metrics(
         profile=profile,
@@ -84,6 +94,8 @@ def score_wallet_from_category_entry(
         delay_sec=delay_sec,
         leaderboard_week_pnl=leaderboard_week_pnl,
         leaderboard_month_pnl=entry["pnl"],
+        profile_week_pnl=profile_week_pnl,
+        profile_month_pnl=profile_month_pnl,
     )
 
     raw_copyability_score = score_wallet(metrics).copyability_score
@@ -104,6 +116,8 @@ def score_wallet_from_category_entry(
         "leaderboard_pnl": entry["pnl"],
         "leaderboard_week_pnl": leaderboard_week_pnl,
         "leaderboard_month_pnl": entry["pnl"],
+        "profile_week_pnl": profile_week_pnl,
+        "profile_month_pnl": profile_month_pnl,
         "leaderboard_volume": entry["volume"],
         "eligible": score.eligible,
         "final_wss": score.final_wss,
@@ -199,6 +213,8 @@ def run_category(
                     "leaderboard_pnl": entry["pnl"],
                     "leaderboard_week_pnl": week_pnl_by_wallet.get(str(wallet).lower()),
                     "leaderboard_month_pnl": entry["pnl"],
+                    "profile_week_pnl": None,
+                    "profile_month_pnl": None,
                     "leaderboard_volume": entry["volume"],
                     "eligible": False,
                     "final_wss": -1.0,
@@ -255,6 +271,8 @@ def save_csv(rows: list[dict], path: Path) -> None:
         "leaderboard_pnl",
         "leaderboard_week_pnl",
         "leaderboard_month_pnl",
+        "profile_week_pnl",
+        "profile_month_pnl",
         "leaderboard_volume",
         "eligible",
         "final_wss",
@@ -304,6 +322,8 @@ def print_top(rows: list[dict], top_n: int = 5) -> None:
             f"trades30={row['trades_30d']} | "
             f"week_pnl={row.get('leaderboard_week_pnl')} | "
             f"month_pnl={round(float(row.get('leaderboard_month_pnl') or row['leaderboard_pnl']), 2)} | "
+            f"profile_week={row.get('profile_week_pnl')} | "
+            f"profile_month={row.get('profile_month_pnl')} | "
             f"buy30={row.get('buy_trades_30d', '')} | "
             f"sell30={row.get('sell_trades_30d', '')} | "
             f"spread={row['median_spread']} | "

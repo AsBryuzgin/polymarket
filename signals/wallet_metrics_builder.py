@@ -422,6 +422,8 @@ def build_wallet_metrics(
     delay_sec: float = 60.0,
     leaderboard_week_pnl: float | None = None,
     leaderboard_month_pnl: float | None = None,
+    profile_week_pnl: float | None = None,
+    profile_month_pnl: float | None = None,
     copyability_score_override: float | None = None,
 ) -> WalletMetrics:
     now = datetime.now(timezone.utc)
@@ -494,6 +496,8 @@ def build_wallet_metrics(
         days_since_last_trade=days_since_last_trade,
         leaderboard_week_pnl=leaderboard_week_pnl,
         leaderboard_month_pnl=leaderboard_month_pnl,
+        profile_week_pnl=profile_week_pnl,
+        profile_month_pnl=profile_month_pnl,
         copyability_score_override=copyability_score_override,
     )
 

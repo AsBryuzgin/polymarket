@@ -6,6 +6,18 @@ from collectors.wallet_profiles import WalletProfilesClient
 
 
 class WalletProfilesClientTests(unittest.TestCase):
+    def test_user_pnl_delta_uses_first_and_last_points_by_time(self) -> None:
+        history = [
+            {"t": 3, "p": 125.0},
+            {"t": 1, "p": 100.0},
+            {"t": 2, "p": 90.0},
+        ]
+
+        self.assertEqual(WalletProfilesClient.summarize_user_pnl_delta(history), 25.0)
+
+    def test_user_pnl_delta_returns_none_for_empty_history(self) -> None:
+        self.assertIsNone(WalletProfilesClient.summarize_user_pnl_delta([]))
+
     def test_paginate_current_positions_passes_sort_options(self) -> None:
         calls: list[dict] = []
 

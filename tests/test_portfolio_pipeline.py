@@ -27,6 +27,10 @@ class PortfolioPipelineTests(unittest.TestCase):
                         "raw_wss": 72.0,
                         "activity_score": 100.0,
                         "leaderboard_pnl": 123.0,
+                        "leaderboard_week_pnl": 12.0,
+                        "leaderboard_month_pnl": 123.0,
+                        "profile_week_pnl": 8.0,
+                        "profile_month_pnl": 22.0,
                         "leaderboard_volume": 456.0,
                         "rank": 1,
                         "time_period": "MONTH",
@@ -55,6 +59,8 @@ class PortfolioPipelineTests(unittest.TestCase):
         self.assertEqual(rows[0]["current_position_pnl_ratio"], "0.1")
         self.assertEqual(rows[0]["total_pnl_ratio"], "0.08")
         self.assertEqual(rows[0]["open_loss_exposure"], "0.2")
+        self.assertEqual(rows[0]["profile_week_pnl"], "8.0")
+        self.assertEqual(rows[0]["profile_month_pnl"], "22.0")
 
     def test_allocation_loader_defensively_filters_ineligible_rows(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
