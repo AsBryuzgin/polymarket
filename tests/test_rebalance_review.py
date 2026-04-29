@@ -246,6 +246,142 @@ class RebalanceReviewTests(unittest.TestCase):
         self.assertEqual(rows[1]["user_name"], "OldFinance")
         self.assertAlmostEqual(sum(float(row["weight"]) for row in rows), 1.0, places=6)
 
+    def test_manual_candidate_list_shows_ineligible_rows(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            all_csv = root / "all.csv"
+            pending_json = root / "pending.json"
+
+            fieldnames = [
+                "category",
+                "rank",
+                "user_name",
+                "wallet",
+                "eligible",
+                "filter_reasons",
+                "final_wss",
+                "copyability_score",
+            ]
+            with all_csv.open("w", encoding="utf-8", newline="") as f:
+                writer = csv.DictWriter(f, fieldnames=fieldnames)
+                writer.writeheader()
+                writer.writerow(
+                    {
+                        "category": "SPORTS",
+                        "rank": "1",
+                        "user_name": "ManualOnly",
+                        "wallet": "manual-wallet",
+                        "eligible": "False",
+                        "filter_reasons": "profile_week_pnl <= 0",
+                        "final_wss": "68",
+                        "copyability_score": "72",
+                    }
+                )
+            pending_json.write_text(
+                json.dumps(
+                    {
+                        "review_id": "test",
+                        "scoring_version": rebalance_review.SCORING_VERSION,
+                        "status": "PENDING",
+                        "manual_overrides": {},
+                        "files": {"all_csv": str(all_csv)},
+                        "proposed_live": [],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with patch.object(rebalance_review, "PENDING_FILE", pending_json):
+                rows = rebalance_review.manual_candidates_for_category("SPORTS")
+                categories = rebalance_review.manual_candidate_categories()
+                text = rebalance_review.list_manual_candidates("SPORTS")
+
+        self.assertEqual(rows[0]["user_name"], "ManualOnly")
+        self.assertIn("SPORTS", categories)
+        self.assertIn("eligible=false", text)
+        self.assertIn("profile_week_pnl <= 0", text)
+
+    def test_manual_replacement_can_choose_ineligible_candidate(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            all_csv = root / "all.csv"
+            live_csv = root / "live.csv"
+            report_csv = root / "report.csv"
+            pending_json = root / "pending.json"
+
+            fieldnames = [
+                "category",
+                "rank",
+                "user_name",
+                "wallet",
+                "eligible",
+                "filter_reasons",
+                "final_wss",
+                "copyability_score",
+            ]
+            with all_csv.open("w", encoding="utf-8", newline="") as f:
+                writer = csv.DictWriter(f, fieldnames=fieldnames)
+                writer.writeheader()
+                writer.writerow(
+                    {
+                        "category": "SPORTS",
+                        "rank": "1",
+                        "user_name": "IneligibleSports",
+                        "wallet": "sports-new",
+                        "eligible": "False",
+                        "filter_reasons": "copyability_score < 60",
+                        "final_wss": "64",
+                        "copyability_score": "55",
+                    }
+                )
+
+            with live_csv.open("w", encoding="utf-8", newline="") as f:
+                writer = csv.DictWriter(
+                    f,
+                    fieldnames=["category", "user_name", "wallet", "eligible", "final_wss", "weight", "raw_weight"],
+                )
+                writer.writeheader()
+                writer.writerow(
+                    {
+                        "category": "POLITICS",
+                        "user_name": "OldPolitics",
+                        "wallet": "politics-wallet",
+                        "eligible": "True",
+                        "final_wss": "70",
+                        "weight": "1.0",
+                        "raw_weight": "1.0",
+                    }
+                )
+
+            review = {
+                "review_id": "test",
+                "scoring_version": rebalance_review.SCORING_VERSION,
+                "status": "PENDING",
+                "manual_overrides": {},
+                "files": {"all_csv": str(all_csv), "live": str(live_csv), "report": str(report_csv)},
+                "proposed_live": [],
+            }
+            pending_json.write_text(json.dumps(review), encoding="utf-8")
+
+            with patch.object(rebalance_review, "PENDING_FILE", pending_json):
+                result = rebalance_review.apply_manual_replacement(
+                    replace_index=1,
+                    candidate_category="SPORTS",
+                    pick_index=1,
+                    review_id="test",
+                )
+
+            with live_csv.open("r", encoding="utf-8") as f:
+                live_rows = list(csv.DictReader(f))
+            with report_csv.open("r", encoding="utf-8") as f:
+                report_rows = list(csv.DictReader(f))
+
+        self.assertEqual(result["chosen"]["user_name"], "IneligibleSports")
+        self.assertEqual(live_rows[0]["user_name"], "IneligibleSports")
+        self.assertEqual(live_rows[0]["eligible"], "False")
+        self.assertIn("manual ineligible override", report_rows[0]["reason"])
+        self.assertIn("copyability_score < 60", report_rows[0]["reason"])
+
     def test_approve_rejects_stale_pending_review_without_components(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

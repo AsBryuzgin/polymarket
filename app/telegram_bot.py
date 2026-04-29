@@ -40,6 +40,8 @@ from app.rebalance_review import (
     approve_pending_review,
     build_review_message,
     create_rebalance_review,
+    format_manual_candidate_button_label,
+    format_manual_candidate_line,
     list_manual_candidates,
     load_pending_review,
     manual_candidate_categories,
@@ -382,10 +384,7 @@ def _rebalance_candidate_markup(
 ) -> dict[str, Any]:
     keyboard: list[list[dict[str, str]]] = []
     for idx, row in enumerate(manual_candidates_for_category(category, limit=limit), start=1):
-        label = (
-            f"{idx}. {row.get('user_name')} | WSS {row.get('final_wss')} | "
-            f"copy {row.get('copyability_score')}"
-        )
+        label = format_manual_candidate_button_label(idx, row)
         keyboard.append(
             [
                 {
@@ -414,7 +413,7 @@ def _build_rebalance_candidate_text(
     target = proposed[replace_index - 1] if 1 <= replace_index <= len(proposed) else {}
     rows = manual_candidates_for_category(category, limit=limit)
     if not rows:
-        return f"Нет eligible кандидатов для {category.upper()}."
+        return f"Нет кандидатов для {category.upper()} в свежем top-30."
     lines = [
         f"Кем заменить {target.get('user_name', 'текущего кандидата')}?",
         f"Категория замены: {category.upper()}",
@@ -422,12 +421,7 @@ def _build_rebalance_candidate_text(
         "Нажми на кандидата:",
     ]
     for idx, row in enumerate(rows, start=1):
-        lines.append(
-            f"{idx}. {row.get('user_name')} | WSS {row.get('final_wss')} | "
-            f"copy {row.get('copyability_score')} | "
-            f"flow BUY/SELL {row.get('buy_trades_30d', '')}/{row.get('sell_trades_30d', '')} | "
-            f"last {row.get('days_since_last_trade')}d"
-        )
+        lines.append(format_manual_candidate_line(idx, row))
     return "\n".join(lines)
 
 

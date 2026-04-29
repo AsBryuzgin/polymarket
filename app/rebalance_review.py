@@ -151,6 +151,52 @@ def _safe_int(value: Any, default: int = 0) -> int:
         return default
 
 
+def _is_eligible(row: dict[str, Any]) -> bool:
+    return str(row.get("eligible") or "").strip().lower() == "true"
+
+
+def _short_text(value: Any, *, limit: int = 120) -> str:
+    text = " ".join(str(value or "").split())
+    if len(text) <= limit:
+        return text
+    return text[: limit - 3].rstrip() + "..."
+
+
+def _manual_selection_reason(row: dict[str, Any], base_reason: str) -> str:
+    if "eligible" not in row or _is_eligible(row):
+        return base_reason
+    filter_reason = _short_text(row.get("filter_reasons"), limit=160)
+    if filter_reason:
+        return f"{base_reason}; manual ineligible override: {filter_reason}"
+    return f"{base_reason}; manual ineligible override"
+
+
+def format_manual_candidate_line(index: int, row: dict[str, Any]) -> str:
+    line = (
+        f"{index}. {row.get('user_name')} | WSS {row.get('final_wss')} | "
+        f"copy {row.get('copyability_score')} | "
+        f"rank {row.get('rank')} | last {row.get('days_since_last_trade')}d | "
+        f"profile 1W/1M {row.get('profile_week_pnl')}/{row.get('profile_month_pnl')} | "
+        f"flow BUY/SELL {row.get('buy_trades_30d', '')}/{row.get('sell_trades_30d', '')} | "
+        f"openPnL {row.get('current_position_pnl_ratio')} | "
+        f"totalPnL {row.get('total_pnl_ratio')}"
+    )
+    if not _is_eligible(row):
+        reason = _short_text(row.get("filter_reasons"), limit=120)
+        line += "\n   eligible=false"
+        if reason:
+            line += f"\n   причина: {reason}"
+    return line
+
+
+def format_manual_candidate_button_label(index: int, row: dict[str, Any]) -> str:
+    suffix = "" if _is_eligible(row) else " | ineligible"
+    return (
+        f"{index}. {row.get('user_name')} | WSS {row.get('final_wss')} | "
+        f"copy {row.get('copyability_score')}{suffix}"
+    )
+
+
 def _column_name(index: int) -> str:
     name = ""
     while index:
@@ -435,9 +481,12 @@ def _summarize_live_rows(rows: list[dict[str, str]]) -> str:
     lines = []
     for idx, row in enumerate(rows, start=1):
         weight = _safe_float(row.get("weight")) * 100.0
+        eligibility = ""
+        if "eligible" in row and not _is_eligible(row):
+            eligibility = " | manual ineligible"
         lines.append(
             f"{idx}. {row.get('user_name')} | {row.get('category')} | "
-            f"WSS {row.get('final_wss')} | {weight:.2f}%"
+            f"WSS {row.get('final_wss')} | {weight:.2f}%{eligibility}"
         )
     return "\n".join(lines)
 
@@ -568,7 +617,6 @@ def _candidate_rows_for_category(review: dict[str, Any], category: str) -> list[
         row
         for row in _read_csv(all_csv)
         if str(row.get("category") or "").upper() == category.upper()
-        and str(row.get("eligible") or "").lower() == "true"
     ]
     rows.sort(key=lambda row: _safe_float(row.get("final_wss")), reverse=True)
     return rows
@@ -588,8 +636,6 @@ def manual_candidate_categories() -> list[str]:
     all_csv = Path(review["files"]["all_csv"])
     best_wss_by_category: dict[str, float] = {}
     for row in _read_csv(all_csv):
-        if str(row.get("eligible") or "").lower() != "true":
-            continue
         category = str(row.get("category") or "").upper()
         if not category:
             continue
@@ -613,19 +659,12 @@ def list_manual_candidates(category: str, *, limit: int = 10) -> str:
         return "Нет pending rebalance review. Сначала отправь Ребаланс."
     rows = _candidate_rows_for_category(review, category)
     if not rows:
-        return f"Нет eligible кандидатов для {category}."
+        return f"Нет кандидатов для {category} в свежем top-30."
     lines = [f"Кандидаты {category.upper()}:"]
     for idx, row in enumerate(rows[:limit], start=1):
-        lines.append(
-            f"{idx}. {row.get('user_name')} | WSS {row.get('final_wss')} | "
-            f"copy {row.get('copyability_score')} | "
-            f"rank {row.get('rank')} | last {row.get('days_since_last_trade')}d | "
-            f"profile 1W/1M {row.get('profile_week_pnl')}/{row.get('profile_month_pnl')} | "
-            f"flow BUY/SELL {row.get('buy_trades_30d', '')}/{row.get('sell_trades_30d', '')} | "
-            f"openPnL {row.get('current_position_pnl_ratio')} | "
-            f"totalPnL {row.get('total_pnl_ratio')}"
-        )
+        lines.append(format_manual_candidate_line(idx, row))
     lines.append("")
+    lines.append("Ручной выбор может взять eligible=false кандидата, но бот покажет причину фильтра.")
     lines.append(f"Чтобы выбрать: pick {category.upper()} 1")
     return "\n".join(lines)
 
@@ -676,7 +715,7 @@ def apply_manual_pick(
                 "selected_user_name": row.get("user_name"),
                 "selected_wss": row.get("final_wss"),
                 "selected_weight": row.get("weight"),
-                "reason": "manual pick in Telegram pending review",
+                "reason": _manual_selection_reason(row, "manual pick in Telegram pending review"),
             }
             for row in live_rows
         ],
@@ -697,6 +736,8 @@ def apply_manual_pick(
         "wallet": chosen.get("wallet"),
         "pick_index": pick_index,
         "replaced_category": replaced_category,
+        "eligible": chosen.get("eligible"),
+        "filter_reasons": chosen.get("filter_reasons"),
     }
     review["proposed_live"] = live_rows
     _set_pending_review(review)
@@ -764,7 +805,7 @@ def apply_manual_replacement(
                 "selected_user_name": row.get("user_name"),
                 "selected_wss": row.get("final_wss"),
                 "selected_weight": row.get("weight"),
-                "reason": "manual replacement in Telegram pending review",
+                "reason": _manual_selection_reason(row, "manual replacement in Telegram pending review"),
             }
             for row in live_rows
         ],
@@ -788,6 +829,8 @@ def apply_manual_replacement(
         "selected_wallet": chosen.get("wallet"),
         "selected_category": chosen.get("category"),
         "pick_index": pick_index,
+        "eligible": chosen.get("eligible"),
+        "filter_reasons": chosen.get("filter_reasons"),
     }
     review["proposed_live"] = live_rows
     _set_pending_review(review)
