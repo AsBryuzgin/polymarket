@@ -285,6 +285,22 @@ class RiskGuardTests(unittest.TestCase):
         self.assertTrue(decision.details["min_order_round_up_applied"])
         self.assertAlmostEqual(decision.details["pre_min_order_round_amount_usd"], 0.6)
 
+    def test_signal_sizing_can_cap_minimum_round_up_multiple(self) -> None:
+        decision = compute_signal_copy_amount(
+            leader_budget_usd=12.0,
+            remaining_leader_budget_usd=12.0,
+            leader_trade_notional_usd=1.0,
+            leader_trade_notional_copy_fraction=0.20,
+            leader_portfolio_value_usd=1000.0,
+            min_order_size_usd=1.0,
+            max_per_trade_usd=10.0,
+            round_up_to_min_order=True,
+            max_min_order_round_up_multiple=3.0,
+        )
+
+        self.assertFalse(decision.allowed)
+        self.assertIn("round-up multiple", decision.reason)
+
     def test_signal_sizing_does_not_round_up_past_caps(self) -> None:
         decision = compute_signal_copy_amount(
             leader_budget_usd=12.0,

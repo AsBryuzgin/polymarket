@@ -1,14 +1,19 @@
 from __future__ import annotations
 
+import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 from eth_abi import encode
 
+import execution.state_store as state_store
 from execution.onchain_shadow import (
     ORDER_MATCHED_TOPIC,
     _configured_rpc_urls,
     _decode_orders_matched_log,
+    init_onchain_shadow_tables,
+    list_recent_onchain_shadow_trades,
     _rpc_url_label,
     poll_onchain_shadow_once,
 )
@@ -19,6 +24,12 @@ def _topic_address(address: str) -> str:
 
 
 class OnchainShadowTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self._original_db_path = state_store.DB_PATH
+
+    def tearDown(self) -> None:
+        state_store.DB_PATH = self._original_db_path
+
     def test_uses_clob_v2_orders_matched_topic(self) -> None:
         self.assertEqual(
             ORDER_MATCHED_TOPIC,
@@ -173,6 +184,63 @@ class OnchainShadowTests(unittest.TestCase):
         self.assertEqual(result["to_block"], 105)
         self.assertEqual(result["target_to_block"], 118)
         set_cursor.assert_called_once()
+
+    def test_recent_trades_use_block_timestamp_not_backfill_observed_at(self) -> None:
+        leader = "0x1234567890abcdef1234567890abcdef12345678"
+        token_id = "12345"
+        block_timestamp = 1_777_499_900
+
+        with tempfile.TemporaryDirectory() as tmp:
+            state_store.DB_PATH = Path(tmp) / "executor_state.db"
+            state_store.init_db()
+            init_onchain_shadow_tables()
+            conn = state_store.get_connection()
+            cur = conn.cursor()
+            cur.execute(
+                """
+                INSERT INTO onchain_shadow_fills (
+                    exchange_address,
+                    transaction_hash,
+                    log_index,
+                    block_number,
+                    block_timestamp,
+                    leader_wallet,
+                    side,
+                    token_id,
+                    size,
+                    price,
+                    notional_usd,
+                    observed_at,
+                    raw_log_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "0xe111180000d2663c0091e4f400237545b87b996b",
+                    "0xabc",
+                    1,
+                    100,
+                    block_timestamp,
+                    leader.lower(),
+                    "BUY",
+                    token_id,
+                    10.0,
+                    0.5,
+                    5.0,
+                    "2026-04-29 22:06:20",
+                    "{}",
+                ),
+            )
+            conn.commit()
+            conn.close()
+
+            trades = list_recent_onchain_shadow_trades(
+                leader_wallet=leader,
+                limit=10,
+                max_age_sec=10_000_000,
+            )
+
+        self.assertEqual(len(trades), 1)
+        self.assertEqual(trades[0]["timestamp"], block_timestamp)
 
 
 if __name__ == "__main__":

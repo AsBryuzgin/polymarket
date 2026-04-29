@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import time
+import json
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from urllib.parse import urlparse
@@ -11,7 +12,7 @@ import requests
 from eth_abi import decode
 from eth_utils import keccak
 
-from execution.state_store import get_connection, list_leader_registry
+from execution.state_store import _ensure_column, get_connection, list_leader_registry
 
 
 ORDER_MATCHED_SIGNATURE = (
@@ -84,6 +85,45 @@ def _strip_0x(value: str) -> str:
 
 def _hex_to_int(value: str) -> int:
     return int(value, 16)
+
+
+def _hex_to_int_or_none(value: Any) -> int | None:
+    if value in (None, ""):
+        return None
+    try:
+        return int(str(value), 16)
+    except (TypeError, ValueError):
+        return None
+
+
+def _raw_log_block_timestamp(raw_log_json: Any) -> int | None:
+    if not raw_log_json:
+        return None
+    try:
+        raw = json.loads(str(raw_log_json))
+    except (TypeError, ValueError):
+        return None
+    return _hex_to_int_or_none(raw.get("blockTimestamp"))
+
+
+def _row_trade_timestamp(row: dict[str, Any]) -> int:
+    trade_timestamp = _safe_int(row.get("trade_timestamp"))
+    if trade_timestamp > 0:
+        return trade_timestamp
+
+    data_api_timestamp = _safe_int(row.get("data_api_trade_timestamp"))
+    if data_api_timestamp > 0:
+        return data_api_timestamp
+
+    block_timestamp = _safe_int(row.get("block_timestamp"))
+    if block_timestamp > 0:
+        return block_timestamp
+
+    raw_block_timestamp = _raw_log_block_timestamp(row.get("raw_log_json"))
+    if raw_block_timestamp:
+        return raw_block_timestamp
+
+    return _parse_utc_timestamp(row.get("observed_at"))
 
 
 def _int_to_hex_block(value: int) -> str:
@@ -174,6 +214,7 @@ def init_onchain_shadow_tables() -> None:
             transaction_hash TEXT NOT NULL,
             log_index INTEGER NOT NULL,
             block_number INTEGER NOT NULL,
+            block_timestamp INTEGER,
             leader_wallet TEXT NOT NULL,
             order_hash TEXT,
             side TEXT,
@@ -193,6 +234,38 @@ def init_onchain_shadow_tables() -> None:
         )
         """
     )
+    _ensure_column(cur, "onchain_shadow_fills", "block_timestamp", "INTEGER")
+    cur.execute(
+        """
+        SELECT exchange_address, transaction_hash, log_index, raw_log_json
+        FROM onchain_shadow_fills
+        WHERE block_timestamp IS NULL
+          AND raw_log_json IS NOT NULL
+        """
+    )
+    timestamp_updates = []
+    for row in cur.fetchall():
+        block_timestamp = _raw_log_block_timestamp(row["raw_log_json"])
+        if block_timestamp:
+            timestamp_updates.append(
+                (
+                    block_timestamp,
+                    row["exchange_address"],
+                    row["transaction_hash"],
+                    row["log_index"],
+                )
+            )
+    if timestamp_updates:
+        cur.executemany(
+            """
+            UPDATE onchain_shadow_fills
+            SET block_timestamp = ?
+            WHERE exchange_address = ?
+              AND transaction_hash = ?
+              AND log_index = ?
+            """,
+            timestamp_updates,
+        )
     cur.execute(
         """
         CREATE TABLE IF NOT EXISTS onchain_shadow_cursor (
@@ -389,6 +462,7 @@ def _insert_shadow_fill(
             transaction_hash,
             log_index,
             block_number,
+            block_timestamp,
             leader_wallet,
             order_hash,
             side,
@@ -402,13 +476,14 @@ def _insert_shadow_fill(
             taker_amount_filled,
             observed_at,
             raw_log_json
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             str(log.get("address") or "").lower(),
             str(log.get("transactionHash") or "").lower(),
             _hex_to_int(str(log.get("logIndex") or "0x0")),
             _hex_to_int(str(log.get("blockNumber") or "0x0")),
+            _hex_to_int_or_none(log.get("blockTimestamp")),
             decoded.leader_wallet.lower(),
             decoded.order_hash,
             decoded.side,
@@ -493,20 +568,31 @@ def list_recent_onchain_shadow_trades(
             transaction_hash,
             token_id,
             side,
+            MAX(
+                COALESCE(
+                    block_timestamp,
+                    data_api_trade_timestamp,
+                    CAST(strftime('%s', observed_at) AS INTEGER)
+                )
+            ) AS trade_timestamp,
+            MAX(block_timestamp) AS block_timestamp,
             MIN(observed_at) AS observed_at,
+            MIN(data_api_seen_at) AS data_api_seen_at,
+            MAX(data_api_trade_timestamp) AS data_api_trade_timestamp,
+            MAX(raw_log_json) AS raw_log_json,
             SUM(size) AS size,
             SUM(notional_usd) AS notional_usd,
             COUNT(*) AS raw_fills
         FROM onchain_shadow_fills
         WHERE lower(leader_wallet) = lower(?)
-          AND datetime(observed_at) >= datetime('now', ?)
           AND transaction_hash IS NOT NULL
           AND transaction_hash != ''
           AND token_id IS NOT NULL
           AND token_id != ''
           AND side IN ('BUY', 'SELL')
         GROUP BY transaction_hash, token_id, side
-        ORDER BY observed_at DESC
+        HAVING trade_timestamp >= CAST(strftime('%s', 'now', ?) AS INTEGER)
+        ORDER BY trade_timestamp DESC
         LIMIT ?
         """,
         (leader_wallet, f"-{int(max_age_sec)} seconds", int(limit)),
@@ -531,7 +617,7 @@ def list_recent_onchain_shadow_trades(
                 "conditionId": "",
                 "size": size,
                 "price": round(notional / size, 8),
-                "timestamp": _parse_utc_timestamp(row.get("observed_at")),
+                "timestamp": _row_trade_timestamp(row),
                 "title": "",
                 "slug": "",
                 "eventSlug": "",
@@ -738,8 +824,8 @@ def onchain_shadow_summary(*, hours: int = 24) -> dict[str, Any]:
             SUM(CASE WHEN data_api_seen_at IS NULL THEN 1 ELSE 0 END) AS unmatched,
             AVG(
                 CASE
-                    WHEN data_api_seen_at IS NOT NULL
-                    THEN (julianday(data_api_seen_at) - julianday(observed_at)) * 86400.0
+                    WHEN data_api_seen_at IS NOT NULL AND block_timestamp IS NOT NULL
+                    THEN (julianday(data_api_seen_at) - julianday(datetime(block_timestamp, 'unixepoch'))) * 86400.0
                     ELSE NULL
                 END
             ) AS avg_data_api_lag_sec

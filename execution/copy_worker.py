@@ -374,6 +374,9 @@ def process_signal(signal: LeaderSignal) -> dict:
         sizing.get("round_up_to_min_order"),
         False,
     )
+    max_min_order_round_up_multiple = _positive_float_or_none(
+        sizing.get("max_min_order_round_up_multiple")
+    )
     allow_budget_fallback = _safe_bool(
         sizing.get("allow_budget_fallback"),
         False,
@@ -495,6 +498,7 @@ def process_signal(signal: LeaderSignal) -> dict:
             side=signal.side,
             leader_exit_fraction=signal.leader_exit_fraction,
             round_up_to_min_order=round_up_to_min_order,
+            max_min_order_round_up_multiple=max_min_order_round_up_multiple,
             allow_notional_fallback=allow_notional_fallback,
             allow_budget_fallback=allow_budget_fallback,
         )
@@ -719,6 +723,7 @@ def process_signal(signal: LeaderSignal) -> dict:
         max_leader_trade_budget_fraction=max_leader_trade_budget_fraction,
         adaptive_size_multiplier=float(adaptive_sizing.get("multiplier") or 1.0),
         round_up_to_min_order=round_up_to_min_order,
+        max_min_order_round_up_multiple=max_min_order_round_up_multiple,
         allow_notional_fallback=allow_notional_fallback,
         allow_budget_fallback=allow_budget_fallback,
     )

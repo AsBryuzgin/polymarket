@@ -17,7 +17,7 @@ require_isolated_db_for_live = true
 source = "collateral_balance"
 
 [risk]
-min_order_size_usd = 0.01
+min_order_size_usd = 1.0
 slippage_tolerance = 0.02
 skip_if_spread_gt = 0.03
 skip_if_spread_rel_gt = 0.08
@@ -124,7 +124,7 @@ min_price_drift_abs = 0.02
 min_price_drift_rel = 0.03
 min_buy_max_price = 0.96
 max_buy_max_price = 0.99
-max_min_order_size_usd = 0.01
+max_min_order_size_usd = 1.0
 max_per_trade_pct = 0.05
 max_position_pct = 0.08
 max_portfolio_exposure_pct = 0.90
@@ -168,6 +168,7 @@ max_experimental_weight = 0.08
 [sizing]
 leader_trade_notional_copy_fraction = 0.20
 round_up_to_min_order = true
+max_min_order_round_up_multiple = 3.0
 allow_notional_fallback = false
 allow_budget_fallback = false
 max_leader_trade_budget_fraction = 0.25

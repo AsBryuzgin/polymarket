@@ -34,6 +34,7 @@ def compute_signal_copy_amount(
     max_leader_trade_budget_fraction: float | None = None,
     adaptive_size_multiplier: float | None = None,
     round_up_to_min_order: bool = False,
+    max_min_order_round_up_multiple: float | None = None,
     allow_notional_fallback: bool = False,
     allow_budget_fallback: bool = False,
     precision: int = 2,
@@ -53,6 +54,7 @@ def compute_signal_copy_amount(
     exit_fraction = _safe_float(leader_exit_fraction)
     max_budget_fraction = _safe_float(max_leader_trade_budget_fraction)
     adaptive_multiplier = _safe_float(adaptive_size_multiplier, 1.0)
+    max_round_up_multiple = _safe_float(max_min_order_round_up_multiple)
     if adaptive_multiplier <= 0:
         adaptive_multiplier = 1.0
     side = side.upper()
@@ -69,6 +71,7 @@ def compute_signal_copy_amount(
         "max_leader_trade_budget_fraction": max_budget_fraction,
         "adaptive_size_multiplier": adaptive_multiplier,
         "round_up_to_min_order": bool(round_up_to_min_order),
+        "max_min_order_round_up_multiple": max_round_up_multiple,
         "allow_notional_fallback": bool(allow_notional_fallback),
         "allow_budget_fallback": bool(allow_budget_fallback),
         "min_order_size_usd": min_order,
@@ -152,12 +155,32 @@ def compute_signal_copy_amount(
 
     if amount < min_order:
         if round_up_to_min_order:
+            if max_round_up_multiple > 0:
+                round_up_multiple = min_order / max(amount, 1e-12)
+                if round_up_multiple > max_round_up_multiple + 1e-12:
+                    details = {
+                        **details,
+                        "pre_min_order_round_amount_usd": amount,
+                        "min_order_round_up_multiple": round_up_multiple,
+                    }
+                    return CopySizeDecision(
+                        False,
+                        0.0,
+                        source,
+                        (
+                            "min_order round-up multiple "
+                            f"{round_up_multiple:.4f} above max {max_round_up_multiple:.4f}"
+                        ),
+                        details,
+                    )
+
             amount = min_order
             details = {
                 **details,
                 "pre_min_order_round_amount_usd": details["capped_amount_usd"],
                 "capped_amount_usd": amount,
                 "min_order_round_up_applied": True,
+                "min_order_round_up_multiple": min_order / max(details["capped_amount_usd"], 1e-12),
             }
             rounded = round(amount, precision)
             return CopySizeDecision(
