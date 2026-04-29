@@ -783,14 +783,15 @@ def build_activity_report(*, now: datetime | None = None) -> str:
         f"сделки бота: BUY {entries} | SELL {exits} | realized {_money(realized, signed=True)}",
         "",
         "Пояснение: проверки = каждый polling-цикл. Unique = разные сделки лидеров.",
+        "Unique по статусам могут пересекаться, если один trade менял статус между проверками.",
         "Selected = лучший пригодный сигнал-кандидат; он не всегда превращается в BUY/SELL.",
     ]
 
     if status_counts:
         lines.append("")
-        lines.append("Статусы, unique:")
+        lines.append("Статусы:")
         for status, count in status_counts.most_common(6):
-            lines.append(f"{status}: {unique_by_status.get(status, 0)}")
+            lines.append(f"{status}: {count} проверок / {unique_by_status.get(status, 0)} unique")
             lines.append(f"  {_status_hint(status)}")
 
     leaders = sorted(by_leader.values(), key=lambda x: (x["selected"], x["observations"]), reverse=True)
