@@ -82,6 +82,35 @@ class ExecutorHealthCheckTests(unittest.TestCase):
         self.assertEqual(slow, 0)
         self.assertEqual(stuck, 1)
 
+    def test_recent_processing_does_not_trigger_reconciliation_warning(self) -> None:
+        report = build_executor_health_report(
+            config={
+                "global": {"simulation": True, "preview_mode": True},
+                "alerts": {
+                    "processing_warning_minutes": 2,
+                    "processing_critical_minutes": 10,
+                },
+            },
+            env_health={"env_ok": True},
+            open_position_rows=[],
+            processed_signal_rows=[
+                {
+                    "signal_id": "sig1",
+                    "leader_wallet": "wallet1",
+                    "token_id": "tokenA",
+                    "status": "PROCESSING",
+                    "reason": "signal claimed",
+                    "created_at": datetime.now(timezone.utc).isoformat(),
+                }
+            ],
+            order_attempt_rows=[],
+            trade_history_rows=[],
+        )
+
+        self.assertEqual(report["health_status"], "OK")
+        self.assertNotIn("reconciliation reported issues", report["warnings"])
+        self.assertEqual(report["reconciliation"]["stuck_processing_signals"], 0)
+
     def test_filled_signal_without_attempt_is_warning(self) -> None:
         report = build_executor_health_report(
             config={"global": {"simulation": True, "preview_mode": True}},

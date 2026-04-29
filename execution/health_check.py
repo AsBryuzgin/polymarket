@@ -90,6 +90,23 @@ def _processing_age_counts(
     return warning_count, critical_count
 
 
+def _processed_rows_for_reconciliation(
+    rows: list[dict[str, Any]],
+    *,
+    critical_minutes: float,
+    now: datetime,
+) -> list[dict[str, Any]]:
+    filtered: list[dict[str, Any]] = []
+    for row in rows:
+        if str(row.get("status") or "") != "PROCESSING":
+            filtered.append(row)
+            continue
+        age_minutes = _row_age_minutes(row, now=now)
+        if age_minutes is None or age_minutes >= critical_minutes:
+            filtered.append(row)
+    return filtered
+
+
 def build_executor_health_report(
     *,
     config: dict[str, Any],
@@ -133,10 +150,20 @@ def build_executor_health_report(
         status = str(row.get("status") or "UNKNOWN")
         attempt_status_counts[status] = attempt_status_counts.get(status, 0) + 1
 
+    slow_processing, stuck_processing = _processing_age_counts(
+        processed_signal_rows,
+        warning_minutes=processing_warning_minutes,
+        critical_minutes=processing_critical_minutes,
+        now=now,
+    )
     reconciliation = reconcile_executor_state(
         trade_history_rows=trade_history_rows,
         open_position_rows=open_position_rows,
-        processed_signal_rows=processed_signal_rows,
+        processed_signal_rows=_processed_rows_for_reconciliation(
+            processed_signal_rows,
+            critical_minutes=processing_critical_minutes,
+            now=now,
+        ),
         order_attempt_rows=order_attempt_rows,
     )
 
@@ -182,12 +209,6 @@ def build_executor_health_report(
             if not funding_probe.allowed:
                 blockers.append(f"live funding preflight failed: {funding_probe.reason}")
 
-    slow_processing, stuck_processing = _processing_age_counts(
-        processed_signal_rows,
-        warning_minutes=processing_warning_minutes,
-        critical_minutes=processing_critical_minutes,
-        now=now,
-    )
     if stuck_processing > 0:
         blockers.append(
             f"processed_signals contains {stuck_processing} PROCESSING row(s) older than "
