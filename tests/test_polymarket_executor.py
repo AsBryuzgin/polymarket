@@ -4,6 +4,7 @@ import unittest
 from unittest.mock import patch
 
 from execution.polymarket_executor import (
+    _extract_best_bid_ask,
     fetch_market_snapshot,
     preview_market_order,
     preview_market_order_shares,
@@ -11,6 +12,28 @@ from execution.polymarket_executor import (
 
 
 class PolymarketExecutorTests(unittest.TestCase):
+    def test_extract_best_bid_ask_accepts_dict_order_books(self) -> None:
+        book = {
+            "bids": [{"price": "0.38"}, {"price": "0.41"}],
+            "asks": [{"price": "0.45"}, {"price": "0.44"}],
+        }
+
+        best_bid, best_ask = _extract_best_bid_ask(book)
+
+        self.assertEqual(best_bid, 0.41)
+        self.assertEqual(best_ask, 0.44)
+
+    def test_extract_best_bid_ask_accepts_v2_aliases_and_tuple_levels(self) -> None:
+        book = {
+            "buys": [("0.37", "10"), ("0.39", "5")],
+            "sells": [("0.43", "1"), ("0.42", "2")],
+        }
+
+        best_bid, best_ask = _extract_best_bid_ask(book)
+
+        self.assertEqual(best_bid, 0.39)
+        self.assertEqual(best_ask, 0.42)
+
     def test_preview_sell_converts_usd_amount_to_shares(self) -> None:
         captured = {}
 
@@ -114,6 +137,34 @@ class PolymarketExecutorTests(unittest.TestCase):
         self.assertEqual(snapshot["min_order_size"], 5.0)
         self.assertEqual(snapshot["tick_size"], 0.01)
         self.assertEqual(snapshot["raw_order_book_metadata_source"], "clob_rest")
+
+    def test_sell_snapshot_uses_sell_quote_as_bid_fallback(self) -> None:
+        class Book:
+            bids = []
+            asks = []
+            min_order_size = "5"
+            tick_size = "0.01"
+            neg_risk = False
+
+        class FakeClient:
+            def get_midpoint(self, token_id):
+                return {"mid": "0.50"}
+
+            def get_price(self, token_id, side):
+                return {"price": "0.47"}
+
+            def get_order_book(self, token_id):
+                return Book()
+
+        config = {"market_cache": {"enabled": False}}
+
+        with patch("execution.polymarket_executor.load_executor_config", return_value=config), \
+             patch("execution.polymarket_executor.build_authenticated_client", return_value=FakeClient()):
+            snapshot = fetch_market_snapshot(token_id="tokenA", side="SELL")
+
+        self.assertEqual(snapshot["price_quote"], 0.47)
+        self.assertEqual(snapshot["best_bid"], 0.47)
+        self.assertIsNone(snapshot["best_ask"])
 
 
 if __name__ == "__main__":

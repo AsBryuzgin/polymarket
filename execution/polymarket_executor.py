@@ -49,26 +49,51 @@ def _market_order_amount(*, amount_usd: float, side: str, price_quote: float | N
     raise ValueError(f"Unsupported side: {side}")
 
 
+def _safe_float(value) -> float | None:
+    try:
+        if value in (None, ""):
+            return None
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def _extract_best_bid_ask(book) -> tuple[float | None, float | None]:
-    bid_prices = []
-    ask_prices = []
+    def get_field(obj, *keys: str):
+        if isinstance(obj, dict):
+            for key in keys:
+                if key in obj:
+                    return obj.get(key)
+            return None
+        for key in keys:
+            value = getattr(obj, key, None)
+            if value is not None:
+                return value
+        return None
 
-    for level in getattr(book, "bids", []) or []:
-        try:
-            bid_prices.append(float(level.price))
-        except Exception:
-            pass
+    def level_price(level) -> float | None:
+        if isinstance(level, (list, tuple)):
+            return _safe_float(level[0] if level else None)
+        raw = get_field(level, "price", "p", "px")
+        if raw is None and not isinstance(level, dict):
+            raw = level
+        return _safe_float(raw)
 
-    for level in getattr(book, "asks", []) or []:
-        try:
-            ask_prices.append(float(level.price))
-        except Exception:
-            pass
+    bid_prices = [
+        price
+        for price in (level_price(level) for level in (get_field(book, "bids", "buys") or []))
+        if price is not None
+    ]
+    ask_prices = [
+        price
+        for price in (level_price(level) for level in (get_field(book, "asks", "sells") or []))
+        if price is not None
+    ]
 
-    best_bid = max(bid_prices) if bid_prices else None
-    best_ask = min(ask_prices) if ask_prices else None
-
-    return best_bid, best_ask
+    return (
+        max(bid_prices) if bid_prices else None,
+        min(ask_prices) if ask_prices else None,
+    )
 
 
 def _extract_field(book, key: str):
@@ -79,10 +104,24 @@ def _extract_field(book, key: str):
 
 def _extract_float_field(book, key: str) -> float | None:
     raw = _extract_field(book, key)
-    try:
-        return float(raw) if raw is not None else None
-    except Exception:
-        return None
+    return _safe_float(raw)
+
+
+def _extract_api_price(response, key: str) -> float | None:
+    if isinstance(response, dict):
+        return _safe_float(response.get(key))
+    return _safe_float(response)
+
+
+def _fill_quote_side_fallback(snapshot: dict) -> dict:
+    side = str(snapshot.get("side") or "").upper()
+    price_quote = _safe_float(snapshot.get("price_quote"))
+    hydrated = dict(snapshot)
+    if side == "SELL" and hydrated.get("best_bid") is None and price_quote is not None:
+        hydrated["best_bid"] = price_quote
+    if side == "BUY" and hydrated.get("best_ask") is None and price_quote is not None:
+        hydrated["best_ask"] = price_quote
+    return hydrated
 
 
 def build_authenticated_client() -> ClobClient:
@@ -129,6 +168,7 @@ def _hydrate_cached_snapshot_with_order_book(
         hydrated["best_bid"] = best_bid
     if hydrated.get("best_ask") is None:
         hydrated["best_ask"] = best_ask
+    hydrated = _fill_quote_side_fallback(hydrated)
     if hydrated.get("spread") is None and hydrated.get("best_bid") is not None and hydrated.get("best_ask") is not None:
         hydrated["spread"] = hydrated["best_ask"] - hydrated["best_bid"]
     if hydrated.get("midpoint") is None and hydrated.get("best_bid") is not None and hydrated.get("best_ask") is not None:
@@ -174,15 +214,12 @@ def fetch_market_snapshot(token_id: str, side: str = "BUY") -> dict:
     neg_risk = _extract_field(book, "neg_risk")
     last_trade_price = _extract_float_field(book, "last_trade_price")
 
-    mid_value = None
-    if isinstance(mid, dict):
-        raw = mid.get("mid")
-        mid_value = float(raw) if raw is not None else None
-
-    quote_value = None
-    if isinstance(price_quote, dict):
-        raw = price_quote.get("price")
-        quote_value = float(raw) if raw is not None else None
+    mid_value = _extract_api_price(mid, "mid")
+    quote_value = _extract_api_price(price_quote, "price")
+    if side.upper() == "SELL" and best_bid is None and quote_value is not None:
+        best_bid = quote_value
+    if side.upper() == "BUY" and best_ask is None and quote_value is not None:
+        best_ask = quote_value
 
     spread_value = None
     if best_bid is not None and best_ask is not None:
