@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import sys
@@ -385,11 +386,14 @@ def _rebalance_candidate_markup(
     keyboard: list[list[dict[str, str]]] = []
     for idx, row in enumerate(manual_candidates_for_category(category, limit=limit), start=1):
         label = format_manual_candidate_button_label(idx, row)
+        candidate_sig = _candidate_callback_sig(row)
         keyboard.append(
             [
                 {
                     "text": label[:58],
-                    "callback_data": f"rebalance_pick_any:{review_id}:{replace_index}:{category}:{idx}",
+                    "callback_data": (
+                        f"rebalance_pick_any:{review_id}:{replace_index}:{category}:{idx}:{candidate_sig}"
+                    ),
                 }
             ]
         )
@@ -400,6 +404,11 @@ def _rebalance_candidate_markup(
         ]
     )
     return {"inline_keyboard": keyboard}
+
+
+def _candidate_callback_sig(row: dict[str, Any]) -> str:
+    key = str(row.get("wallet") or row.get("user_name") or "").strip().lower()
+    return hashlib.sha1(key.encode("utf-8")).hexdigest()[:10]
 
 
 def _build_rebalance_candidate_text(
@@ -727,11 +736,52 @@ def _handle_callback_query(
                 reply_markup=_rebalance_candidate_markup(review_id, replace_index, category),
             )
         elif action == "rebalance_pick_any":
-            review_id, replace_index_raw, category, pick_index_raw = payload.split(":", 3)
+            parts = payload.split(":")
+            if len(parts) != 5:
+                _answer_callback_query(
+                    token=token,
+                    callback_query_id=callback_id,
+                    text="Candidate list changed",
+                    timeout_sec=timeout_sec,
+                )
+                _send_message(
+                    token=token,
+                    chat_id=allowed_chat_id,
+                    text=(
+                        "Эта кнопка от старого списка кандидатов. "
+                        "Нажми «Сменить кандидатов» и выбери категорию заново."
+                    ),
+                    timeout_sec=timeout_sec,
+                    reply_markup=_review_markup(str(load_pending_review().get("review_id", "")) if load_pending_review() else ""),
+                )
+                return
+            review_id, replace_index_raw, category, pick_index_raw, expected_sig = parts
+            pick_index = int(pick_index_raw)
+            candidates = manual_candidates_for_category(category, limit=max(10, pick_index))
+            if pick_index < 1 or pick_index > len(candidates):
+                raise RuntimeError(f"pick index out of range for {category}: {pick_index}")
+            if _candidate_callback_sig(candidates[pick_index - 1]) != expected_sig:
+                _answer_callback_query(
+                    token=token,
+                    callback_query_id=callback_id,
+                    text="Candidate list changed",
+                    timeout_sec=timeout_sec,
+                )
+                _send_message(
+                    token=token,
+                    chat_id=allowed_chat_id,
+                    text=(
+                        "Список кандидатов изменился после создания кнопки. "
+                        "Нажми «Сменить кандидатов» и выбери категорию заново."
+                    ),
+                    timeout_sec=timeout_sec,
+                    reply_markup=_review_markup(review_id),
+                )
+                return
             result = apply_manual_replacement(
                 replace_index=int(replace_index_raw),
                 candidate_category=category,
-                pick_index=int(pick_index_raw),
+                pick_index=pick_index,
                 review_id=review_id,
             )
             review = result["review"]

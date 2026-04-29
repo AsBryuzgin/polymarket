@@ -128,9 +128,9 @@ class TelegramBotTests(unittest.TestCase):
             markup = telegram_bot._rebalance_candidate_markup("review-1", 1, "WEATHER")
 
         self.assertIn("WeatherLeader", text)
-        self.assertEqual(
+        self.assertRegex(
             markup["inline_keyboard"][0][0]["callback_data"],
-            "rebalance_pick_any:review-1:1:WEATHER:1",
+            r"^rebalance_pick_any:review-1:1:WEATHER:1:[0-9a-f]{10}$",
         )
 
     def test_unmarked_command_is_routed(self) -> None:
