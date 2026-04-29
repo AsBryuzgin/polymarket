@@ -8,6 +8,9 @@ from py_clob_client_v2.clob_types import AssetType, BalanceAllowanceParams
 from execution.polymarket_executor import build_authenticated_client
 
 
+EFFECTIVE_ALLOWANCE_CAP_USD = 1_000_000_000.0
+
+
 @dataclass(frozen=True)
 class FundingSnapshot:
     balance_usd: float
@@ -58,6 +61,19 @@ def _decode_clob_amount(value: Any, *, decimals: int) -> float | None:
     return raw / (10 ** decimals)
 
 
+def _decode_allowances_map(value: Any, *, decimals: int) -> float | None:
+    if not isinstance(value, dict):
+        return None
+    decoded = [
+        amount
+        for amount in (_decode_clob_amount(raw, decimals=decimals) for raw in value.values())
+        if amount is not None
+    ]
+    if not decoded:
+        return None
+    return min(min(decoded), EFFECTIVE_ALLOWANCE_CAP_USD)
+
+
 def parse_balance_allowance_response(
     raw: dict[str, Any],
     *,
@@ -70,6 +86,8 @@ def parse_balance_allowance_response(
         balance = _decode_clob_amount(raw.get("available_balance"), decimals=decimals)
     if allowance is None:
         allowance = _decode_clob_amount(raw.get("available_allowance"), decimals=decimals)
+    if allowance is None:
+        allowance = _decode_allowances_map(raw.get("allowances"), decimals=decimals)
 
     if balance is None:
         balance = 0.0

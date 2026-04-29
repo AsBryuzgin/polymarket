@@ -22,6 +22,36 @@ class AllowancePreflightTests(unittest.TestCase):
         self.assertEqual(snapshot.balance_usd, 2.5)
         self.assertEqual(snapshot.allowance_usd, 1.2)
 
+    def test_parse_balance_allowance_from_v2_allowances_map(self) -> None:
+        snapshot = parse_balance_allowance_response(
+            {
+                "balance": "2500000",
+                "allowances": {
+                    "0xExchangeA": "1200000",
+                    "0xExchangeB": "2500000",
+                },
+            },
+            decimals=6,
+        )
+
+        self.assertEqual(snapshot.balance_usd, 2.5)
+        self.assertEqual(snapshot.allowance_usd, 1.2)
+
+    def test_parse_unlimited_allowances_map_is_capped_for_reporting(self) -> None:
+        snapshot = parse_balance_allowance_response(
+            {
+                "balance": "100000000",
+                "allowances": {
+                    "0xExchangeA": "115792089237316195423570985008687907853269984665640564039457584007913129639935",
+                    "0xExchangeB": "115792089237316195423570985008687907853269984665640564039457584007913129639935",
+                },
+            },
+            decimals=6,
+        )
+
+        self.assertEqual(snapshot.balance_usd, 100.0)
+        self.assertEqual(snapshot.allowance_usd, 1_000_000_000.0)
+
     def test_buy_preflight_blocks_insufficient_balance(self) -> None:
         decision = evaluate_live_funding_preflight(
             config={"funding": {"cash_reserve_usd": 1.0}},
