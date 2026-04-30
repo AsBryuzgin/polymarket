@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Mapping
 import tomllib
@@ -375,7 +375,8 @@ def accumulate_micro_signal(
     expired_signal_ids: list[str] = []
     if existing is not None and max_age_sec is not None and max_age_sec > 0:
         updated_at = _parse_sqlite_timestamp(existing["updated_at"])
-        if updated_at is not None and datetime.utcnow() - updated_at > timedelta(seconds=float(max_age_sec)):
+        now_utc = datetime.now(timezone.utc).replace(tzinfo=None)
+        if updated_at is not None and now_utc - updated_at > timedelta(seconds=float(max_age_sec)):
             reset = True
             expired_signal_ids = _micro_signal_ids(existing["signal_ids_json"])
 
