@@ -211,3 +211,4 @@ gas_limit = "10000000"
 poll_attempts = 10
 poll_interval_sec = 2.0
 live_require_exchange_position = true
+live_finalize_missing_exchange_position = true

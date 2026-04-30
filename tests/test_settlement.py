@@ -143,6 +143,87 @@ class SettlementTests(unittest.TestCase):
             self.assertEqual(history[0]["side"], "SELL")
             self.assertAlmostEqual(float(history[0]["realized_pnl_usd"]), 5.0, places=6)
 
+    def test_live_external_settlement_closes_missing_exchange_position_when_enabled(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            state_store.DB_PATH = Path(tmp) / "executor_state.db"
+            init_db()
+            upsert_buy_position(
+                leader_wallet="wallet1",
+                token_id="tokenA",
+                amount_usd=5.0,
+                entry_price=0.5,
+                signal_id="sig-entry",
+            )
+            upsert_leader_registry_row(
+                wallet="wallet1",
+                category="SPORTS",
+                user_name="RN1",
+                leader_status="ACTIVE",
+                target_weight=0.25,
+                target_budget_usd=25.0,
+                grace_until=None,
+                source_tag="test",
+            )
+            condition_id = "0x" + ("22" * 32)
+
+            def fake_mark_position(position, **_kwargs):  # type: ignore[no-untyped-def]
+                return {
+                    **position,
+                    "qty": 10.0,
+                    "snapshot_status": "SETTLED",
+                    "mark_source": "SETTLEMENT",
+                    "settlement_price": 1.0,
+                    "mark_value_mid_usd": 10.0,
+                    "mark_value_bid_usd": 10.0,
+                }
+
+            config = {
+                "global": {
+                    "preview_mode": False,
+                    "simulation": False,
+                    "execution_mode": "live",
+                    "live_trading_enabled": True,
+                    "live_trading_ack": "I_UNDERSTAND_THIS_PLACES_REAL_ORDERS",
+                },
+                "settlement": {
+                    "enabled": True,
+                    "live_require_exchange_position": True,
+                    "live_finalize_missing_exchange_position": True,
+                },
+            }
+
+            with (
+                patch("execution.settlement.load_executor_env") as env_mock,
+                patch("execution.settlement.mark_position", side_effect=fake_mark_position),
+                patch("execution.settlement.send_trade_notification", return_value=[]),
+            ):
+                env_mock.return_value.funder_address = "0xfunder"
+                report = run_settlement_cycle(
+                    config=config,
+                    snapshot_loader=lambda _token_id, _side: {},
+                    market_lookup=lambda _token_id: {
+                        "condition_id": condition_id,
+                        "question": "Will RN1 win?",
+                        "slug": "will-rn1-win",
+                        "tokens": [{"token_id": "tokenA"}, {"token_id": "tokenB"}],
+                    },
+                    exchange_positions_loader=lambda _address: [],
+                    sleep_fn=lambda _seconds: None,
+                )
+
+            self.assertEqual(report["mode"], "LIVE")
+            self.assertEqual(report["closed_rows"], 1)
+            self.assertEqual(list_open_positions(limit=10), [])
+
+            settlement_row = get_processed_settlement(condition_id)
+            self.assertIsNotNone(settlement_row)
+            self.assertEqual(settlement_row["status"], "LIVE_EXTERNAL_SETTLED")
+
+            history = list_trade_history(limit=10)
+            self.assertEqual(len(history), 1)
+            self.assertEqual(history[0]["event_type"], "EXIT")
+            self.assertAlmostEqual(float(history[0]["realized_pnl_usd"]), 5.0, places=6)
+
 
 if __name__ == "__main__":
     unittest.main()

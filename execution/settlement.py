@@ -40,7 +40,7 @@ DEFAULT_RELAY_HUB_ADDRESS = "0xD216153c06E857cD7f72665E0aF1d7D82172F494"
 DEFAULT_PARENT_COLLECTION_ID = "0x" + ("00" * 32)
 DEFAULT_GAS_LIMIT = "10000000"
 
-SUCCESS_STATUSES = {"PAPER_SETTLED", "LIVE_CONFIRMED"}
+SUCCESS_STATUSES = {"PAPER_SETTLED", "LIVE_CONFIRMED", "LIVE_EXTERNAL_SETTLED"}
 PENDING_STATUSES = {"LIVE_SUBMITTED"}
 RETRYABLE_STATUSES = {"LIVE_FAILED", "LIVE_SUBMIT_ERROR", "LIVE_TIMEOUT"}
 
@@ -915,6 +915,37 @@ def run_settlement_cycle(
             continue
 
         if candidate.exchange_position_present is False:
+            if _safe_bool(
+                _settlement_cfg_value(config, "live_finalize_missing_exchange_position", False),
+                False,
+            ):
+                finalized = _finalize_candidate(
+                    config=config,
+                    candidate=candidate,
+                    mode="LIVE_EXTERNAL",
+                )
+                record_processed_settlement(
+                    candidate.condition_id,
+                    market_slug=candidate.market_slug,
+                    question=candidate.question,
+                    token_ids=candidate.token_ids,
+                    mode=mode,
+                    status="LIVE_EXTERNAL_SETTLED",
+                    reason=(
+                        "resolved local position had no matching exchange position row; "
+                        "finalized as externally settled/auto-claimed"
+                    ),
+                    expected_payout_usd=candidate.expected_payout_usd,
+                    position_count=len(candidate.positions),
+                    raw_response={
+                        "candidate": asdict(candidate),
+                        "finalized": finalized,
+                    },
+                )
+                closed_rows += finalized["closed_rows"]
+                processed += 1
+                continue
+
             record_processed_settlement(
                 candidate.condition_id,
                 market_slug=candidate.market_slug,
