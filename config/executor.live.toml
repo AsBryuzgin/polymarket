@@ -177,6 +177,10 @@ allow_notional_fallback = false
 allow_budget_fallback = false
 max_leader_trade_budget_fraction = 0.25
 
+[micro_signal_accumulator]
+enabled = true
+max_bucket_age_sec = 600
+
 [adaptive_sizing]
 enabled = true
 lookback_hours = 24.0

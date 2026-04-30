@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Mapping
 import tomllib
@@ -195,6 +195,24 @@ def init_db() -> None:
         """
     )
 
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS micro_signal_buckets (
+            leader_wallet TEXT NOT NULL,
+            token_id TEXT NOT NULL,
+            side TEXT NOT NULL,
+            pending_amount_usd REAL NOT NULL,
+            signal_count INTEGER NOT NULL,
+            signal_ids_json TEXT NOT NULL,
+            first_signal_id TEXT,
+            last_signal_id TEXT,
+            first_observed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (leader_wallet, token_id, side)
+        )
+        """
+    )
+
     conn.commit()
     conn.close()
 
@@ -301,6 +319,263 @@ def record_signal(
 
     conn.commit()
     conn.close()
+
+
+def _parse_sqlite_timestamp(value: Any) -> datetime | None:
+    if value in (None, ""):
+        return None
+    try:
+        return datetime.fromisoformat(str(value).replace(" ", "T"))
+    except ValueError:
+        return None
+
+
+def _micro_signal_ids(raw: Any) -> list[str]:
+    if raw in (None, ""):
+        return []
+    try:
+        data = json.loads(str(raw))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return []
+    if not isinstance(data, list):
+        return []
+    return [str(item) for item in data if str(item)]
+
+
+def accumulate_micro_signal(
+    *,
+    leader_wallet: str,
+    token_id: str,
+    side: str,
+    signal_id: str,
+    amount_usd: float,
+    max_age_sec: float | None = None,
+) -> dict[str, Any]:
+    init_db()
+    normalized_side = side.upper()
+    normalized_wallet = leader_wallet.lower()
+    amount = max(float(amount_usd or 0.0), 0.0)
+
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT *
+        FROM micro_signal_buckets
+        WHERE leader_wallet = ?
+          AND token_id = ?
+          AND side = ?
+        LIMIT 1
+        """,
+        (normalized_wallet, token_id, normalized_side),
+    )
+    existing = cur.fetchone()
+
+    reset = False
+    expired_signal_ids: list[str] = []
+    if existing is not None and max_age_sec is not None and max_age_sec > 0:
+        updated_at = _parse_sqlite_timestamp(existing["updated_at"])
+        if updated_at is not None and datetime.utcnow() - updated_at > timedelta(seconds=float(max_age_sec)):
+            reset = True
+            expired_signal_ids = _micro_signal_ids(existing["signal_ids_json"])
+
+    if existing is None or reset:
+        signal_ids = [signal_id]
+        pending_amount = amount
+        first_signal_id = signal_id
+        previous_amount = 0.0
+        previous_count = 0
+        cur.execute(
+            """
+            INSERT INTO micro_signal_buckets (
+                leader_wallet,
+                token_id,
+                side,
+                pending_amount_usd,
+                signal_count,
+                signal_ids_json,
+                first_signal_id,
+                last_signal_id,
+                first_observed_at,
+                updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+            ON CONFLICT(leader_wallet, token_id, side) DO UPDATE SET
+                pending_amount_usd = excluded.pending_amount_usd,
+                signal_count = excluded.signal_count,
+                signal_ids_json = excluded.signal_ids_json,
+                first_signal_id = excluded.first_signal_id,
+                last_signal_id = excluded.last_signal_id,
+                first_observed_at = CURRENT_TIMESTAMP,
+                updated_at = CURRENT_TIMESTAMP
+            """,
+            (
+                normalized_wallet,
+                token_id,
+                normalized_side,
+                pending_amount,
+                len(signal_ids),
+                json.dumps(signal_ids),
+                first_signal_id,
+                signal_id,
+            ),
+        )
+        if expired_signal_ids:
+            cur.executemany(
+                """
+                UPDATE processed_signals
+                SET status = 'ACCUMULATED_EXPIRED',
+                    reason = 'micro bucket expired before reaching executable size'
+                WHERE signal_id = ?
+                  AND status = 'ACCUMULATED_PENDING'
+                """,
+                [(signal_id,) for signal_id in expired_signal_ids],
+            )
+    else:
+        signal_ids = _micro_signal_ids(existing["signal_ids_json"])
+        if signal_id not in signal_ids:
+            signal_ids.append(signal_id)
+        previous_amount = float(existing["pending_amount_usd"] or 0.0)
+        previous_count = int(existing["signal_count"] or 0)
+        pending_amount = previous_amount + amount
+        first_signal_id = existing["first_signal_id"] or (signal_ids[0] if signal_ids else signal_id)
+        cur.execute(
+            """
+            UPDATE micro_signal_buckets
+            SET pending_amount_usd = ?,
+                signal_count = ?,
+                signal_ids_json = ?,
+                first_signal_id = ?,
+                last_signal_id = ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE leader_wallet = ?
+              AND token_id = ?
+              AND side = ?
+            """,
+            (
+                pending_amount,
+                len(signal_ids),
+                json.dumps(signal_ids),
+                first_signal_id,
+                signal_id,
+                normalized_wallet,
+                token_id,
+                normalized_side,
+            ),
+        )
+
+    conn.commit()
+    conn.close()
+    return {
+        "leader_wallet": normalized_wallet,
+        "token_id": token_id,
+        "side": normalized_side,
+        "previous_amount_usd": round(previous_amount, 8),
+        "pending_amount_usd": round(pending_amount, 8),
+        "added_amount_usd": round(amount, 8),
+        "previous_signal_count": previous_count,
+        "signal_count": len(signal_ids),
+        "signal_ids": signal_ids,
+        "first_signal_id": first_signal_id,
+        "last_signal_id": signal_id,
+        "reset": reset,
+        "expired_signal_ids": expired_signal_ids,
+    }
+
+
+def consume_micro_signal_bucket(
+    *,
+    leader_wallet: str,
+    token_id: str,
+    side: str,
+) -> dict[str, Any] | None:
+    normalized_wallet = leader_wallet.lower()
+    normalized_side = side.upper()
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT *
+        FROM micro_signal_buckets
+        WHERE leader_wallet = ?
+          AND token_id = ?
+          AND side = ?
+        LIMIT 1
+        """,
+        (normalized_wallet, token_id, normalized_side),
+    )
+    row = cur.fetchone()
+    if row is None:
+        conn.close()
+        return None
+
+    cur.execute(
+        """
+        DELETE FROM micro_signal_buckets
+        WHERE leader_wallet = ?
+          AND token_id = ?
+          AND side = ?
+        """,
+        (normalized_wallet, token_id, normalized_side),
+    )
+    conn.commit()
+    conn.close()
+    result = dict(row)
+    result["signal_ids"] = _micro_signal_ids(result.get("signal_ids_json"))
+    return result
+
+
+def mark_accumulated_signals(
+    *,
+    signal_ids: list[str],
+    status: str,
+    reason: str,
+    exclude_signal_id: str | None = None,
+) -> int:
+    ids = [
+        str(signal_id)
+        for signal_id in signal_ids
+        if str(signal_id) and str(signal_id) != str(exclude_signal_id or "")
+    ]
+    if not ids:
+        return 0
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.executemany(
+        """
+        UPDATE processed_signals
+        SET status = ?,
+            reason = ?
+        WHERE signal_id = ?
+          AND status = 'ACCUMULATED_PENDING'
+        """,
+        [(status, reason, signal_id) for signal_id in ids],
+    )
+    changed = cur.rowcount
+    conn.commit()
+    conn.close()
+    return int(changed or 0)
+
+
+def list_micro_signal_buckets(limit: int = 100) -> list[dict[str, Any]]:
+    init_db()
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT *
+        FROM micro_signal_buckets
+        ORDER BY updated_at DESC
+        LIMIT ?
+        """,
+        (int(limit),),
+    )
+    rows = []
+    for row in cur.fetchall():
+        item = dict(row)
+        item["signal_ids"] = _micro_signal_ids(item.get("signal_ids_json"))
+        rows.append(item)
+    conn.close()
+    return rows
 
 
 def create_order_attempt(

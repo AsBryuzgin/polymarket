@@ -21,6 +21,9 @@ from execution.state_store import (
     create_order_attempt,
     update_order_attempt,
     record_signal,
+    accumulate_micro_signal,
+    consume_micro_signal_bucket,
+    mark_accumulated_signals,
     get_open_position,
     upsert_buy_position,
     reduce_or_close_position,
@@ -198,6 +201,42 @@ def _safe_bool(value, default: bool = False) -> bool:
         if normalized in {"0", "false", "no", "off"}:
             return False
     return bool(value)
+
+
+def _micro_accumulator_enabled(config: dict) -> bool:
+    cfg = config.get("micro_signal_accumulator", {})
+    return _safe_bool(cfg.get("enabled"), False)
+
+
+def _micro_accumulator_max_age_sec(config: dict) -> float:
+    cfg = config.get("micro_signal_accumulator", {})
+    try:
+        return float(cfg.get("max_bucket_age_sec", 600.0))
+    except (TypeError, ValueError):
+        return 600.0
+
+
+def _micro_signal_amount_from_sizing(size_decision, min_order_size_usd: float) -> float | None:
+    details = size_decision.details or {}
+    amount = details.get("pre_min_order_round_amount_usd")
+    if amount is None:
+        amount = details.get("capped_amount_usd")
+    if amount is None:
+        amount = details.get("raw_amount_usd")
+    try:
+        parsed = float(amount)
+    except (TypeError, ValueError):
+        return None
+    if parsed <= 0:
+        return None
+    if parsed >= float(min_order_size_usd):
+        return None
+    return parsed
+
+
+def _is_min_order_sizing_block(size_decision) -> bool:
+    reason = str(size_decision.reason or "").lower()
+    return "min_order" in reason or "min order" in reason or "round-up" in reason
 
 
 def _refresh_active_budgets_after_exit(config: dict) -> dict:
@@ -756,56 +795,154 @@ def process_signal(signal: LeaderSignal) -> dict:
         allow_budget_fallback=allow_budget_fallback,
     )
 
-    if not size_decision.allowed:
-        record_signal(
-            signal_id=signal.signal_id,
+    micro_accumulator = None
+    micro_signal_amount = None
+    micro_accumulated_ready = False
+    if _micro_accumulator_enabled(config):
+        micro_signal_amount = _micro_signal_amount_from_sizing(
+            size_decision,
+            min_order_size_usd,
+        )
+
+    if micro_signal_amount is not None and (
+        size_decision.allowed or _is_min_order_sizing_block(size_decision)
+    ):
+        drift_ok, drift_reason = _entry_price_drift_ok(
+            leader_price=signal.leader_trade_price,
+            current_price=current_price,
+            side=signal.side,
+            max_abs=float(freshness.get("max_price_drift_abs", 0.02)),
+            max_rel=float(freshness.get("max_price_drift_rel", 0.03)),
+        )
+        if not drift_ok:
+            record_signal(
+                signal_id=signal.signal_id,
+                leader_wallet=signal.leader_wallet,
+                token_id=signal.token_id,
+                side=signal.side,
+                leader_budget_usd=signal.leader_budget_usd,
+                suggested_amount_usd=micro_signal_amount,
+                status="SKIPPED_DRIFT",
+                reason=drift_reason,
+            )
+            return {
+                "signal": asdict(signal),
+                "market_snapshot": snapshot,
+                "status": "SKIPPED_DRIFT",
+                "reason": drift_reason,
+                "suggested_amount_usd": micro_signal_amount,
+                "sizing": asdict(size_decision),
+                "adaptive_sizing": adaptive_sizing,
+            }
+
+        micro_accumulator = accumulate_micro_signal(
             leader_wallet=signal.leader_wallet,
             token_id=signal.token_id,
             side=signal.side,
-            leader_budget_usd=signal.leader_budget_usd,
-            suggested_amount_usd=None,
-            status="SKIPPED_SIZING",
-            reason=size_decision.reason,
-        )
-        return {
-            "signal": asdict(signal),
-            "market_snapshot": snapshot,
-            "status": "SKIPPED_SIZING",
-            "reason": size_decision.reason,
-            "sizing": asdict(size_decision),
-            "adaptive_sizing": adaptive_sizing,
-        }
-
-    amount_usd = size_decision.amount_usd
-    sizing_source = size_decision.source
-
-    drift_ok, drift_reason = _entry_price_drift_ok(
-        leader_price=signal.leader_trade_price,
-        current_price=current_price,
-        side=signal.side,
-        max_abs=float(freshness.get("max_price_drift_abs", 0.02)),
-        max_rel=float(freshness.get("max_price_drift_rel", 0.03)),
-    )
-
-    if not drift_ok:
-        record_signal(
             signal_id=signal.signal_id,
-            leader_wallet=signal.leader_wallet,
-            token_id=signal.token_id,
-            side=signal.side,
-            leader_budget_usd=signal.leader_budget_usd,
-            suggested_amount_usd=amount_usd,
-            status="SKIPPED_DRIFT",
-            reason=drift_reason,
+            amount_usd=micro_signal_amount,
+            max_age_sec=_micro_accumulator_max_age_sec(config),
         )
-        return {
-            "signal": asdict(signal),
-            "market_snapshot": snapshot,
-            "status": "SKIPPED_DRIFT",
-            "reason": drift_reason,
-            "suggested_amount_usd": amount_usd,
-            "adaptive_sizing": adaptive_sizing,
-        }
+        pending_amount = float(micro_accumulator["pending_amount_usd"])
+        executable_amount = min(
+            pending_amount,
+            runtime_risk_limits.max_per_trade_usd,
+            remaining_leader_budget_usd,
+        )
+        if executable_amount + 1e-12 < min_order_size_usd:
+            cap_reason = ""
+            if (
+                pending_amount >= min_order_size_usd
+                and remaining_leader_budget_usd < min_order_size_usd
+            ):
+                cap_reason = f"; remaining leader budget {remaining_leader_budget_usd:.4f} below min order"
+            elif (
+                pending_amount >= min_order_size_usd
+                and runtime_risk_limits.max_per_trade_usd < min_order_size_usd
+            ):
+                cap_reason = f"; max_per_trade {runtime_risk_limits.max_per_trade_usd:.4f} below min order"
+            reason = (
+                "micro signal accumulated "
+                f"{pending_amount:.4f}/{min_order_size_usd:.4f} min_order_size_usd"
+                f"{cap_reason}"
+            )
+            record_signal(
+                signal_id=signal.signal_id,
+                leader_wallet=signal.leader_wallet,
+                token_id=signal.token_id,
+                side=signal.side,
+                leader_budget_usd=signal.leader_budget_usd,
+                suggested_amount_usd=micro_signal_amount,
+                status="ACCUMULATED_PENDING",
+                reason=reason,
+            )
+            return {
+                "signal": asdict(signal),
+                "market_snapshot": snapshot,
+                "status": "ACCUMULATED_PENDING",
+                "reason": reason,
+                "suggested_amount_usd": micro_signal_amount,
+                "sizing": asdict(size_decision),
+                "adaptive_sizing": adaptive_sizing,
+                "micro_accumulator": micro_accumulator,
+            }
+
+        amount_usd = round(executable_amount, 2)
+        if amount_usd + 1e-12 < min_order_size_usd:
+            amount_usd = min_order_size_usd
+        sizing_source = f"{size_decision.source}+micro_accumulator"
+        micro_accumulated_ready = True
+    else:
+        if not size_decision.allowed:
+            record_signal(
+                signal_id=signal.signal_id,
+                leader_wallet=signal.leader_wallet,
+                token_id=signal.token_id,
+                side=signal.side,
+                leader_budget_usd=signal.leader_budget_usd,
+                suggested_amount_usd=None,
+                status="SKIPPED_SIZING",
+                reason=size_decision.reason,
+            )
+            return {
+                "signal": asdict(signal),
+                "market_snapshot": snapshot,
+                "status": "SKIPPED_SIZING",
+                "reason": size_decision.reason,
+                "sizing": asdict(size_decision),
+                "adaptive_sizing": adaptive_sizing,
+            }
+        amount_usd = size_decision.amount_usd
+        sizing_source = size_decision.source
+
+    if not micro_accumulated_ready:
+        drift_ok, drift_reason = _entry_price_drift_ok(
+            leader_price=signal.leader_trade_price,
+            current_price=current_price,
+            side=signal.side,
+            max_abs=float(freshness.get("max_price_drift_abs", 0.02)),
+            max_rel=float(freshness.get("max_price_drift_rel", 0.03)),
+        )
+
+        if not drift_ok:
+            record_signal(
+                signal_id=signal.signal_id,
+                leader_wallet=signal.leader_wallet,
+                token_id=signal.token_id,
+                side=signal.side,
+                leader_budget_usd=signal.leader_budget_usd,
+                suggested_amount_usd=amount_usd,
+                status="SKIPPED_DRIFT",
+                reason=drift_reason,
+            )
+            return {
+                "signal": asdict(signal),
+                "market_snapshot": snapshot,
+                "status": "SKIPPED_DRIFT",
+                "reason": drift_reason,
+                "suggested_amount_usd": amount_usd,
+                "adaptive_sizing": adaptive_sizing,
+            }
 
     risk_decision = evaluate_entry_risk(
         config=config,
@@ -818,6 +955,28 @@ def process_signal(signal: LeaderSignal) -> dict:
     )
 
     if not risk_decision.allowed:
+        if micro_accumulated_ready and micro_accumulator is not None:
+            reason = f"micro aggregate waiting for risk budget: {risk_decision.reason}"
+            record_signal(
+                signal_id=signal.signal_id,
+                leader_wallet=signal.leader_wallet,
+                token_id=signal.token_id,
+                side=signal.side,
+                leader_budget_usd=signal.leader_budget_usd,
+                suggested_amount_usd=amount_usd,
+                status="ACCUMULATED_PENDING",
+                reason=reason,
+            )
+            return {
+                "signal": asdict(signal),
+                "market_snapshot": snapshot,
+                "status": "ACCUMULATED_PENDING",
+                "reason": reason,
+                "suggested_amount_usd": amount_usd,
+                "risk": asdict(risk_decision),
+                "adaptive_sizing": adaptive_sizing,
+                "micro_accumulator": micro_accumulator,
+            }
         record_signal(
             signal_id=signal.signal_id,
             leader_wallet=signal.leader_wallet,
@@ -836,6 +995,7 @@ def process_signal(signal: LeaderSignal) -> dict:
             "suggested_amount_usd": amount_usd,
             "risk": asdict(risk_decision),
             "adaptive_sizing": adaptive_sizing,
+            "micro_accumulator": micro_accumulator,
         }
 
     execution = _execute_with_recorded_attempt(
@@ -844,9 +1004,23 @@ def process_signal(signal: LeaderSignal) -> dict:
         amount_usd=amount_usd,
         reason="entry policy and risk approved",
     )
+    micro_consumed = None
+    if micro_accumulated_ready and micro_accumulator is not None:
+        micro_consumed = consume_micro_signal_bucket(
+            leader_wallet=signal.leader_wallet,
+            token_id=signal.token_id,
+            side=signal.side,
+        )
 
     if not execution.accepted:
         failure_status = _execution_failure_signal_status(execution)
+        if micro_consumed:
+            mark_accumulated_signals(
+                signal_ids=micro_consumed.get("signal_ids", []),
+                exclude_signal_id=signal.signal_id,
+                status="ACCUMULATED_EXECUTION_ERROR",
+                reason=f"aggregate execution failed via {signal.signal_id}: {execution.reason}",
+            )
         record_signal(
             signal_id=signal.signal_id,
             leader_wallet=signal.leader_wallet,
@@ -865,6 +1039,8 @@ def process_signal(signal: LeaderSignal) -> dict:
             "suggested_amount_usd": amount_usd,
             "execution": asdict(execution),
             "adaptive_sizing": adaptive_sizing,
+            "micro_accumulator": micro_accumulator,
+            "micro_consumed": micro_consumed,
         }
 
     executed_amount_usd = execution.fill_amount_usd or amount_usd
@@ -877,6 +1053,16 @@ def process_signal(signal: LeaderSignal) -> dict:
         entry_price=execution_price,
         signal_id=signal.signal_id,
     )
+
+    entry_notes = (
+        f"{execution.mode.lower()} entry generated | sizing={sizing_source} "
+        f"| adaptive_multiplier={float(adaptive_sizing.get('multiplier') or 1.0):.4f}"
+    )
+    if micro_consumed:
+        entry_notes = (
+            f"{entry_notes} | micro_signals={len(micro_consumed.get('signal_ids', []))} "
+            f"| micro_amount={float(micro_consumed.get('pending_amount_usd') or 0.0):.4f}"
+        )
 
     log_trade_event(
         signal_id=signal.signal_id,
@@ -897,13 +1083,17 @@ def process_signal(signal: LeaderSignal) -> dict:
         realized_pnl_usd=None,
         realized_pnl_pct=None,
         holding_minutes=None,
-        notes=(
-            f"{execution.mode.lower()} entry generated | sizing={sizing_source} "
-            f"| adaptive_multiplier={float(adaptive_sizing.get('multiplier') or 1.0):.4f}"
-        ),
+        notes=entry_notes,
     )
 
     entry_status = _entry_success_signal_status(execution)
+    if micro_consumed:
+        mark_accumulated_signals(
+            signal_ids=micro_consumed.get("signal_ids", []),
+            exclude_signal_id=signal.signal_id,
+            status="ACCUMULATED_EXECUTED",
+            reason=f"executed in aggregate entry via {signal.signal_id}",
+        )
     send_trade_notification(
         config=config,
         mode=execution.mode,
@@ -940,4 +1130,6 @@ def process_signal(signal: LeaderSignal) -> dict:
         "execution": asdict(execution),
         "sizing": asdict(size_decision),
         "adaptive_sizing": adaptive_sizing,
+        "micro_accumulator": micro_accumulator,
+        "micro_consumed": micro_consumed,
     }

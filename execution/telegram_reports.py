@@ -21,6 +21,7 @@ from execution.signal_observation_store import (
 from execution.state_store import (
     init_db,
     list_leader_registry,
+    list_micro_signal_buckets,
     list_open_positions,
     list_processed_signals,
     list_trade_history,
@@ -117,6 +118,10 @@ def _status_hint(status: str) -> str:
         "NO_ORDERBOOK": "нет стакана по токену",
         "NO_SIGNAL": "нет выбранного сигнала",
         "TOO_OLD": "BUY слишком старый для нового входа",
+        "ACCUMULATED_PENDING": "маленький BUY сохранен и ждет накопления до min order",
+        "ACCUMULATED_EXECUTED": "микросигнал был исполнен внутри общего BUY",
+        "ACCUMULATED_EXPIRED": "микросигнал устарел до накопления min order",
+        "ACCUMULATED_EXECUTION_ERROR": "общий BUY по накопленным микросигналам не исполнился",
     }
     return hints.get(status, "см. latest_reason для деталей")
 
@@ -377,6 +382,7 @@ def build_status_report(
 
     open_rows, snapshot_errors = _open_position_marks(snapshot_loader=snapshot_loader)
     registry = list_leader_registry(limit=100000)
+    micro_buckets = list_micro_signal_buckets(limit=100000)
     observations = list_signal_observations(limit=1)
 
     mark_summary = _open_mark_summary(open_rows)
@@ -442,6 +448,13 @@ def build_status_report(
         lines.append(f"последнее наблюдение: {last_age:.1f} мин назад")
     if alert_count is not None:
         lines.append(f"текущие alerts: {alert_count}")
+    if micro_buckets:
+        micro_amount = sum(_safe_float(row.get("pending_amount_usd")) for row in micro_buckets)
+        micro_signals = sum(int(_safe_float(row.get("signal_count"))) for row in micro_buckets)
+        lines.append(
+            f"micro-накопитель: {len(micro_buckets)} buckets | "
+            f"{micro_signals} signals | {_money(micro_amount)}"
+        )
     if funding_error:
         lines.append(f"проверка баланса: ERROR {_short(funding_error, 40, 0)}")
     if snapshot_errors:
