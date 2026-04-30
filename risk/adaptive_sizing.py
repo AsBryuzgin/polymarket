@@ -21,6 +21,17 @@ class AdaptiveSizingDecision:
         return asdict(self)
 
 
+@dataclass(frozen=True)
+class BuyDemandEstimate:
+    raw_demand_usd: float
+    effective_demand_usd: float
+    raw_sized_signals: int
+    usable_signals: int
+    min_order_rounded_signals: int
+    min_order_blocked_signals: int
+    min_order_extra_demand_usd: float
+
+
 def _safe_float(value: Any, default: float = 0.0) -> float:
     try:
         return float(value) if value not in (None, "") else default
@@ -117,9 +128,22 @@ def _selected_buy_demand_usd(
     selected_rows: list[dict[str, Any]],
     fallback_budget_usd: float,
     max_leader_trade_budget_fraction: float,
-) -> tuple[float, int]:
-    demand = 0.0
+    min_order_size_usd: float,
+    round_up_to_min_order: bool,
+    max_min_order_round_up_multiple: float,
+    max_per_trade_usd: float,
+) -> BuyDemandEstimate:
+    raw_demand = 0.0
+    effective_demand = 0.0
+    raw_sized = 0
     usable = 0
+    rounded = 0
+    blocked = 0
+    min_order_extra = 0.0
+    min_order = max(_safe_float(min_order_size_usd), 0.0)
+    max_round_up_multiple = max(_safe_float(max_min_order_round_up_multiple), 0.0)
+    max_trade = max(_safe_float(max_per_trade_usd), 0.0)
+
     for row in selected_rows:
         budget = _safe_float(row.get("target_budget_usd"), fallback_budget_usd)
         if budget <= 0:
@@ -131,9 +155,41 @@ def _selected_buy_demand_usd(
         fraction = notional / portfolio_value
         if max_leader_trade_budget_fraction > 0:
             fraction = min(fraction, max_leader_trade_budget_fraction)
-        demand += budget * fraction
+        raw_amount = budget * fraction
+        if max_trade > 0:
+            raw_amount = min(raw_amount, max_trade)
+        raw_amount = min(raw_amount, budget)
+        if raw_amount <= 0:
+            continue
+
+        raw_sized += 1
+        raw_demand += raw_amount
+        effective_amount = raw_amount
+
+        if min_order > 0 and raw_amount < min_order:
+            if not round_up_to_min_order:
+                blocked += 1
+                continue
+            round_up_multiple = min_order / max(raw_amount, 1e-12)
+            if max_round_up_multiple > 0 and round_up_multiple > max_round_up_multiple + 1e-12:
+                blocked += 1
+                continue
+            effective_amount = min_order
+            rounded += 1
+            min_order_extra += min_order - raw_amount
+
+        effective_demand += effective_amount
         usable += 1
-    return round(demand, 8), usable
+
+    return BuyDemandEstimate(
+        raw_demand_usd=round(raw_demand, 8),
+        effective_demand_usd=round(effective_demand, 8),
+        raw_sized_signals=raw_sized,
+        usable_signals=usable,
+        min_order_rounded_signals=rounded,
+        min_order_blocked_signals=blocked,
+        min_order_extra_demand_usd=round(min_order_extra, 8),
+    )
 
 
 def _processed_budget_skips(
@@ -266,11 +322,22 @@ def compute_adaptive_sizing_decision(
         config.get("sizing", {}).get("max_leader_trade_budget_fraction"),
         0.0,
     )
-    demand_usd, usable_demand_signals = _selected_buy_demand_usd(
+    risk_cfg = config.get("risk", {})
+    sizing_cfg = config.get("sizing", {})
+    demand_estimate = _selected_buy_demand_usd(
         selected_rows=selected_buys,
         fallback_budget_usd=budget,
         max_leader_trade_budget_fraction=max_budget_fraction,
+        min_order_size_usd=_safe_float(risk_cfg.get("min_order_size_usd"), 0.01),
+        round_up_to_min_order=_safe_bool(sizing_cfg.get("round_up_to_min_order"), False),
+        max_min_order_round_up_multiple=_safe_float(
+            sizing_cfg.get("max_min_order_round_up_multiple"),
+            0.0,
+        ),
+        max_per_trade_usd=_safe_float(risk_cfg.get("max_per_trade_usd"), 0.0),
     )
+    demand_usd = demand_estimate.effective_demand_usd
+    usable_demand_signals = demand_estimate.usable_signals
 
     min_signals = int(_safe_float(cfg.get("min_buy_signals_for_history"), 5))
     target_turnover = _safe_float(cfg.get("target_budget_turnover"), 0.85)
@@ -329,8 +396,20 @@ def compute_adaptive_sizing_decision(
         "utilization": round(utilization, 8),
         "lookback_hours": _safe_float(cfg.get("lookback_hours"), 24.0),
         "selected_buy_signals": len(selected_buys),
+        "raw_sized_buy_signals": demand_estimate.raw_sized_signals,
         "usable_demand_signals": usable_demand_signals,
         "selected_buy_demand_usd": demand_usd,
+        "selected_buy_raw_demand_usd": demand_estimate.raw_demand_usd,
+        "selected_buy_effective_demand_usd": demand_estimate.effective_demand_usd,
+        "min_order_size_usd": _safe_float(risk_cfg.get("min_order_size_usd"), 0.01),
+        "round_up_to_min_order": _safe_bool(sizing_cfg.get("round_up_to_min_order"), False),
+        "max_min_order_round_up_multiple": _safe_float(
+            sizing_cfg.get("max_min_order_round_up_multiple"),
+            0.0,
+        ),
+        "min_order_rounded_signals": demand_estimate.min_order_rounded_signals,
+        "min_order_blocked_signals": demand_estimate.min_order_blocked_signals,
+        "min_order_extra_demand_usd": demand_estimate.min_order_extra_demand_usd,
         "target_capacity_usd": round(target_capacity, 8),
         "budget_skips": skipped_by_budget,
         "budget_skip_ratio": skip_ratio,
