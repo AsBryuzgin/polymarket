@@ -75,6 +75,25 @@ class ReconciliationTests(unittest.TestCase):
         issue_types = {row["issue_type"] for row in report.issue_rows}
         self.assertNotIn("ORDER_ATTEMPT_NOT_FINAL", issue_types)
 
+    def test_reviewed_live_submit_error_is_final_attempt_status(self) -> None:
+        report = reconcile_executor_state(
+            trade_history_rows=[],
+            open_position_rows=[],
+            processed_signal_rows=[],
+            order_attempt_rows=[
+                {
+                    "attempt_id": 1,
+                    "signal_id": "sig-reviewed",
+                    "leader_wallet": "wallet1",
+                    "token_id": "tokenA",
+                    "status": "LIVE_SUBMIT_ERROR_REVIEWED",
+                }
+            ],
+        )
+
+        issue_types = {row["issue_type"] for row in report.issue_rows}
+        self.assertNotIn("ORDER_ATTEMPT_NOT_FINAL", issue_types)
+
     def test_reconciliation_detects_filled_signal_without_attempt(self) -> None:
         report = reconcile_executor_state(
             trade_history_rows=[],
