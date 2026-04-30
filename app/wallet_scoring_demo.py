@@ -24,6 +24,9 @@ def main() -> None:
         delay_sec=45,
         profit_factor=1.9,
         largest_win_share=0.18,
+        trades_30d=14,
+        trades_90d=34,
+        days_since_last_trade=1,
     )
 
     result = score_wallet(metrics)
@@ -35,6 +38,7 @@ def main() -> None:
     print(f"drawdown_score: {result.drawdown_score}")
     print(f"specialization_score: {result.specialization_score}")
     print(f"copyability_score: {result.copyability_score}")
+    print(f"activity_score: {result.activity_score}")
     print(f"return_quality_score: {result.return_quality_score}")
     print(f"raw_wss: {result.raw_wss}")
     print(f"track_record_multiplier: {result.track_record_multiplier}")

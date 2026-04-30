@@ -1,9 +1,14 @@
 from __future__ import annotations
 
 import csv
+import sys
 from collections import defaultdict
 from pathlib import Path
 from pprint import pprint
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 from execution.state_store import init_db, list_trade_history, list_open_positions
 

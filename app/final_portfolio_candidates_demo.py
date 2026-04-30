@@ -12,7 +12,8 @@ OUTPUT_FILE = SHORTLIST_DIR / "final_portfolio_candidates.csv"
 
 CORE_QUOTA_PER_CATEGORY = 2
 EXPERIMENTAL_QUOTA_PER_CATEGORY = 1
-MIN_WSS = 60.0
+MIN_WSS = 55.0
+EPS = 1e-9
 
 
 def load_csv(path: Path) -> list[dict]:
@@ -68,7 +69,13 @@ def deduplicate_wallets(rows: list[dict]) -> list[dict]:
         existing_categories.add(row["category"])
         existing["all_categories"] = ", ".join(sorted(existing_categories))
 
-        if row["final_wss"] > existing["final_wss"]:
+        current_rank = int(row.get("rank") or 999999)
+        existing_rank = int(existing.get("rank") or 999999)
+        should_replace = row["final_wss"] > existing["final_wss"] + EPS
+        if abs(row["final_wss"] - existing["final_wss"]) <= EPS:
+            should_replace = current_rank < existing_rank
+
+        if should_replace:
             row_copy = row.copy()
             row_copy["all_categories"] = existing["all_categories"]
             best_by_wallet[wallet] = row_copy
@@ -89,16 +96,45 @@ def save_csv(rows: list[dict], path: Path) -> None:
         "all_categories",
         "final_wss",
         "raw_wss",
+        "consistency_score",
+        "drawdown_score",
+        "specialization_score",
+        "copyability_score",
+        "copyability_score_raw",
+        "copyability_smoothing_samples",
+        "activity_score",
+        "return_quality_score",
+        "track_record_multiplier",
+        "data_depth_multiplier",
         "leaderboard_pnl",
+        "leaderboard_week_pnl",
+        "leaderboard_month_pnl",
+        "profile_week_pnl",
+        "profile_month_pnl",
         "leaderboard_volume",
         "rank",
         "time_period",
         "eligible",
         "filter_reasons",
+        "median_spread",
+        "median_liquidity",
+        "slippage_proxy",
+        "current_position_pnl_ratio",
+        "total_pnl_ratio",
+        "open_loss_exposure",
+        "roi_7",
+        "roi_30",
+        "trades_30d",
+        "trades_90d",
+        "buy_trades_30d",
+        "sell_trades_30d",
+        "buy_trade_share_30d",
+        "days_since_last_trade",
+        "closed_positions_used",
     ]
 
     with path.open("w", encoding="utf-8", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
         writer.writeheader()
         writer.writerows(rows)
 

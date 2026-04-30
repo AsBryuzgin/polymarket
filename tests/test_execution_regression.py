@@ -7,12 +7,14 @@ from unittest.mock import patch
 
 import execution.state_store as state_store
 from execution.copy_worker import LeaderSignal, process_signal
+from execution.order_router import OrderExecutionResult
 
 
 class ExecutionRegressionTests(unittest.TestCase):
     def setUp(self) -> None:
         self.tmpdir = tempfile.TemporaryDirectory()
         self.db_path = Path(self.tmpdir.name) / "test_executor_state.db"
+        self.runtime_lock_path = Path(self.tmpdir.name) / "runtime.lock"
         state_store.DB_PATH = self.db_path
         state_store.init_db()
 
@@ -56,7 +58,7 @@ class ExecutionRegressionTests(unittest.TestCase):
         self.assertEqual(float(pos["avg_entry_price"]), 0.55)
         self.assertEqual(pos["status"], "OPEN")
 
-    def test_buy_sizing_uses_leader_trade_notional(self) -> None:
+    def test_buy_sizing_uses_leader_trade_budget_fraction(self) -> None:
         signal = LeaderSignal(
             signal_id="sig-buy-1",
             leader_wallet="wallet2",
@@ -64,6 +66,112 @@ class ExecutionRegressionTests(unittest.TestCase):
             side="BUY",
             leader_budget_usd=50.0,
             leader_trade_notional_usd=15.0,
+            leader_portfolio_value_usd=250.0,
+        )
+
+        config = {
+            "risk": {
+                "min_order_size_usd": 0.01,
+                "max_per_trade_usd": 100.0,
+                "skip_if_spread_gt": 0.02,
+            },
+            "filters": {
+                "buy_min_price": 0.05,
+                "buy_max_price": 0.95,
+            },
+            "exit": {
+                "exit_max_spread": 0.05,
+            },
+            "sizing": {
+                "leader_trade_notional_copy_fraction": 0.20,
+            },
+        }
+
+        snapshot = {
+            "midpoint": 0.50,
+            "spread": 0.01,
+            "price_quote": 0.50,
+            "best_bid": 0.49,
+            "best_ask": 0.50,
+        }
+
+        with patch("execution.copy_worker.load_executor_config", return_value=config), \
+             patch("execution.copy_worker.fetch_market_snapshot", return_value=snapshot), \
+             patch("execution.copy_worker.preview_market_order", return_value={"ok": True}):
+            result = process_signal(signal)
+
+        self.assertEqual(result["status"], "PREVIEW_READY_ENTRY")
+        self.assertEqual(result["suggested_amount_usd"], 3.0)
+
+        pos = state_store.get_open_position("wallet2", "tokenB")
+        self.assertIsNotNone(pos)
+        self.assertEqual(float(pos["position_usd"]), 3.0)
+
+    def test_buy_uses_configured_usd_minimum_not_orderbook_share_minimum(self) -> None:
+        signal = LeaderSignal(
+            signal_id="sig-dynamic-min-order",
+            leader_wallet="wallet-min",
+            token_id="token-min",
+            side="BUY",
+            leader_budget_usd=20.0,
+            leader_trade_notional_usd=5.0,
+            leader_portfolio_value_usd=100.0,
+            leader_trade_price=0.65,
+        )
+        config = {
+            "risk": {
+                "min_order_size_usd": 1.0,
+                "max_per_trade_usd": 5.0,
+                "skip_if_spread_gt": 0.03,
+                "enforce_leader_budget_cap": True,
+            },
+            "filters": {
+                "buy_min_price": 0.01,
+                "buy_max_price": 0.96,
+            },
+            "exit": {
+                "exit_max_spread": 0.05,
+            },
+            "sizing": {
+                "leader_trade_notional_copy_fraction": 0.20,
+                "round_up_to_min_order": True,
+                "max_min_order_round_up_multiple": 3.0,
+            },
+            "signal_freshness": {
+                "max_price_drift_abs": 1.0,
+                "max_price_drift_rel": 1.0,
+            },
+        }
+        snapshot = {
+            "side": "BUY",
+            "midpoint": 0.645,
+            "spread": 0.01,
+            "price_quote": 0.65,
+            "best_bid": 0.64,
+            "best_ask": 0.65,
+            "min_order_size": 5.0,
+        }
+
+        with patch("execution.copy_worker.load_executor_config", return_value=config), \
+             patch("execution.copy_worker.fetch_market_snapshot", return_value=snapshot), \
+             patch("execution.copy_worker.preview_market_order", return_value={"ok": True}), \
+             patch("execution.copy_worker.get_leader_registry", return_value=None):
+            result = process_signal(signal)
+
+        self.assertEqual(result["status"], "PREVIEW_READY_ENTRY")
+        self.assertEqual(result["suggested_amount_usd"], 1.0)
+        self.assertEqual(result["sizing"]["reason"], "ok")
+        self.assertEqual(result["sizing"]["details"]["min_order_size_usd"], 1.0)
+
+    def test_duplicate_signal_is_claimed_before_preview(self) -> None:
+        signal = LeaderSignal(
+            signal_id="sig-duplicate-claim",
+            leader_wallet="wallet-dup",
+            token_id="tokenD",
+            side="BUY",
+            leader_budget_usd=50.0,
+            leader_trade_notional_usd=10.0,
+            leader_portfolio_value_usd=100.0,
         )
 
         config = {
@@ -89,20 +197,328 @@ class ExecutionRegressionTests(unittest.TestCase):
             "spread": 0.01,
             "price_quote": 0.50,
             "best_bid": 0.49,
-            "best_ask": 0.51,
+            "best_ask": 0.50,
         }
 
         with patch("execution.copy_worker.load_executor_config", return_value=config), \
              patch("execution.copy_worker.fetch_market_snapshot", return_value=snapshot), \
-             patch("execution.copy_worker.preview_market_order", return_value={"ok": True}):
+             patch("execution.copy_worker.preview_market_order", return_value={"ok": True}) as preview:
+            first = process_signal(signal)
+            second = process_signal(signal)
+
+        self.assertEqual(first["status"], "PREVIEW_READY_ENTRY")
+        self.assertEqual(second["status"], "DUPLICATE")
+        self.assertEqual(preview.call_count, 1)
+
+    def test_buy_blocks_on_entry_price_drift_not_snapshot_age(self) -> None:
+        signal = LeaderSignal(
+            signal_id="sig-buy-drift-block",
+            leader_wallet="wallet-drift",
+            token_id="tokenE",
+            side="BUY",
+            leader_budget_usd=50.0,
+            leader_trade_price=0.50,
+            leader_trade_notional_usd=10.0,
+            leader_portfolio_value_usd=100.0,
+        )
+
+        config = {
+            "risk": {
+                "min_order_size_usd": 1.0,
+                "max_per_trade_usd": 100.0,
+                "skip_if_spread_gt": 0.02,
+            },
+            "filters": {
+                "buy_min_price": 0.05,
+                "buy_max_price": 0.95,
+            },
+            "exit": {
+                "exit_max_spread": 0.05,
+            },
+            "sizing": {
+                "leader_trade_notional_copy_fraction": 0.20,
+            },
+            "signal_freshness": {
+                "max_price_drift_abs": 0.01,
+                "max_price_drift_rel": 0.02,
+            },
+        }
+
+        snapshot = {
+            "midpoint": 0.54,
+            "spread": 0.01,
+            "price_quote": 0.54,
+            "best_bid": 0.535,
+            "best_ask": 0.545,
+        }
+
+        with patch("execution.copy_worker.load_executor_config", return_value=config), \
+             patch("execution.copy_worker.fetch_market_snapshot", return_value=snapshot), \
+             patch("execution.copy_worker.preview_market_order") as preview:
             result = process_signal(signal)
 
-        self.assertEqual(result["status"], "PREVIEW_READY_ENTRY")
-        self.assertEqual(result["suggested_amount_usd"], 3.0)
+        preview.assert_not_called()
+        self.assertEqual(result["status"], "SKIPPED_DRIFT")
+        self.assertIn("buy price drift", result["reason"])
+        self.assertIsNone(state_store.get_open_position("wallet-drift", "tokenE"))
+        self.assertEqual(state_store.list_order_attempts("sig-buy-drift-block"), [])
 
-        pos = state_store.get_open_position("wallet2", "tokenB")
+    def test_live_mode_without_ack_is_blocked_before_position_update(self) -> None:
+        signal = LeaderSignal(
+            signal_id="sig-live-blocked",
+            leader_wallet="wallet-live",
+            token_id="tokenF",
+            side="BUY",
+            leader_budget_usd=50.0,
+            leader_trade_price=0.50,
+            leader_trade_notional_usd=10.0,
+            leader_portfolio_value_usd=100.0,
+        )
+
+        config = {
+            "global": {
+                "simulation": False,
+                "preview_mode": False,
+                "execution_mode": "live",
+                "live_trading_enabled": False,
+                "live_trading_ack": "",
+            },
+            "runtime_lock": {
+                "enabled": True,
+                "path": str(self.runtime_lock_path),
+            },
+            "risk": {
+                "min_order_size_usd": 1.0,
+                "max_per_trade_usd": 100.0,
+                "skip_if_spread_gt": 0.02,
+            },
+            "filters": {
+                "buy_min_price": 0.05,
+                "buy_max_price": 0.95,
+            },
+            "exit": {
+                "exit_max_spread": 0.05,
+            },
+            "sizing": {
+                "leader_trade_notional_copy_fraction": 0.20,
+            },
+            "signal_freshness": {
+                "max_price_drift_abs": 0.01,
+                "max_price_drift_rel": 0.02,
+            },
+        }
+
+        snapshot = {
+            "midpoint": 0.50,
+            "spread": 0.01,
+            "price_quote": 0.50,
+            "best_bid": 0.49,
+            "best_ask": 0.50,
+        }
+
+        with patch("execution.copy_worker.load_executor_config", return_value=config), \
+             patch("execution.copy_worker.fetch_market_snapshot", return_value=snapshot), \
+             patch("execution.copy_worker.preview_market_order") as preview:
+            result = process_signal(signal)
+
+        preview.assert_not_called()
+        self.assertEqual(result["status"], "SKIPPED_EXECUTION")
+        self.assertIn("live trading disabled", result["reason"])
+        self.assertIsNone(state_store.get_open_position("wallet-live", "tokenF"))
+
+        attempts = state_store.list_order_attempts("sig-live-blocked")
+        self.assertEqual(len(attempts), 1)
+        self.assertEqual(attempts[0]["mode"], "LIVE")
+        self.assertEqual(attempts[0]["status"], "LIVE_BLOCKED")
+
+    def test_execution_error_does_not_create_position(self) -> None:
+        signal = LeaderSignal(
+            signal_id="sig-preview-error",
+            leader_wallet="wallet-error",
+            token_id="tokenG",
+            side="BUY",
+            leader_budget_usd=50.0,
+            leader_trade_price=0.50,
+            leader_trade_notional_usd=10.0,
+            leader_portfolio_value_usd=100.0,
+        )
+
+        config = {
+            "risk": {
+                "min_order_size_usd": 1.0,
+                "max_per_trade_usd": 100.0,
+                "skip_if_spread_gt": 0.02,
+            },
+            "filters": {
+                "buy_min_price": 0.05,
+                "buy_max_price": 0.95,
+            },
+            "exit": {
+                "exit_max_spread": 0.05,
+            },
+            "sizing": {
+                "leader_trade_notional_copy_fraction": 0.20,
+            },
+            "signal_freshness": {
+                "max_price_drift_abs": 0.01,
+                "max_price_drift_rel": 0.02,
+            },
+        }
+
+        snapshot = {
+            "midpoint": 0.50,
+            "spread": 0.01,
+            "price_quote": 0.50,
+            "best_bid": 0.49,
+            "best_ask": 0.50,
+        }
+
+        with patch("execution.copy_worker.load_executor_config", return_value=config), \
+             patch("execution.copy_worker.fetch_market_snapshot", return_value=snapshot), \
+             patch("execution.copy_worker.preview_market_order", side_effect=RuntimeError("preview failed")):
+            result = process_signal(signal)
+
+        self.assertEqual(result["status"], "EXECUTION_ERROR")
+        self.assertIn("preview failed", result["reason"])
+        self.assertIsNone(state_store.get_open_position("wallet-error", "tokenG"))
+
+        attempts = state_store.list_order_attempts("sig-preview-error")
+        self.assertEqual(len(attempts), 1)
+        self.assertEqual(attempts[0]["status"], "EXECUTION_ERROR")
+
+    def test_live_fill_updates_position_from_verified_fill_amount(self) -> None:
+        signal = LeaderSignal(
+            signal_id="sig-live-filled",
+            leader_wallet="wallet-live-fill",
+            token_id="tokenH",
+            side="BUY",
+            leader_budget_usd=50.0,
+            leader_trade_price=0.50,
+            leader_trade_notional_usd=10.0,
+            leader_portfolio_value_usd=400.0,
+        )
+
+        config = {
+            "global": {
+                "simulation": False,
+                "preview_mode": False,
+                "execution_mode": "live",
+                "live_trading_enabled": True,
+                "live_trading_ack": "I_UNDERSTAND_THIS_PLACES_REAL_ORDERS",
+            },
+            "runtime_lock": {
+                "enabled": True,
+                "path": str(self.runtime_lock_path),
+            },
+            "risk": {
+                "min_order_size_usd": 1.0,
+                "max_per_trade_usd": 100.0,
+                "skip_if_spread_gt": 0.02,
+            },
+            "filters": {
+                "buy_min_price": 0.05,
+                "buy_max_price": 0.95,
+            },
+            "exit": {
+                "exit_max_spread": 0.05,
+            },
+            "sizing": {
+                "leader_trade_notional_copy_fraction": 0.20,
+            },
+            "signal_freshness": {
+                "max_price_drift_abs": 0.01,
+                "max_price_drift_rel": 0.02,
+            },
+        }
+
+        snapshot = {
+            "midpoint": 0.50,
+            "spread": 0.01,
+            "price_quote": 0.50,
+            "best_bid": 0.49,
+            "best_ask": 0.50,
+        }
+
+        with patch("execution.copy_worker.load_executor_config", return_value=config), \
+             patch("execution.copy_worker.fetch_market_snapshot", return_value=snapshot), \
+             patch(
+                 "execution.copy_worker.execute_market_order",
+                 return_value=OrderExecutionResult(
+                     accepted=True,
+                     mode="LIVE",
+                     status="LIVE_FILLED",
+                     reason="live order fill verified",
+                     raw_response={"orderID": "order1", "filled_amount_usd": "1.25"},
+                     fill_amount_usd=1.25,
+                     order_id="order1",
+                     details={"fill_price": 0.52},
+                 ),
+             ):
+            result = process_signal(signal)
+
+        self.assertEqual(result["status"], "LIVE_FILLED_ENTRY")
+        self.assertEqual(result["suggested_amount_usd"], 1.25)
+
+        pos = state_store.get_open_position("wallet-live-fill", "tokenH")
         self.assertIsNotNone(pos)
-        self.assertEqual(float(pos["position_usd"]), 3.0)
+        self.assertEqual(float(pos["position_usd"]), 1.25)
+        self.assertEqual(float(pos["avg_entry_price"]), 0.52)
+
+        attempts = state_store.list_order_attempts("sig-live-filled")
+        self.assertEqual(len(attempts), 1)
+        self.assertEqual(attempts[0]["mode"], "LIVE")
+        self.assertEqual(attempts[0]["status"], "LIVE_FILLED")
+        self.assertEqual(attempts[0]["order_id"], "order1")
+        self.assertEqual(float(attempts[0]["fill_amount_usd"]), 1.25)
+
+    def test_live_stop_buy_blocks_new_buy_before_market_fetch(self) -> None:
+        state_store.create_order_attempt(
+            signal_id="sig-old-unknown",
+            leader_wallet="wallet-live-fill",
+            token_id="tokenH",
+            side="BUY",
+            amount_usd=2.0,
+            mode="LIVE",
+            status="LIVE_SUBMITTED_UNVERIFIED",
+            reason="submitted but fill amount was not verified",
+        )
+
+        signal = LeaderSignal(
+            signal_id="sig-live-safety-block",
+            leader_wallet="wallet-live-fill",
+            token_id="tokenI",
+            side="BUY",
+            leader_budget_usd=50.0,
+            leader_trade_price=0.50,
+            leader_trade_notional_usd=10.0,
+            leader_portfolio_value_usd=100.0,
+        )
+
+        config = {
+            "global": {
+                "simulation": False,
+                "preview_mode": False,
+                "execution_mode": "live",
+                "live_trading_enabled": True,
+                "live_trading_ack": "I_UNDERSTAND_THIS_PLACES_REAL_ORDERS",
+            },
+            "live_safety": {
+                "enable_stop_buy_on_critical": True,
+            },
+            "runtime_lock": {
+                "enabled": True,
+                "path": str(self.runtime_lock_path),
+            },
+        }
+
+        with patch("execution.copy_worker.load_executor_config", return_value=config), \
+             patch("execution.copy_worker.fetch_market_snapshot") as fetch_snapshot:
+            result = process_signal(signal)
+
+        fetch_snapshot.assert_not_called()
+        self.assertEqual(result["status"], "SKIPPED_LIVE_SAFETY")
+        self.assertIn("live stop-buy active", result["reason"])
+        self.assertEqual(state_store.list_order_attempts("sig-live-safety-block"), [])
 
     def test_sell_partial_exit_reduces_position(self) -> None:
         state_store.upsert_buy_position(
@@ -119,7 +535,8 @@ class ExecutionRegressionTests(unittest.TestCase):
             token_id="tokenC",
             side="SELL",
             leader_budget_usd=50.0,
-            leader_trade_notional_usd=5.0,  # 20% => 1.0 sell
+            leader_trade_notional_usd=5.0,
+            leader_exit_fraction=0.5,
         )
 
         config = {

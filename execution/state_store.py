@@ -1,12 +1,59 @@
 from __future__ import annotations
 
+import json
+import os
 import sqlite3
+from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
+import tomllib
 
 
-DB_PATH = Path("data/executor_state.db")
+DEFAULT_DB_PATH = Path("data/executor_state.db")
+DB_PATH_ENV_VAR = "POLY_EXECUTOR_DB_PATH"
+CONFIG_PATH_ENV_VAR = "POLY_EXECUTOR_CONFIG_PATH"
+
+
+def resolve_state_db_path(
+    *,
+    config_path: str | Path = "config/executor.toml",
+    env: Mapping[str, str] | None = None,
+) -> Path:
+    if env is None:
+        env = os.environ
+    env_value = env.get(DB_PATH_ENV_VAR)
+    if env_value:
+        return Path(env_value)
+
+    if str(config_path) == "config/executor.toml" and env.get(CONFIG_PATH_ENV_VAR):
+        config_path = str(env[CONFIG_PATH_ENV_VAR])
+
+    p = Path(config_path)
+    if p.exists():
+        try:
+            with p.open("rb") as f:
+                config = tomllib.load(f)
+            configured = config.get("state", {}).get("db_path")
+            if configured:
+                return Path(str(configured))
+        except Exception:
+            return DEFAULT_DB_PATH
+
+    return DEFAULT_DB_PATH
+
+
+DB_PATH = resolve_state_db_path()
 EPS = 1e-12
+
+
+def _table_columns(cur: sqlite3.Cursor, table_name: str) -> set[str]:
+    cur.execute(f"PRAGMA table_info({table_name})")
+    return {str(row[1]) for row in cur.fetchall()}
+
+
+def _ensure_column(cur: sqlite3.Cursor, table_name: str, column_name: str, column_sql: str) -> None:
+    if column_name not in _table_columns(cur, table_name):
+        cur.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_sql}")
 
 
 def get_connection() -> sqlite3.Connection:
@@ -33,6 +80,37 @@ def init_db() -> None:
             reason TEXT,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
+        """
+    )
+
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS order_attempts (
+            attempt_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            signal_id TEXT NOT NULL,
+            leader_wallet TEXT NOT NULL,
+            token_id TEXT NOT NULL,
+            side TEXT NOT NULL,
+            amount_usd REAL NOT NULL,
+            mode TEXT NOT NULL,
+            status TEXT NOT NULL,
+            order_id TEXT,
+            fill_amount_usd REAL,
+            reason TEXT,
+            raw_response_json TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        """
+    )
+
+    _ensure_column(cur, "order_attempts", "order_id", "TEXT")
+    _ensure_column(cur, "order_attempts", "fill_amount_usd", "REAL")
+
+    cur.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_order_attempts_signal_id
+        ON order_attempts(signal_id)
         """
     )
 
@@ -96,6 +174,27 @@ def init_db() -> None:
         """
     )
 
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS processed_settlements (
+            condition_id TEXT PRIMARY KEY,
+            market_slug TEXT,
+            question TEXT,
+            token_ids_json TEXT,
+            mode TEXT,
+            status TEXT NOT NULL,
+            reason TEXT,
+            transaction_id TEXT,
+            transaction_hash TEXT,
+            expected_payout_usd REAL,
+            position_count INTEGER,
+            raw_response_json TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        """
+    )
+
     conn.commit()
     conn.close()
 
@@ -114,6 +213,46 @@ def has_signal(signal_id: str) -> bool:
     return row is not None
 
 
+def claim_signal(
+    signal_id: str,
+    leader_wallet: str,
+    token_id: str,
+    side: str,
+    leader_budget_usd: float,
+) -> bool:
+    conn = get_connection()
+    cur = conn.cursor()
+
+    try:
+        cur.execute(
+            """
+            INSERT INTO processed_signals (
+                signal_id,
+                leader_wallet,
+                token_id,
+                side,
+                leader_budget_usd,
+                suggested_amount_usd,
+                status,
+                reason
+            ) VALUES (?, ?, ?, ?, ?, NULL, 'PROCESSING', 'signal claimed')
+            """,
+            (
+                signal_id,
+                leader_wallet,
+                token_id,
+                side,
+                leader_budget_usd,
+            ),
+        )
+        conn.commit()
+        return True
+    except sqlite3.IntegrityError:
+        return False
+    finally:
+        conn.close()
+
+
 def record_signal(
     signal_id: str,
     leader_wallet: str,
@@ -129,7 +268,7 @@ def record_signal(
 
     cur.execute(
         """
-        INSERT OR REPLACE INTO processed_signals (
+        INSERT INTO processed_signals (
             signal_id,
             leader_wallet,
             token_id,
@@ -139,6 +278,14 @@ def record_signal(
             status,
             reason
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(signal_id) DO UPDATE SET
+            leader_wallet = excluded.leader_wallet,
+            token_id = excluded.token_id,
+            side = excluded.side,
+            leader_budget_usd = excluded.leader_budget_usd,
+            suggested_amount_usd = excluded.suggested_amount_usd,
+            status = excluded.status,
+            reason = excluded.reason
         """,
         (
             signal_id,
@@ -154,6 +301,231 @@ def record_signal(
 
     conn.commit()
     conn.close()
+
+
+def create_order_attempt(
+    signal_id: str,
+    leader_wallet: str,
+    token_id: str,
+    side: str,
+    amount_usd: float,
+    mode: str,
+    status: str,
+    reason: str | None = None,
+) -> int:
+    conn = get_connection()
+    cur = conn.cursor()
+
+    cur.execute(
+        """
+        INSERT INTO order_attempts (
+            signal_id,
+            leader_wallet,
+            token_id,
+            side,
+            amount_usd,
+            mode,
+            status,
+            reason
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            signal_id,
+            leader_wallet,
+            token_id,
+            side,
+            amount_usd,
+            mode,
+            status,
+            reason,
+        ),
+    )
+    attempt_id = int(cur.lastrowid)
+
+    conn.commit()
+    conn.close()
+
+    return attempt_id
+
+
+def update_order_attempt(
+    attempt_id: int,
+    status: str,
+    reason: str | None = None,
+    raw_response: dict[str, Any] | None = None,
+    order_id: str | None = None,
+    fill_amount_usd: float | None = None,
+) -> None:
+    raw_response_json = None
+    if raw_response is not None:
+        raw_response_json = json.dumps(raw_response, ensure_ascii=False, default=str)
+
+    conn = get_connection()
+    cur = conn.cursor()
+
+    cur.execute(
+        """
+        UPDATE order_attempts
+        SET status = ?,
+            reason = ?,
+            order_id = ?,
+            fill_amount_usd = ?,
+            raw_response_json = ?,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE attempt_id = ?
+        """,
+        (
+            status,
+            reason,
+            order_id,
+            fill_amount_usd,
+            raw_response_json,
+            attempt_id,
+        ),
+    )
+
+    conn.commit()
+    conn.close()
+
+
+def list_order_attempts(signal_id: str | None = None, limit: int = 50) -> list[dict[str, Any]]:
+    conn = get_connection()
+    cur = conn.cursor()
+
+    if signal_id is None:
+        cur.execute(
+            """
+            SELECT *
+            FROM order_attempts
+            ORDER BY attempt_id DESC
+            LIMIT ?
+            """,
+            (limit,),
+        )
+    else:
+        cur.execute(
+            """
+            SELECT *
+            FROM order_attempts
+            WHERE signal_id = ?
+            ORDER BY attempt_id DESC
+            LIMIT ?
+            """,
+            (signal_id, limit),
+        )
+
+    rows = [dict(row) for row in cur.fetchall()]
+    conn.close()
+    return rows
+
+
+def get_processed_settlement(condition_id: str) -> dict[str, Any] | None:
+    conn = get_connection()
+    cur = conn.cursor()
+
+    cur.execute(
+        """
+        SELECT *
+        FROM processed_settlements
+        WHERE condition_id = ?
+        LIMIT 1
+        """,
+        (condition_id,),
+    )
+    row = cur.fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
+def record_processed_settlement(
+    condition_id: str,
+    *,
+    market_slug: str | None,
+    question: str | None,
+    token_ids: list[str] | None,
+    mode: str | None,
+    status: str,
+    reason: str | None,
+    transaction_id: str | None = None,
+    transaction_hash: str | None = None,
+    expected_payout_usd: float | None = None,
+    position_count: int | None = None,
+    raw_response: dict[str, Any] | list[Any] | None = None,
+) -> None:
+    raw_response_json = None
+    if raw_response is not None:
+        raw_response_json = json.dumps(raw_response, ensure_ascii=False, default=str)
+    token_ids_json = json.dumps(token_ids or [], ensure_ascii=False)
+
+    conn = get_connection()
+    cur = conn.cursor()
+
+    cur.execute(
+        """
+        INSERT INTO processed_settlements (
+            condition_id,
+            market_slug,
+            question,
+            token_ids_json,
+            mode,
+            status,
+            reason,
+            transaction_id,
+            transaction_hash,
+            expected_payout_usd,
+            position_count,
+            raw_response_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(condition_id) DO UPDATE SET
+            market_slug = excluded.market_slug,
+            question = excluded.question,
+            token_ids_json = excluded.token_ids_json,
+            mode = excluded.mode,
+            status = excluded.status,
+            reason = excluded.reason,
+            transaction_id = excluded.transaction_id,
+            transaction_hash = excluded.transaction_hash,
+            expected_payout_usd = excluded.expected_payout_usd,
+            position_count = excluded.position_count,
+            raw_response_json = excluded.raw_response_json,
+            updated_at = CURRENT_TIMESTAMP
+        """,
+        (
+            condition_id,
+            market_slug,
+            question,
+            token_ids_json,
+            mode,
+            status,
+            reason,
+            transaction_id,
+            transaction_hash,
+            expected_payout_usd,
+            position_count,
+            raw_response_json,
+        ),
+    )
+
+    conn.commit()
+    conn.close()
+
+
+def list_processed_settlements(limit: int = 200) -> list[dict[str, Any]]:
+    conn = get_connection()
+    cur = conn.cursor()
+
+    cur.execute(
+        """
+        SELECT *
+        FROM processed_settlements
+        ORDER BY updated_at DESC, created_at DESC
+        LIMIT ?
+        """,
+        (limit,),
+    )
+    rows = [dict(row) for row in cur.fetchall()]
+    conn.close()
+    return rows
 
 
 def get_open_position(leader_wallet: str, token_id: str) -> dict[str, Any] | None:
@@ -523,6 +895,16 @@ def get_leader_registry(wallet: str) -> dict[str, Any] | None:
     return dict(row) if row else None
 
 
+def delete_leader_registry_row(wallet: str) -> None:
+    conn = get_connection()
+    cur = conn.cursor()
+
+    cur.execute("DELETE FROM leader_registry WHERE wallet = ?", (wallet,))
+
+    conn.commit()
+    conn.close()
+
+
 def list_leader_registry(limit: int = 100) -> list[dict[str, Any]]:
     conn = get_connection()
     cur = conn.cursor()
@@ -581,6 +963,25 @@ def list_recent_signals(limit: int = 20) -> list[dict[str, Any]]:
     return rows
 
 
+def list_processed_signals(limit: int = 100000) -> list[dict[str, Any]]:
+    conn = get_connection()
+    cur = conn.cursor()
+
+    cur.execute(
+        """
+        SELECT *
+        FROM processed_signals
+        ORDER BY created_at ASC
+        LIMIT ?
+        """,
+        (limit,),
+    )
+
+    rows = [dict(row) for row in cur.fetchall()]
+    conn.close()
+    return rows
+
+
 def list_trade_history(limit: int = 200) -> list[dict[str, Any]]:
     conn = get_connection()
     cur = conn.cursor()
@@ -598,3 +999,22 @@ def list_trade_history(limit: int = 200) -> list[dict[str, Any]]:
     rows = [dict(row) for row in cur.fetchall()]
     conn.close()
     return rows
+
+
+def sum_realized_pnl_since(since: datetime) -> float:
+    conn = get_connection()
+    cur = conn.cursor()
+
+    cur.execute(
+        """
+        SELECT COALESCE(SUM(realized_pnl_usd), 0.0) AS realized_pnl
+        FROM trade_history
+        WHERE realized_pnl_usd IS NOT NULL
+          AND event_time >= ?
+        """,
+        (since.strftime("%Y-%m-%d %H:%M:%S"),),
+    )
+    row = cur.fetchone()
+    conn.close()
+
+    return float(row["realized_pnl"] or 0.0)
