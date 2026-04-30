@@ -165,18 +165,21 @@ def _selected_buy_demand_usd(
         raw_sized += 1
         raw_demand += raw_amount
         effective_amount = raw_amount
+        row_min_order = _safe_float(row.get("snapshot_min_order_usd"), min_order)
+        if row_min_order <= 0:
+            row_min_order = min_order
 
-        if min_order > 0 and raw_amount < min_order:
+        if row_min_order > 0 and raw_amount < row_min_order:
             if not round_up_to_min_order:
                 blocked += 1
                 continue
-            round_up_multiple = min_order / max(raw_amount, 1e-12)
+            round_up_multiple = row_min_order / max(raw_amount, 1e-12)
             if max_round_up_multiple > 0 and round_up_multiple > max_round_up_multiple + 1e-12:
                 blocked += 1
                 continue
-            effective_amount = min_order
+            effective_amount = row_min_order
             rounded += 1
-            min_order_extra += min_order - raw_amount
+            min_order_extra += row_min_order - raw_amount
 
         effective_demand += effective_amount
         usable += 1

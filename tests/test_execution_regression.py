@@ -92,7 +92,7 @@ class ExecutionRegressionTests(unittest.TestCase):
             "spread": 0.01,
             "price_quote": 0.50,
             "best_bid": 0.49,
-            "best_ask": 0.51,
+            "best_ask": 0.50,
         }
 
         with patch("execution.copy_worker.load_executor_config", return_value=config), \
@@ -106,6 +106,61 @@ class ExecutionRegressionTests(unittest.TestCase):
         pos = state_store.get_open_position("wallet2", "tokenB")
         self.assertIsNotNone(pos)
         self.assertEqual(float(pos["position_usd"]), 3.0)
+
+    def test_buy_uses_snapshot_share_min_order_instead_of_static_usd_floor(self) -> None:
+        signal = LeaderSignal(
+            signal_id="sig-dynamic-min-order",
+            leader_wallet="wallet-min",
+            token_id="token-min",
+            side="BUY",
+            leader_budget_usd=20.0,
+            leader_trade_notional_usd=1.0,
+            leader_portfolio_value_usd=100.0,
+            leader_trade_price=0.05,
+        )
+        config = {
+            "risk": {
+                "min_order_size_usd": 1.0,
+                "max_per_trade_usd": 5.0,
+                "skip_if_spread_gt": 0.03,
+                "enforce_leader_budget_cap": True,
+            },
+            "filters": {
+                "buy_min_price": 0.01,
+                "buy_max_price": 0.96,
+            },
+            "exit": {
+                "exit_max_spread": 0.05,
+            },
+            "sizing": {
+                "leader_trade_notional_copy_fraction": 0.20,
+                "round_up_to_min_order": True,
+                "max_min_order_round_up_multiple": 3.0,
+            },
+            "signal_freshness": {
+                "max_price_drift_abs": 1.0,
+                "max_price_drift_rel": 1.0,
+            },
+        }
+        snapshot = {
+            "side": "BUY",
+            "midpoint": 0.045,
+            "spread": 0.01,
+            "price_quote": 0.05,
+            "best_bid": 0.04,
+            "best_ask": 0.05,
+            "min_order_size": 5.0,
+        }
+
+        with patch("execution.copy_worker.load_executor_config", return_value=config), \
+             patch("execution.copy_worker.fetch_market_snapshot", return_value=snapshot), \
+             patch("execution.copy_worker.preview_market_order", return_value={"ok": True}), \
+             patch("execution.copy_worker.get_leader_registry", return_value=None):
+            result = process_signal(signal)
+
+        self.assertEqual(result["status"], "PREVIEW_READY_ENTRY")
+        self.assertEqual(result["suggested_amount_usd"], 0.25)
+        self.assertEqual(result["sizing"]["reason"], "rounded up to min_order_size_usd")
 
     def test_duplicate_signal_is_claimed_before_preview(self) -> None:
         signal = LeaderSignal(
@@ -141,7 +196,7 @@ class ExecutionRegressionTests(unittest.TestCase):
             "spread": 0.01,
             "price_quote": 0.50,
             "best_bid": 0.49,
-            "best_ask": 0.51,
+            "best_ask": 0.50,
         }
 
         with patch("execution.copy_worker.load_executor_config", return_value=config), \
@@ -257,7 +312,7 @@ class ExecutionRegressionTests(unittest.TestCase):
             "spread": 0.01,
             "price_quote": 0.50,
             "best_bid": 0.49,
-            "best_ask": 0.51,
+            "best_ask": 0.50,
         }
 
         with patch("execution.copy_worker.load_executor_config", return_value=config), \
@@ -314,7 +369,7 @@ class ExecutionRegressionTests(unittest.TestCase):
             "spread": 0.01,
             "price_quote": 0.50,
             "best_bid": 0.49,
-            "best_ask": 0.51,
+            "best_ask": 0.50,
         }
 
         with patch("execution.copy_worker.load_executor_config", return_value=config), \
@@ -380,7 +435,7 @@ class ExecutionRegressionTests(unittest.TestCase):
             "spread": 0.01,
             "price_quote": 0.50,
             "best_bid": 0.49,
-            "best_ask": 0.51,
+            "best_ask": 0.50,
         }
 
         with patch("execution.copy_worker.load_executor_config", return_value=config), \

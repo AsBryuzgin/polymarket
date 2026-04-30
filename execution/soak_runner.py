@@ -52,6 +52,26 @@ def _snapshot_float(snapshot: dict[str, Any] | None, key: str) -> float | None:
     return _safe_float(snapshot.get(key))
 
 
+def _snapshot_min_order_usd(snapshot: dict[str, Any] | None) -> float | None:
+    min_order_size = _snapshot_float(snapshot, "min_order_size")
+    if min_order_size is None or min_order_size <= 0:
+        return None
+    side = str((snapshot or {}).get("side") or "").upper()
+    if side == "BUY":
+        price_quote = _snapshot_float(snapshot, "best_ask")
+    elif side == "SELL":
+        price_quote = _snapshot_float(snapshot, "best_bid")
+    else:
+        price_quote = None
+    if price_quote is None or price_quote <= 0:
+        price_quote = _snapshot_float(snapshot, "price_quote")
+    if price_quote is None or price_quote <= 0:
+        price_quote = _snapshot_float(snapshot, "midpoint")
+    if price_quote is None or price_quote <= 0:
+        return None
+    return round(min_order_size * price_quote, 8)
+
+
 def _log_observation(
     *,
     row: dict[str, Any],
@@ -93,6 +113,18 @@ def _log_observation(
         snapshot_best_bid=_snapshot_float(snapshot, "best_bid"),
         snapshot_best_ask=_snapshot_float(snapshot, "best_ask"),
         snapshot_spread=_snapshot_float(snapshot, "spread"),
+        snapshot_min_order_size=_snapshot_float(snapshot, "min_order_size"),
+        snapshot_min_order_usd=_snapshot_min_order_usd(snapshot),
+        latest_token_id=summary.get("latest_token_id"),
+        latest_trade_price=_safe_float(summary.get("latest_trade_price")),
+        latest_snapshot_midpoint=_safe_float(summary.get("latest_snapshot_midpoint")),
+        latest_snapshot_best_bid=_safe_float(summary.get("latest_snapshot_best_bid")),
+        latest_snapshot_best_ask=_safe_float(summary.get("latest_snapshot_best_ask")),
+        latest_snapshot_spread=_safe_float(summary.get("latest_snapshot_spread")),
+        latest_snapshot_min_order_size=_safe_float(
+            summary.get("latest_snapshot_min_order_size")
+        ),
+        latest_snapshot_min_order_usd=_safe_float(summary.get("latest_snapshot_min_order_usd")),
     )
 
 

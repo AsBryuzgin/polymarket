@@ -154,6 +154,10 @@ position_qty_tolerance = 0.01
 buy_min_price = 0.05
 buy_max_price = 0.96
 
+[trade_source]
+# false matches the profile Activity feed and includes passive/maker fills.
+data_api_taker_only = false
+
 [exit]
 ignore_exit_drift = true
 exit_max_spread = 0.05

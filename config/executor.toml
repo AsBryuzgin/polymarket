@@ -150,6 +150,9 @@ position_qty_tolerance = 0.000001
 buy_min_price = 0.05
 buy_max_price = 0.96
 
+[trade_source]
+data_api_taker_only = true
+
 [exit]
 ignore_exit_drift = true
 exit_max_spread = 0.05

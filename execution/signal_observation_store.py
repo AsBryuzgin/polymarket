@@ -51,10 +51,14 @@ def init_signal_observation_table() -> None:
             snapshot_best_bid REAL,
             snapshot_best_ask REAL,
             snapshot_spread REAL,
+            snapshot_min_order_size REAL,
+            snapshot_min_order_usd REAL,
             latest_snapshot_midpoint REAL,
             latest_snapshot_best_bid REAL,
             latest_snapshot_best_ask REAL,
-            latest_snapshot_spread REAL
+            latest_snapshot_spread REAL,
+            latest_snapshot_min_order_size REAL,
+            latest_snapshot_min_order_usd REAL
         )
         """
     )
@@ -95,6 +99,10 @@ def init_signal_observation_table() -> None:
     _ensure_column(cur, "signal_observations", "latest_snapshot_best_bid", "REAL")
     _ensure_column(cur, "signal_observations", "latest_snapshot_best_ask", "REAL")
     _ensure_column(cur, "signal_observations", "latest_snapshot_spread", "REAL")
+    _ensure_column(cur, "signal_observations", "snapshot_min_order_size", "REAL")
+    _ensure_column(cur, "signal_observations", "snapshot_min_order_usd", "REAL")
+    _ensure_column(cur, "signal_observations", "latest_snapshot_min_order_size", "REAL")
+    _ensure_column(cur, "signal_observations", "latest_snapshot_min_order_usd", "REAL")
 
     conn.commit()
     conn.close()
@@ -126,12 +134,16 @@ def log_signal_observation(
     snapshot_best_bid: float | None = None,
     snapshot_best_ask: float | None = None,
     snapshot_spread: float | None = None,
+    snapshot_min_order_size: float | None = None,
+    snapshot_min_order_usd: float | None = None,
     latest_token_id: str | None = None,
     latest_trade_price: float | None = None,
     latest_snapshot_midpoint: float | None = None,
     latest_snapshot_best_bid: float | None = None,
     latest_snapshot_best_ask: float | None = None,
     latest_snapshot_spread: float | None = None,
+    latest_snapshot_min_order_size: float | None = None,
+    latest_snapshot_min_order_usd: float | None = None,
 ) -> None:
     conn = get_connection()
     cur = conn.cursor()
@@ -165,11 +177,15 @@ def log_signal_observation(
             snapshot_best_bid,
             snapshot_best_ask,
             snapshot_spread,
+            snapshot_min_order_size,
+            snapshot_min_order_usd,
             latest_snapshot_midpoint,
             latest_snapshot_best_bid,
             latest_snapshot_best_ask,
-            latest_snapshot_spread
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            latest_snapshot_spread,
+            latest_snapshot_min_order_size,
+            latest_snapshot_min_order_usd
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             leader_wallet,
@@ -198,10 +214,14 @@ def log_signal_observation(
             snapshot_best_bid,
             snapshot_best_ask,
             snapshot_spread,
+            snapshot_min_order_size,
+            snapshot_min_order_usd,
             latest_snapshot_midpoint,
             latest_snapshot_best_bid,
             latest_snapshot_best_ask,
             latest_snapshot_spread,
+            latest_snapshot_min_order_size,
+            latest_snapshot_min_order_usd,
         ),
     )
 

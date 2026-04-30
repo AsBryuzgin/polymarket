@@ -263,6 +263,35 @@ class SignalNotionalPassthroughTests(unittest.TestCase):
         self.assertEqual(summary["latest_trade_hash"], "tx-new")
         self.assertEqual(candidates[1].summary["selected_trade_hash"], "tx-old")
 
+    def test_source_can_include_maker_fills_from_data_api(self) -> None:
+        fake_config = {
+            "risk": {"skip_if_spread_gt": 0.02, "min_order_size_usd": 1.0},
+            "filters": {"buy_min_price": 0.05, "buy_max_price": 0.95},
+            "trade_source": {"data_api_taker_only": False},
+            "signal_freshness": {
+                "preferred_signal_age_sec": 30,
+                "max_buy_signal_age_sec": 600,
+                "max_recent_trades": 50,
+                "max_signals_per_cycle": 20,
+                "max_price_drift_abs": 1.0,
+                "max_price_drift_rel": 1.0,
+            },
+            "exit": {"ignore_exit_drift": True, "exit_max_spread": 0.05},
+        }
+
+        with patch("execution.leader_signal_source.load_executor_config", return_value=fake_config), \
+             patch("execution.leader_signal_source.WalletProfilesClient") as MockClient, \
+             patch("execution.leader_signal_source.get_leader_registry", return_value={"leader_status": "ACTIVE"}), \
+             patch("execution.leader_signal_source.time.time", return_value=1700000005):
+            MockClient.return_value.get_trades.return_value = []
+
+            fresh_copyable_signals_from_wallet(
+                wallet="walletA",
+                leader_budget_usd=12.84,
+            )
+
+        self.assertFalse(MockClient.return_value.get_trades.call_args.kwargs["taker_only"])
+
     def test_source_can_use_onchain_shadow_trade_before_data_api(self) -> None:
         fake_snapshot = {
             "best_ask": 0.40,

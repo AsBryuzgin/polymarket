@@ -62,6 +62,20 @@ def _safe_int(value: Any) -> int:
         return 0
 
 
+def _safe_bool(value: Any, default: bool = False) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"1", "true", "yes", "on"}:
+            return True
+        if normalized in {"0", "false", "no", "off"}:
+            return False
+    return bool(value)
+
+
 def _position_asset(item: dict[str, Any]) -> str:
     for key in ("asset", "assetId", "token_id", "tokenId"):
         value = item.get(key)
@@ -187,6 +201,19 @@ def _price_drift_ok(
     )
 
 
+def _snapshot_executable_price(snapshot: dict[str, Any], side: str) -> float | None:
+    side = side.upper()
+    if side == "BUY":
+        price = _positive_float_or_none(snapshot.get("best_ask"))
+    elif side == "SELL":
+        price = _positive_float_or_none(snapshot.get("best_bid"))
+    else:
+        price = None
+    if price is not None:
+        return price
+    return _positive_float_or_none(snapshot.get("price_quote"))
+
+
 def _base_summary(*, wallet: str, leader_status: str, checked_trades: int) -> dict[str, Any]:
     return {
         "wallet": wallet,
@@ -201,6 +228,8 @@ def _base_summary(*, wallet: str, leader_status: str, checked_trades: int) -> di
         "latest_snapshot_best_bid": None,
         "latest_snapshot_best_ask": None,
         "latest_snapshot_spread": None,
+        "latest_snapshot_min_order_size": None,
+        "latest_snapshot_min_order_usd": None,
         "latest_status": None,
         "latest_reason": None,
         "selected_trade_hash": None,
@@ -215,6 +244,26 @@ def _base_summary(*, wallet: str, leader_status: str, checked_trades: int) -> di
         "selected_leader_exit_fraction": None,
         "selected_leader_position_context_error": None,
     }
+
+
+def _snapshot_min_order_usd(snapshot: dict[str, Any]) -> float | None:
+    min_order_size = _positive_float_or_none(snapshot.get("min_order_size"))
+    if min_order_size is None:
+        return None
+    side = str(snapshot.get("side") or "").upper()
+    if side == "BUY":
+        price_quote = _positive_float_or_none(snapshot.get("best_ask"))
+    elif side == "SELL":
+        price_quote = _positive_float_or_none(snapshot.get("best_bid"))
+    else:
+        price_quote = None
+    if price_quote is None:
+        price_quote = _positive_float_or_none(snapshot.get("price_quote"))
+    if price_quote is None:
+        price_quote = _positive_float_or_none(snapshot.get("midpoint"))
+    if price_quote is None:
+        return None
+    return round(min_order_size * price_quote, 8)
 
 
 def _effective_signal_id(trade: RawLeaderTrade) -> str:
@@ -296,6 +345,7 @@ def fresh_copyable_signals_from_wallet(
     filters = config.get("filters", {})
     freshness = config.get("signal_freshness", {})
     exit_cfg = config.get("exit", {})
+    trade_source = config.get("trade_source", {})
 
     preferred_signal_age_sec = int(freshness.get("preferred_signal_age_sec", 30))
     max_buy_signal_age_sec = int(
@@ -310,6 +360,7 @@ def fresh_copyable_signals_from_wallet(
     max_price_drift_abs = float(freshness.get("max_price_drift_abs", 0.02))
     max_price_drift_rel = float(freshness.get("max_price_drift_rel", 0.03))
     max_position_pages = int(freshness.get("leader_position_context_max_pages", 20))
+    data_api_taker_only = _safe_bool(trade_source.get("data_api_taker_only"), True)
 
     ignore_exit_drift = bool(exit_cfg.get("ignore_exit_drift", True))
     exit_max_spread = float(exit_cfg.get("exit_max_spread", 0.05))
@@ -321,7 +372,7 @@ def fresh_copyable_signals_from_wallet(
         user=wallet,
         limit=max_recent_trades,
         offset=0,
-        taker_only=True,
+        taker_only=data_api_taker_only,
     )
 
     data_api_trades = _dedupe_and_sort_trades(trades)
@@ -442,6 +493,8 @@ def fresh_copyable_signals_from_wallet(
             summary["latest_snapshot_best_bid"] = snapshot.get("best_bid")
             summary["latest_snapshot_best_ask"] = snapshot.get("best_ask")
             summary["latest_snapshot_spread"] = snapshot.get("spread")
+            summary["latest_snapshot_min_order_size"] = snapshot.get("min_order_size")
+            summary["latest_snapshot_min_order_usd"] = _snapshot_min_order_usd(snapshot)
 
         max_spread = float(risk.get("skip_if_spread_gt", 0.02))
         max_spread_rel = _positive_float_or_none(risk.get("skip_if_spread_rel_gt"))
@@ -472,11 +525,11 @@ def fresh_copyable_signals_from_wallet(
                 summary["latest_reason"] = policy.reason
             continue
 
-        current_price = snapshot["price_quote"]
+        current_price = _snapshot_executable_price(snapshot, trade.side)
         if current_price is None:
             if idx == 0:
                 summary["latest_status"] = "NO_PRICE_QUOTE"
-                summary["latest_reason"] = "missing current price quote"
+                summary["latest_reason"] = "missing current executable price quote"
             continue
 
         drift_ok = True

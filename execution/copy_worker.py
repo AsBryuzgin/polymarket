@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass, asdict, replace
 from datetime import datetime
 
 from execution.budget_accounting import refresh_active_budgets_from_config
@@ -83,6 +83,19 @@ def _entry_price_drift_ok(
         max_abs=max_abs,
         max_rel=max_rel,
     )
+
+
+def _snapshot_executable_price(snapshot: dict, side: str) -> float | None:
+    side = side.upper()
+    if side == "BUY":
+        price = _positive_float_or_none(snapshot.get("best_ask"))
+    elif side == "SELL":
+        price = _positive_float_or_none(snapshot.get("best_bid"))
+    else:
+        price = None
+    if price is not None:
+        return price
+    return _positive_float_or_none(snapshot.get("price_quote"))
 
 
 def _execute_with_recorded_attempt(
@@ -233,12 +246,23 @@ def _adaptive_sizing_for_buy(config: dict, signal: LeaderSignal) -> dict:
 
 def _snapshot_min_order_size_usd(snapshot: dict, configured_min_order_usd: float) -> float:
     snapshot_min_order = _positive_float_or_none(snapshot.get("min_order_size"))
+    configured_min_order = float(configured_min_order_usd or 0.0)
     if snapshot_min_order is None:
-        return configured_min_order_usd
-    price_quote = _positive_float_or_none(snapshot.get("price_quote"))
+        return configured_min_order
+    side = str(snapshot.get("side") or "").upper()
+    if side == "BUY":
+        price_quote = _positive_float_or_none(snapshot.get("best_ask"))
+    elif side == "SELL":
+        price_quote = _positive_float_or_none(snapshot.get("best_bid"))
+    else:
+        price_quote = None
     if price_quote is None:
-        return configured_min_order_usd
-    return max(configured_min_order_usd, snapshot_min_order * price_quote)
+        price_quote = _positive_float_or_none(snapshot.get("price_quote"))
+    if price_quote is None:
+        price_quote = _positive_float_or_none(snapshot.get("midpoint"))
+    if price_quote is None:
+        return configured_min_order
+    return round(snapshot_min_order * price_quote, 8)
 
 
 def _sizing_max_per_trade_for_exit(config: dict, *, position_usd: float) -> float:
@@ -343,7 +367,7 @@ def process_signal(signal: LeaderSignal) -> dict:
     leader_status = registry["leader_status"] if registry else None
 
     snapshot = fetch_market_snapshot(token_id=signal.token_id, side=signal.side)
-    current_price = snapshot["price_quote"]
+    current_price = _snapshot_executable_price(snapshot, signal.side)
 
     if not claim_signal(
         signal_id=signal.signal_id,
@@ -685,6 +709,10 @@ def process_signal(signal: LeaderSignal) -> dict:
             }
 
     runtime_risk_limits = build_runtime_risk_limits(config)
+    runtime_risk_limits = replace(
+        runtime_risk_limits,
+        min_order_size_usd=min_order_size_usd,
+    )
     if runtime_risk_limits.capital_base_missing:
         reason = "risk percent limits require account collateral balance"
         if runtime_risk_limits.capital_base_error:
@@ -910,5 +938,6 @@ def process_signal(signal: LeaderSignal) -> dict:
         "suggested_amount_usd": executed_amount_usd,
         "preview_order": execution.raw_response,
         "execution": asdict(execution),
+        "sizing": asdict(size_decision),
         "adaptive_sizing": adaptive_sizing,
     }
