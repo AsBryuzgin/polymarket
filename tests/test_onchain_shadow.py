@@ -9,8 +9,10 @@ from eth_abi import encode
 
 import execution.state_store as state_store
 from execution.onchain_shadow import (
+    ORDER_FILLED_TOPIC,
     ORDER_MATCHED_TOPIC,
     _configured_rpc_urls,
+    _decode_order_filled_log,
     _decode_orders_matched_log,
     init_onchain_shadow_tables,
     list_recent_onchain_shadow_trades,
@@ -34,6 +36,10 @@ class OnchainShadowTests(unittest.TestCase):
         self.assertEqual(
             ORDER_MATCHED_TOPIC,
             "0x174b3811690657c217184f89418266767c87e4805d09680c39fc9c031c0cab7c",
+        )
+        self.assertEqual(
+            ORDER_FILLED_TOPIC,
+            "0xd543adfd945773f1a62f74f0ee55a5e3b9b1a28262980ba90b1a89f2ea84d8ee",
         )
 
     def test_decodes_buy_orders_matched_log(self) -> None:
@@ -86,6 +92,34 @@ class OnchainShadowTests(unittest.TestCase):
         self.assertEqual(decoded.notional_usd, 0.75)
         self.assertEqual(decoded.size, 3.0)
         self.assertEqual(decoded.price, 0.25)
+
+    def test_decodes_maker_order_filled_buy_log(self) -> None:
+        maker = "0x2005d16a84ceefa912d4e380cd32e7ff827875ea"
+        taker = "0x60a32ad6f44ae555507b464268f499252c613850"
+        token_id = 103830634572068494
+        log = {
+            "topics": [
+                ORDER_FILLED_TOPIC,
+                "0x" + ("33" * 32),
+                _topic_address(maker),
+                _topic_address(taker),
+            ],
+            "data": "0x"
+            + encode(
+                ["uint8", "uint256", "uint256", "uint256", "uint256", "bytes32", "bytes32"],
+                [0, token_id, 202_500, 562_500, 0, b"\x00" * 32, b"\x00" * 32],
+            ).hex(),
+        }
+
+        decoded = _decode_order_filled_log(log)
+
+        self.assertIsNotNone(decoded)
+        self.assertEqual(decoded.leader_wallet, maker.lower())
+        self.assertEqual(decoded.side, "BUY")
+        self.assertEqual(decoded.token_id, str(token_id))
+        self.assertEqual(decoded.notional_usd, 0.2025)
+        self.assertEqual(decoded.size, 0.5625)
+        self.assertEqual(decoded.price, 0.36)
 
     def test_configured_rpc_urls_uses_env_and_dedupes(self) -> None:
         with patch.dict(

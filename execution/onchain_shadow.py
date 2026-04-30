@@ -20,6 +20,11 @@ ORDER_MATCHED_SIGNATURE = (
     "OrdersMatched(bytes32,address,uint8,uint256,uint256,uint256)"
 )
 ORDER_MATCHED_TOPIC = "0x" + keccak(text=ORDER_MATCHED_SIGNATURE).hex()
+ORDER_FILLED_SIGNATURE = (
+    # Resting maker orders emit one OrderFilled event per matched maker order.
+    "OrderFilled(bytes32,address,address,uint8,uint256,uint256,uint256,uint256,bytes32,bytes32)"
+)
+ORDER_FILLED_TOPIC = "0x" + keccak(text=ORDER_FILLED_SIGNATURE).hex()
 
 DEFAULT_EXCHANGE_ADDRESSES = [
     "0xE111180000d2663C0091e4f400237545B87B996B",
@@ -407,6 +412,67 @@ def _decode_orders_matched_log(log: dict[str, Any], *, decimals: int = 6) -> Dec
     )
 
 
+def _decode_order_filled_log(log: dict[str, Any], *, decimals: int = 6) -> DecodedMatchedOrder | None:
+    topics = log.get("topics") or []
+    if len(topics) < 4:
+        return None
+    if str(topics[0]).lower() != ORDER_FILLED_TOPIC.lower():
+        return None
+
+    order_hash = str(topics[1])
+    leader_wallet = _address_from_topic(str(topics[2]))
+    data = bytes.fromhex(_strip_0x(str(log.get("data") or "0x")))
+    try:
+        side_raw, token_id_raw, maker_amount_filled, taker_amount_filled, _, _, _ = decode(
+            ["uint8", "uint256", "uint256", "uint256", "uint256", "bytes32", "bytes32"],
+            data,
+        )
+    except Exception:
+        return None
+
+    scale = 10 ** int(decimals)
+    side_int = int(side_raw)
+    token_id_int = int(token_id_raw)
+    if side_int == 0 and token_id_int > 0:
+        side = "BUY"
+        token_id = str(token_id_int)
+        notional_usd = int(maker_amount_filled) / scale
+        size = int(taker_amount_filled) / scale
+        maker_asset_id = 0
+        taker_asset_id = token_id_int
+    elif side_int == 1 and token_id_int > 0:
+        side = "SELL"
+        token_id = str(token_id_int)
+        notional_usd = int(taker_amount_filled) / scale
+        size = int(maker_amount_filled) / scale
+        maker_asset_id = token_id_int
+        taker_asset_id = 0
+    else:
+        return None
+
+    price = round(notional_usd / size, 8) if size > 0 else None
+    return DecodedMatchedOrder(
+        order_hash=order_hash,
+        leader_wallet=leader_wallet,
+        side=side,
+        token_id=token_id,
+        size=round(size, 8),
+        price=price,
+        notional_usd=round(notional_usd, 8),
+        maker_asset_id=int(maker_asset_id),
+        taker_asset_id=int(taker_asset_id),
+        maker_amount_filled=int(maker_amount_filled),
+        taker_amount_filled=int(taker_amount_filled),
+    )
+
+
+def _decode_shadow_fill_log(log: dict[str, Any], *, decimals: int = 6) -> DecodedMatchedOrder | None:
+    return _decode_orders_matched_log(log, decimals=decimals) or _decode_order_filled_log(
+        log,
+        decimals=decimals,
+    )
+
+
 def _cursor_key(chain_id: int, addresses: list[str]) -> str:
     return f"{chain_id}:{','.join(sorted(address.lower() for address in addresses))}"
 
@@ -669,7 +735,7 @@ def _fetch_logs_for_range(
                         "fromBlock": _int_to_hex_block(chunk_from),
                         "toBlock": _int_to_hex_block(chunk_to),
                         "address": exchange_address,
-                        "topics": [ORDER_MATCHED_TOPIC, None, wallet_topics],
+                        "topics": [[ORDER_MATCHED_TOPIC, ORDER_FILLED_TOPIC], None, wallet_topics],
                     }
                 ],
                 timeout_sec=timeout_sec,
@@ -786,7 +852,7 @@ def poll_onchain_shadow_once(config: dict[str, Any], leader_wallets: list[str] |
 
     for log in logs:
         logs_seen += 1
-        decoded = _decode_orders_matched_log(log, decimals=decimals)
+        decoded = _decode_shadow_fill_log(log, decimals=decimals)
         if decoded is None:
             continue
         if _insert_shadow_fill(log=log, decoded=decoded, observed_at=observed_at):
