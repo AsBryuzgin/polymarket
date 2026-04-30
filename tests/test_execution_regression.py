@@ -107,16 +107,16 @@ class ExecutionRegressionTests(unittest.TestCase):
         self.assertIsNotNone(pos)
         self.assertEqual(float(pos["position_usd"]), 3.0)
 
-    def test_buy_uses_snapshot_share_min_order_instead_of_static_usd_floor(self) -> None:
+    def test_buy_uses_configured_usd_minimum_not_orderbook_share_minimum(self) -> None:
         signal = LeaderSignal(
             signal_id="sig-dynamic-min-order",
             leader_wallet="wallet-min",
             token_id="token-min",
             side="BUY",
             leader_budget_usd=20.0,
-            leader_trade_notional_usd=1.0,
+            leader_trade_notional_usd=5.0,
             leader_portfolio_value_usd=100.0,
-            leader_trade_price=0.05,
+            leader_trade_price=0.65,
         )
         config = {
             "risk": {
@@ -144,11 +144,11 @@ class ExecutionRegressionTests(unittest.TestCase):
         }
         snapshot = {
             "side": "BUY",
-            "midpoint": 0.045,
+            "midpoint": 0.645,
             "spread": 0.01,
-            "price_quote": 0.05,
-            "best_bid": 0.04,
-            "best_ask": 0.05,
+            "price_quote": 0.65,
+            "best_bid": 0.64,
+            "best_ask": 0.65,
             "min_order_size": 5.0,
         }
 
@@ -159,8 +159,9 @@ class ExecutionRegressionTests(unittest.TestCase):
             result = process_signal(signal)
 
         self.assertEqual(result["status"], "PREVIEW_READY_ENTRY")
-        self.assertEqual(result["suggested_amount_usd"], 0.25)
-        self.assertEqual(result["sizing"]["reason"], "rounded up to min_order_size_usd")
+        self.assertEqual(result["suggested_amount_usd"], 1.0)
+        self.assertEqual(result["sizing"]["reason"], "ok")
+        self.assertEqual(result["sizing"]["details"]["min_order_size_usd"], 1.0)
 
     def test_duplicate_signal_is_claimed_before_preview(self) -> None:
         signal = LeaderSignal(

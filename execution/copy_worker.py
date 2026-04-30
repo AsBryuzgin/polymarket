@@ -247,12 +247,12 @@ def _adaptive_sizing_for_buy(config: dict, signal: LeaderSignal) -> dict:
 def _snapshot_min_order_size_usd(snapshot: dict, configured_min_order_usd: float) -> float:
     snapshot_min_order = _positive_float_or_none(snapshot.get("min_order_size"))
     configured_min_order = float(configured_min_order_usd or 0.0)
-    if snapshot_min_order is None:
-        return configured_min_order
     side = str(snapshot.get("side") or "").upper()
     if side == "BUY":
-        price_quote = _positive_float_or_none(snapshot.get("best_ask"))
-    elif side == "SELL":
+        return configured_min_order
+    if snapshot_min_order is None:
+        return configured_min_order
+    if side == "SELL":
         price_quote = _positive_float_or_none(snapshot.get("best_bid"))
     else:
         price_quote = None

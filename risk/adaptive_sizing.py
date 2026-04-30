@@ -165,9 +165,7 @@ def _selected_buy_demand_usd(
         raw_sized += 1
         raw_demand += raw_amount
         effective_amount = raw_amount
-        row_min_order = _safe_float(row.get("snapshot_min_order_usd"), min_order)
-        if row_min_order <= 0:
-            row_min_order = min_order
+        row_min_order = min_order
 
         if row_min_order > 0 and raw_amount < row_min_order:
             if not round_up_to_min_order:

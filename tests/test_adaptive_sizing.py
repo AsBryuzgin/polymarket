@@ -141,7 +141,7 @@ class AdaptiveSizingTests(unittest.TestCase):
         self.assertEqual(decision.details["usable_demand_signals"], 0)
         self.assertEqual(decision.details["min_order_blocked_signals"], 5)
 
-    def test_historical_pressure_uses_observed_snapshot_min_order_usd(self) -> None:
+    def test_historical_pressure_ignores_buy_orderbook_share_minimum(self) -> None:
         config = {
             "risk": {
                 "min_order_size_usd": 1.0,
@@ -161,7 +161,7 @@ class AdaptiveSizingTests(unittest.TestCase):
         }
         rows = [self._observation(f"sig-{idx}", notional=2.0) for idx in range(5)]
         for row in rows:
-            row["snapshot_min_order_usd"] = 0.25
+            row["snapshot_min_order_usd"] = 2.85
 
         decision = compute_adaptive_sizing_decision(
             leader_wallet="wallet1",
@@ -174,10 +174,10 @@ class AdaptiveSizingTests(unittest.TestCase):
             now=datetime(2026, 4, 29, 12, 0, tzinfo=timezone.utc),
         )
 
-        self.assertEqual(decision.multiplier, 1.0)
+        self.assertAlmostEqual(decision.multiplier, 0.8)
         self.assertEqual(decision.details["selected_buy_raw_demand_usd"], 2.0)
-        self.assertEqual(decision.details["selected_buy_effective_demand_usd"], 2.0)
-        self.assertEqual(decision.details["min_order_rounded_signals"], 0)
+        self.assertEqual(decision.details["selected_buy_effective_demand_usd"], 5.0)
+        self.assertEqual(decision.details["min_order_rounded_signals"], 5)
 
     def test_live_utilization_reduces_multiplier(self) -> None:
         config = {

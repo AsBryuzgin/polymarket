@@ -246,14 +246,18 @@ def _base_summary(*, wallet: str, leader_status: str, checked_trades: int) -> di
     }
 
 
-def _snapshot_min_order_usd(snapshot: dict[str, Any]) -> float | None:
+def _snapshot_min_order_usd(
+    snapshot: dict[str, Any],
+    *,
+    configured_min_order_usd: float | None = None,
+) -> float | None:
     min_order_size = _positive_float_or_none(snapshot.get("min_order_size"))
-    if min_order_size is None:
-        return None
     side = str(snapshot.get("side") or "").upper()
     if side == "BUY":
-        price_quote = _positive_float_or_none(snapshot.get("best_ask"))
-    elif side == "SELL":
+        return _positive_float_or_none(configured_min_order_usd)
+    if min_order_size is None:
+        return None
+    if side == "SELL":
         price_quote = _positive_float_or_none(snapshot.get("best_bid"))
     else:
         price_quote = None
@@ -494,7 +498,10 @@ def fresh_copyable_signals_from_wallet(
             summary["latest_snapshot_best_ask"] = snapshot.get("best_ask")
             summary["latest_snapshot_spread"] = snapshot.get("spread")
             summary["latest_snapshot_min_order_size"] = snapshot.get("min_order_size")
-            summary["latest_snapshot_min_order_usd"] = _snapshot_min_order_usd(snapshot)
+            summary["latest_snapshot_min_order_usd"] = _snapshot_min_order_usd(
+                snapshot,
+                configured_min_order_usd=float(risk.get("min_order_size_usd", 1.0)),
+            )
 
         max_spread = float(risk.get("skip_if_spread_gt", 0.02))
         max_spread_rel = _positive_float_or_none(risk.get("skip_if_spread_rel_gt"))

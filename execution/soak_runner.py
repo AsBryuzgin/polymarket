@@ -54,12 +54,12 @@ def _snapshot_float(snapshot: dict[str, Any] | None, key: str) -> float | None:
 
 def _snapshot_min_order_usd(snapshot: dict[str, Any] | None) -> float | None:
     min_order_size = _snapshot_float(snapshot, "min_order_size")
-    if min_order_size is None or min_order_size <= 0:
-        return None
     side = str((snapshot or {}).get("side") or "").upper()
     if side == "BUY":
-        price_quote = _snapshot_float(snapshot, "best_ask")
-    elif side == "SELL":
+        return None
+    if min_order_size is None or min_order_size <= 0:
+        return None
+    if side == "SELL":
         price_quote = _snapshot_float(snapshot, "best_bid")
     else:
         price_quote = None
