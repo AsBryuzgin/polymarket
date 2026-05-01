@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, asdict, replace
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from execution.budget_accounting import refresh_active_budgets_from_config
 from execution.builder_auth import load_executor_config
@@ -21,9 +21,9 @@ from execution.state_store import (
     create_order_attempt,
     update_order_attempt,
     record_signal,
-    accumulate_micro_signal,
-    consume_micro_signal_bucket,
-    mark_accumulated_signals,
+    accumulate_signal_batch,
+    consume_signal_batch,
+    mark_batched_signals,
     get_open_position,
     upsert_buy_position,
     reduce_or_close_position,
@@ -32,6 +32,7 @@ from execution.state_store import (
     list_open_positions,
     list_processed_signals,
     list_trade_history,
+    list_micro_signal_buckets,
 )
 from execution.signal_observation_store import list_signal_observations
 from execution.trade_notifications import send_trade_notification
@@ -203,20 +204,20 @@ def _safe_bool(value, default: bool = False) -> bool:
     return bool(value)
 
 
-def _micro_accumulator_enabled(config: dict) -> bool:
-    cfg = config.get("micro_signal_accumulator", {})
+def _signal_batch_coalescer_enabled(config: dict) -> bool:
+    cfg = config.get("signal_batch_coalescer", {})
     return _safe_bool(cfg.get("enabled"), False)
 
 
-def _micro_accumulator_max_age_sec(config: dict) -> float:
-    cfg = config.get("micro_signal_accumulator", {})
+def _signal_batch_window_sec(config: dict) -> float:
+    cfg = config.get("signal_batch_coalescer", {})
     try:
-        return float(cfg.get("max_bucket_age_sec", 600.0))
+        return float(cfg.get("window_sec", 30.0))
     except (TypeError, ValueError):
-        return 600.0
+        return 30.0
 
 
-def _micro_signal_amount_from_sizing(size_decision, min_order_size_usd: float) -> float | None:
+def _batch_signal_amount_from_sizing(size_decision, min_order_size_usd: float) -> float | None:
     details = size_decision.details or {}
     amount = details.get("pre_min_order_round_amount_usd")
     if amount is None:
@@ -259,6 +260,312 @@ def _open_wallet_exposure_usd(leader_wallet: str) -> float:
         except (TypeError, ValueError):
             continue
     return round(total, 8)
+
+
+def _parse_sqlite_datetime(value) -> datetime | None:
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(str(value).replace(" ", "T"))
+    except ValueError:
+        return None
+
+
+def _batch_due(first_observed_at, *, window_sec: float) -> bool:
+    first_seen = _parse_sqlite_datetime(first_observed_at)
+    if first_seen is None:
+        return True
+    return datetime.utcnow() - first_seen >= timedelta(seconds=max(window_sec, 0.0))
+
+
+def flush_signal_batches(config: dict | None = None) -> dict:
+    config = config or load_executor_config()
+    if not _signal_batch_coalescer_enabled(config):
+        return {"enabled": False, "processed": 0, "results": []}
+
+    runtime_guard = evaluate_runtime_guard(config=config)
+    if not runtime_guard.allowed:
+        return {
+            "enabled": True,
+            "processed": 0,
+            "results": [
+                {
+                    "status": "SKIPPED_RUNTIME",
+                    "reason": runtime_guard.reason,
+                }
+            ],
+        }
+    live_safety = evaluate_live_buy_safety(config=config)
+    if not live_safety.allowed:
+        return {
+            "enabled": True,
+            "processed": 0,
+            "results": [
+                {
+                    "status": "SKIPPED_LIVE_SAFETY",
+                    "reason": live_safety.reason,
+                }
+            ],
+        }
+
+    risk = config.get("risk", {})
+    filters = config.get("filters", {})
+    sizing = config.get("sizing", {})
+    freshness = config.get("signal_freshness", {})
+    window_sec = _signal_batch_window_sec(config)
+    min_order_size_usd = float(risk.get("min_order_size_usd", 1.0))
+    max_min_order_round_up_multiple = _positive_float_or_none(
+        sizing.get("max_min_order_round_up_multiple")
+    )
+    round_up_to_min_order = _safe_bool(sizing.get("round_up_to_min_order"), False)
+
+    results: list[dict] = []
+    for bucket in list_micro_signal_buckets(limit=100000):
+        if str(bucket.get("side") or "").upper() != "BUY":
+            continue
+        if not _batch_due(bucket.get("first_observed_at"), window_sec=window_sec):
+            continue
+
+        leader_wallet = str(bucket.get("leader_wallet") or "")
+        token_id = str(bucket.get("token_id") or "")
+        signal_id = str(bucket.get("last_signal_id") or bucket.get("first_signal_id") or "")
+        pending_amount = _positive_float_or_none(bucket.get("pending_amount_usd")) or 0.0
+        if not leader_wallet or not token_id or not signal_id or pending_amount <= 0:
+            continue
+
+        registry = get_leader_registry(leader_wallet)
+        leader_budget_usd = _positive_float_or_none(
+            (registry or {}).get("target_budget_usd")
+        ) or 0.0
+        leader_status = str((registry or {}).get("leader_status") or "").upper()
+        leader_user_name = (registry or {}).get("user_name")
+        category = (registry or {}).get("category")
+
+        consumed = consume_signal_batch(
+            leader_wallet=leader_wallet,
+            token_id=token_id,
+            side="BUY",
+        )
+        signal_ids = (consumed or bucket).get("signal_ids", [])
+
+        def finish(status: str, reason: str, amount: float | None = None) -> None:
+            mark_batched_signals(
+                signal_ids=signal_ids,
+                exclude_signal_id=signal_id,
+                status=status,
+                reason=reason,
+            )
+            record_signal(
+                signal_id=signal_id,
+                leader_wallet=leader_wallet,
+                token_id=token_id,
+                side="BUY",
+                leader_budget_usd=leader_budget_usd,
+                suggested_amount_usd=amount,
+                status=status,
+                reason=reason,
+            )
+            results.append(
+                {
+                    "signal_id": signal_id,
+                    "leader_wallet": leader_wallet,
+                    "token_id": token_id,
+                    "status": status,
+                    "reason": reason,
+                    "suggested_amount_usd": amount,
+                    "batch_signal_count": len(signal_ids),
+                }
+            )
+
+        if leader_status and leader_status != "ACTIVE":
+            finish("BATCH_BLOCKED", f"leader status is {leader_status}")
+            continue
+        if leader_budget_usd <= 0:
+            finish("BATCH_BLOCKED", "leader budget <= 0")
+            continue
+
+        amount_usd = pending_amount
+        if amount_usd + 1e-12 < min_order_size_usd:
+            if not round_up_to_min_order:
+                finish("BATCH_EXPIRED", "batch below min order and round-up disabled")
+                continue
+            round_up_multiple = min_order_size_usd / max(amount_usd, 1e-12)
+            if (
+                max_min_order_round_up_multiple is not None
+                and round_up_multiple > max_min_order_round_up_multiple + 1e-12
+            ):
+                finish(
+                    "BATCH_EXPIRED",
+                    (
+                        "batch below min order; round-up multiple "
+                        f"{round_up_multiple:.4f} above max {max_min_order_round_up_multiple:.4f}"
+                    ),
+                )
+                continue
+            amount_usd = min_order_size_usd
+
+        wallet_exposure_usd = _open_wallet_exposure_usd(leader_wallet)
+        remaining_leader_budget_usd = max(leader_budget_usd - wallet_exposure_usd, 0.0)
+        runtime_risk_limits = build_runtime_risk_limits(config)
+        runtime_risk_limits = replace(
+            runtime_risk_limits,
+            min_order_size_usd=min_order_size_usd,
+        )
+        executable_amount = min(
+            round(amount_usd, 2),
+            runtime_risk_limits.max_per_trade_usd,
+            remaining_leader_budget_usd,
+        )
+        if executable_amount + 1e-12 < min_order_size_usd:
+            finish(
+                "BATCH_BLOCKED",
+                "batch flush blocked by remaining budget or max_per_trade",
+                round(executable_amount, 2),
+            )
+            continue
+
+        snapshot = fetch_market_snapshot(token_id=token_id, side="BUY")
+        current_price = _snapshot_executable_price(snapshot, "BUY")
+        policy = evaluate_order_policy(
+            side="BUY",
+            midpoint=snapshot["midpoint"],
+            spread=snapshot["spread"],
+            leader_budget_usd=leader_budget_usd,
+            buy_min_price=float(filters.get("buy_min_price", 0.05)),
+            buy_max_price=float(filters.get("buy_max_price", 0.96)),
+            sell_min_price=0.0,
+            sell_max_price=1.0,
+            max_spread=float(risk.get("skip_if_spread_gt", 0.02)),
+            min_order_size_usd=min_order_size_usd,
+            max_spread_rel=_positive_float_or_none(risk.get("skip_if_spread_rel_gt")),
+            max_spread_hard=_positive_float_or_none(risk.get("skip_if_spread_hard_gt")),
+        )
+        if not policy.allowed:
+            finish("BATCH_BLOCKED", f"batch flush policy blocked: {policy.reason}")
+            continue
+
+        drift_ok, drift_reason = _entry_price_drift_ok(
+            leader_price=None,
+            current_price=current_price,
+            side="BUY",
+            max_abs=float(freshness.get("max_price_drift_abs", 0.02)),
+            max_rel=float(freshness.get("max_price_drift_rel", 0.03)),
+        )
+        if not drift_ok:
+            finish("BATCH_BLOCKED", f"batch flush drift blocked: {drift_reason}")
+            continue
+
+        risk_decision = evaluate_entry_risk(
+            config=config,
+            leader_wallet=leader_wallet,
+            token_id=token_id,
+            amount_usd=executable_amount,
+            leader_budget_usd=leader_budget_usd,
+            category=category,
+            limits=runtime_risk_limits,
+        )
+        if not risk_decision.allowed:
+            finish("BATCH_BLOCKED", f"batch flush risk blocked: {risk_decision.reason}")
+            continue
+
+        flush_signal = LeaderSignal(
+            signal_id=signal_id,
+            leader_wallet=leader_wallet,
+            token_id=token_id,
+            side="BUY",
+            leader_budget_usd=leader_budget_usd,
+        )
+        execution = _execute_with_recorded_attempt(
+            config=config,
+            signal=flush_signal,
+            amount_usd=executable_amount,
+            reason="short batch flush approved",
+        )
+        if not execution.accepted:
+            finish(
+                "BATCH_EXECUTION_ERROR",
+                f"batch flush execution failed: {execution.reason}",
+                executable_amount,
+            )
+            continue
+
+        executed_amount_usd = execution.fill_amount_usd or executable_amount
+        execution_price = _execution_fill_price(execution, current_price)
+        pos_update = upsert_buy_position(
+            leader_wallet=leader_wallet,
+            token_id=token_id,
+            amount_usd=executed_amount_usd,
+            entry_price=execution_price,
+            signal_id=signal_id,
+        )
+        log_trade_event(
+            signal_id=signal_id,
+            leader_wallet=leader_wallet,
+            leader_user_name=leader_user_name,
+            category=category,
+            leader_status=leader_status,
+            token_id=token_id,
+            side="BUY",
+            event_type="ENTRY",
+            amount_usd=executed_amount_usd,
+            price=execution_price,
+            gross_value_usd=executed_amount_usd,
+            position_before_usd=pos_update["position_before_usd"],
+            position_after_usd=pos_update["position_after_usd"],
+            entry_avg_price=pos_update["entry_avg_price_after"],
+            exit_price=None,
+            realized_pnl_usd=None,
+            realized_pnl_pct=None,
+            holding_minutes=None,
+            notes=(
+                f"{execution.mode.lower()} entry generated | sizing=signal_batch_flush "
+                f"| batch_signals={len(signal_ids)} | batch_amount={pending_amount:.4f}"
+            ),
+        )
+        entry_status = _entry_success_signal_status(execution)
+        mark_batched_signals(
+            signal_ids=signal_ids,
+            exclude_signal_id=signal_id,
+            status="BATCH_EXECUTED",
+            reason=f"executed in flushed batch via {signal_id}",
+        )
+        send_trade_notification(
+            config=config,
+            mode=execution.mode,
+            event_type="ENTRY",
+            leader_wallet=leader_wallet,
+            leader_user_name=leader_user_name,
+            category=category,
+            token_id=token_id,
+            amount_usd=executed_amount_usd,
+            price=execution_price,
+            position_before_usd=pos_update["position_before_usd"],
+            position_after_usd=pos_update["position_after_usd"],
+            signal_id=signal_id,
+        )
+        record_signal(
+            signal_id=signal_id,
+            leader_wallet=leader_wallet,
+            token_id=token_id,
+            side="BUY",
+            leader_budget_usd=leader_budget_usd,
+            suggested_amount_usd=executed_amount_usd,
+            status=entry_status,
+            reason="ok via short batch flush",
+        )
+        results.append(
+            {
+                "signal_id": signal_id,
+                "leader_wallet": leader_wallet,
+                "token_id": token_id,
+                "status": entry_status,
+                "reason": "ok via short batch flush",
+                "suggested_amount_usd": executed_amount_usd,
+                "batch_signal_count": len(signal_ids),
+            }
+        )
+
+    return {"enabled": True, "processed": len(results), "results": results}
 
 
 def _adaptive_sizing_for_buy(config: dict, signal: LeaderSignal) -> dict:
@@ -795,16 +1102,16 @@ def process_signal(signal: LeaderSignal) -> dict:
         allow_budget_fallback=allow_budget_fallback,
     )
 
-    micro_accumulator = None
-    micro_signal_amount = None
-    micro_accumulated_ready = False
-    if _micro_accumulator_enabled(config):
-        micro_signal_amount = _micro_signal_amount_from_sizing(
+    signal_batch = None
+    batch_signal_amount = None
+    signal_batch_ready = False
+    if _signal_batch_coalescer_enabled(config):
+        batch_signal_amount = _batch_signal_amount_from_sizing(
             size_decision,
             min_order_size_usd,
         )
 
-    if micro_signal_amount is not None and (
+    if batch_signal_amount is not None and (
         size_decision.allowed or _is_min_order_sizing_block(size_decision)
     ):
         drift_ok, drift_reason = _entry_price_drift_ok(
@@ -821,7 +1128,7 @@ def process_signal(signal: LeaderSignal) -> dict:
                 token_id=signal.token_id,
                 side=signal.side,
                 leader_budget_usd=signal.leader_budget_usd,
-                suggested_amount_usd=micro_signal_amount,
+                suggested_amount_usd=batch_signal_amount,
                 status="SKIPPED_DRIFT",
                 reason=drift_reason,
             )
@@ -830,20 +1137,20 @@ def process_signal(signal: LeaderSignal) -> dict:
                 "market_snapshot": snapshot,
                 "status": "SKIPPED_DRIFT",
                 "reason": drift_reason,
-                "suggested_amount_usd": micro_signal_amount,
+                "suggested_amount_usd": batch_signal_amount,
                 "sizing": asdict(size_decision),
                 "adaptive_sizing": adaptive_sizing,
             }
 
-        micro_accumulator = accumulate_micro_signal(
+        signal_batch = accumulate_signal_batch(
             leader_wallet=signal.leader_wallet,
             token_id=signal.token_id,
             side=signal.side,
             signal_id=signal.signal_id,
-            amount_usd=micro_signal_amount,
-            max_age_sec=_micro_accumulator_max_age_sec(config),
+            amount_usd=batch_signal_amount,
+            max_window_sec=_signal_batch_window_sec(config),
         )
-        pending_amount = float(micro_accumulator["pending_amount_usd"])
+        pending_amount = float(signal_batch["pending_amount_usd"])
         executable_amount = min(
             pending_amount,
             runtime_risk_limits.max_per_trade_usd,
@@ -862,7 +1169,7 @@ def process_signal(signal: LeaderSignal) -> dict:
             ):
                 cap_reason = f"; max_per_trade {runtime_risk_limits.max_per_trade_usd:.4f} below min order"
             reason = (
-                "micro signal accumulated "
+                "signal batch pending "
                 f"{pending_amount:.4f}/{min_order_size_usd:.4f} min_order_size_usd"
                 f"{cap_reason}"
             )
@@ -872,26 +1179,26 @@ def process_signal(signal: LeaderSignal) -> dict:
                 token_id=signal.token_id,
                 side=signal.side,
                 leader_budget_usd=signal.leader_budget_usd,
-                suggested_amount_usd=micro_signal_amount,
-                status="ACCUMULATED_PENDING",
+                suggested_amount_usd=batch_signal_amount,
+                status="BATCH_PENDING",
                 reason=reason,
             )
             return {
                 "signal": asdict(signal),
                 "market_snapshot": snapshot,
-                "status": "ACCUMULATED_PENDING",
+                "status": "BATCH_PENDING",
                 "reason": reason,
-                "suggested_amount_usd": micro_signal_amount,
+                "suggested_amount_usd": batch_signal_amount,
                 "sizing": asdict(size_decision),
                 "adaptive_sizing": adaptive_sizing,
-                "micro_accumulator": micro_accumulator,
+                "signal_batch": signal_batch,
             }
 
         amount_usd = round(executable_amount, 2)
         if amount_usd + 1e-12 < min_order_size_usd:
             amount_usd = min_order_size_usd
-        sizing_source = f"{size_decision.source}+micro_accumulator"
-        micro_accumulated_ready = True
+        sizing_source = f"{size_decision.source}+signal_batch"
+        signal_batch_ready = True
     else:
         if not size_decision.allowed:
             record_signal(
@@ -915,7 +1222,7 @@ def process_signal(signal: LeaderSignal) -> dict:
         amount_usd = size_decision.amount_usd
         sizing_source = size_decision.source
 
-    if not micro_accumulated_ready:
+    if not signal_batch_ready:
         drift_ok, drift_reason = _entry_price_drift_ok(
             leader_price=signal.leader_trade_price,
             current_price=current_price,
@@ -955,8 +1262,20 @@ def process_signal(signal: LeaderSignal) -> dict:
     )
 
     if not risk_decision.allowed:
-        if micro_accumulated_ready and micro_accumulator is not None:
-            reason = f"micro aggregate waiting for risk budget: {risk_decision.reason}"
+        if signal_batch_ready and signal_batch is not None:
+            consumed = consume_signal_batch(
+                leader_wallet=signal.leader_wallet,
+                token_id=signal.token_id,
+                side=signal.side,
+            )
+            if consumed:
+                mark_batched_signals(
+                    signal_ids=consumed.get("signal_ids", []),
+                    exclude_signal_id=signal.signal_id,
+                    status="BATCH_BLOCKED",
+                    reason=f"batch blocked by risk via {signal.signal_id}: {risk_decision.reason}",
+                )
+            reason = f"signal batch blocked by risk: {risk_decision.reason}"
             record_signal(
                 signal_id=signal.signal_id,
                 leader_wallet=signal.leader_wallet,
@@ -964,18 +1283,19 @@ def process_signal(signal: LeaderSignal) -> dict:
                 side=signal.side,
                 leader_budget_usd=signal.leader_budget_usd,
                 suggested_amount_usd=amount_usd,
-                status="ACCUMULATED_PENDING",
+                status="BATCH_BLOCKED",
                 reason=reason,
             )
             return {
                 "signal": asdict(signal),
                 "market_snapshot": snapshot,
-                "status": "ACCUMULATED_PENDING",
+                "status": "BATCH_BLOCKED",
                 "reason": reason,
                 "suggested_amount_usd": amount_usd,
                 "risk": asdict(risk_decision),
                 "adaptive_sizing": adaptive_sizing,
-                "micro_accumulator": micro_accumulator,
+                "signal_batch": signal_batch,
+                "signal_batch_consumed": consumed,
             }
         record_signal(
             signal_id=signal.signal_id,
@@ -995,7 +1315,7 @@ def process_signal(signal: LeaderSignal) -> dict:
             "suggested_amount_usd": amount_usd,
             "risk": asdict(risk_decision),
             "adaptive_sizing": adaptive_sizing,
-            "micro_accumulator": micro_accumulator,
+            "signal_batch": signal_batch,
         }
 
     execution = _execute_with_recorded_attempt(
@@ -1004,9 +1324,9 @@ def process_signal(signal: LeaderSignal) -> dict:
         amount_usd=amount_usd,
         reason="entry policy and risk approved",
     )
-    micro_consumed = None
-    if micro_accumulated_ready and micro_accumulator is not None:
-        micro_consumed = consume_micro_signal_bucket(
+    signal_batch_consumed = None
+    if signal_batch_ready and signal_batch is not None:
+        signal_batch_consumed = consume_signal_batch(
             leader_wallet=signal.leader_wallet,
             token_id=signal.token_id,
             side=signal.side,
@@ -1014,12 +1334,12 @@ def process_signal(signal: LeaderSignal) -> dict:
 
     if not execution.accepted:
         failure_status = _execution_failure_signal_status(execution)
-        if micro_consumed:
-            mark_accumulated_signals(
-                signal_ids=micro_consumed.get("signal_ids", []),
+        if signal_batch_consumed:
+            mark_batched_signals(
+                signal_ids=signal_batch_consumed.get("signal_ids", []),
                 exclude_signal_id=signal.signal_id,
-                status="ACCUMULATED_EXECUTION_ERROR",
-                reason=f"aggregate execution failed via {signal.signal_id}: {execution.reason}",
+                status="BATCH_EXECUTION_ERROR",
+                reason=f"batch execution failed via {signal.signal_id}: {execution.reason}",
             )
         record_signal(
             signal_id=signal.signal_id,
@@ -1039,8 +1359,8 @@ def process_signal(signal: LeaderSignal) -> dict:
             "suggested_amount_usd": amount_usd,
             "execution": asdict(execution),
             "adaptive_sizing": adaptive_sizing,
-            "micro_accumulator": micro_accumulator,
-            "micro_consumed": micro_consumed,
+            "signal_batch": signal_batch,
+            "signal_batch_consumed": signal_batch_consumed,
         }
 
     executed_amount_usd = execution.fill_amount_usd or amount_usd
@@ -1058,10 +1378,10 @@ def process_signal(signal: LeaderSignal) -> dict:
         f"{execution.mode.lower()} entry generated | sizing={sizing_source} "
         f"| adaptive_multiplier={float(adaptive_sizing.get('multiplier') or 1.0):.4f}"
     )
-    if micro_consumed:
+    if signal_batch_consumed:
         entry_notes = (
-            f"{entry_notes} | micro_signals={len(micro_consumed.get('signal_ids', []))} "
-            f"| micro_amount={float(micro_consumed.get('pending_amount_usd') or 0.0):.4f}"
+            f"{entry_notes} | batch_signals={len(signal_batch_consumed.get('signal_ids', []))} "
+            f"| batch_amount={float(signal_batch_consumed.get('pending_amount_usd') or 0.0):.4f}"
         )
 
     log_trade_event(
@@ -1087,12 +1407,12 @@ def process_signal(signal: LeaderSignal) -> dict:
     )
 
     entry_status = _entry_success_signal_status(execution)
-    if micro_consumed:
-        mark_accumulated_signals(
-            signal_ids=micro_consumed.get("signal_ids", []),
+    if signal_batch_consumed:
+        mark_batched_signals(
+            signal_ids=signal_batch_consumed.get("signal_ids", []),
             exclude_signal_id=signal.signal_id,
-            status="ACCUMULATED_EXECUTED",
-            reason=f"executed in aggregate entry via {signal.signal_id}",
+            status="BATCH_EXECUTED",
+            reason=f"executed in batched entry via {signal.signal_id}",
         )
     send_trade_notification(
         config=config,
@@ -1130,6 +1450,6 @@ def process_signal(signal: LeaderSignal) -> dict:
         "execution": asdict(execution),
         "sizing": asdict(size_decision),
         "adaptive_sizing": adaptive_sizing,
-        "micro_accumulator": micro_accumulator,
-        "micro_consumed": micro_consumed,
+        "signal_batch": signal_batch,
+        "signal_batch_consumed": signal_batch_consumed,
     }

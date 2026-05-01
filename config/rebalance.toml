@@ -4,7 +4,7 @@ exclude_categories = []
 
 # Keep scoring/reports across all categories, but only run new BUYs for the
 # strongest N categories in the live universe. 0 means no cap.
-max_live_categories = 4
+max_live_categories = 3
 
 # incumbent stays if still competitive
 incumbent_max_rank = 2

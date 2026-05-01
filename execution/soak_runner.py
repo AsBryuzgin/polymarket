@@ -15,6 +15,7 @@ SignalFetcher = Callable[..., tuple[LeaderSignal | None, dict[str, Any] | None, 
 MultiSignalFetcher = Callable[..., tuple[list[CopyableSignalCandidate], dict[str, Any]]]
 SignalProcessor = Callable[[LeaderSignal], dict[str, Any]]
 ObservationLogger = Callable[..., None]
+BatchFlusher = Callable[[], dict[str, Any]]
 
 
 def filter_registry_rows_for_scan(
@@ -134,6 +135,7 @@ def run_soak_cycle(
     signal_fetcher: SignalFetcher | None = None,
     multi_signal_fetcher: MultiSignalFetcher = fresh_copyable_signals_from_wallet,
     signal_processor: SignalProcessor = process_signal,
+    batch_flusher: BatchFlusher | None = None,
     observation_logger: ObservationLogger = log_signal_observation,
 ) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
@@ -274,6 +276,47 @@ def run_soak_cycle(
                     "process_reason": process_reason,
                     "signal": asdict(signal),
                     "process_result": process_result,
+                }
+            )
+
+    if batch_flusher is not None:
+        try:
+            batch_summary = batch_flusher()
+        except Exception as e:
+            rows.append(
+                {
+                    "idx": None,
+                    "wallet": None,
+                    "user_name": "short_batch",
+                    "category": None,
+                    "leader_status": None,
+                    "target_budget_usd": None,
+                    "latest_status": "BATCH_FLUSH_ERROR",
+                    "latest_reason": str(e),
+                    "selected_signal_id": None,
+                    "selected_side": None,
+                    "process_status": "BATCH_FLUSH_ERROR",
+                    "process_reason": str(e),
+                }
+            )
+            return rows
+
+        for result in batch_summary.get("results", []):
+            rows.append(
+                {
+                    "idx": None,
+                    "wallet": result.get("leader_wallet"),
+                    "user_name": "short_batch",
+                    "category": None,
+                    "leader_status": None,
+                    "target_budget_usd": None,
+                    "latest_status": "BATCH_FLUSH",
+                    "latest_reason": result.get("reason"),
+                    "selected_signal_id": result.get("signal_id"),
+                    "selected_side": "BUY",
+                    "process_status": result.get("status"),
+                    "process_reason": result.get("reason"),
+                    "process_result": result,
                 }
             )
 

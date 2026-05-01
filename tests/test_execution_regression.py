@@ -6,7 +6,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import execution.state_store as state_store
-from execution.copy_worker import LeaderSignal, process_signal
+from execution.copy_worker import LeaderSignal, flush_signal_batches, process_signal
 from execution.order_router import OrderExecutionResult
 
 
@@ -163,7 +163,7 @@ class ExecutionRegressionTests(unittest.TestCase):
         self.assertEqual(result["sizing"]["reason"], "ok")
         self.assertEqual(result["sizing"]["details"]["min_order_size_usd"], 1.0)
 
-    def test_micro_buy_signals_accumulate_before_entry(self) -> None:
+    def test_short_batch_coalesces_small_buy_fills_before_entry(self) -> None:
         config = {
             "risk": {
                 "min_order_size_usd": 1.0,
@@ -183,9 +183,9 @@ class ExecutionRegressionTests(unittest.TestCase):
                 "round_up_to_min_order": True,
                 "max_min_order_round_up_multiple": 3.0,
             },
-            "micro_signal_accumulator": {
+            "signal_batch_coalescer": {
                 "enabled": True,
-                "max_bucket_age_sec": 600,
+                "window_sec": 30,
             },
             "signal_freshness": {
                 "max_price_drift_abs": 1.0,
@@ -218,46 +218,47 @@ class ExecutionRegressionTests(unittest.TestCase):
              patch("execution.copy_worker.fetch_market_snapshot", return_value=snapshot), \
              patch("execution.copy_worker.preview_market_order", return_value={"ok": True}) as preview, \
              patch("execution.copy_worker.get_leader_registry", return_value=None):
-            first = process_signal(signal("sig-micro-1"))
-            second = process_signal(signal("sig-micro-2"))
-            third = process_signal(signal("sig-micro-3"))
+            first = process_signal(signal("sig-batch-1"))
+            second = process_signal(signal("sig-batch-2"))
+            third = process_signal(signal("sig-batch-3"))
 
-        self.assertEqual(first["status"], "ACCUMULATED_PENDING")
-        self.assertEqual(second["status"], "ACCUMULATED_PENDING")
+        self.assertEqual(first["status"], "BATCH_PENDING")
+        self.assertEqual(second["status"], "BATCH_PENDING")
         self.assertEqual(third["status"], "PREVIEW_READY_ENTRY")
         self.assertAlmostEqual(third["suggested_amount_usd"], 1.2)
         self.assertEqual(preview.call_count, 1)
 
         statuses = {row["signal_id"]: row["status"] for row in state_store.list_processed_signals()}
-        self.assertEqual(statuses["sig-micro-1"], "ACCUMULATED_EXECUTED")
-        self.assertEqual(statuses["sig-micro-2"], "ACCUMULATED_EXECUTED")
-        self.assertEqual(statuses["sig-micro-3"], "PREVIEW_READY_ENTRY")
+        self.assertEqual(statuses["sig-batch-1"], "BATCH_EXECUTED")
+        self.assertEqual(statuses["sig-batch-2"], "BATCH_EXECUTED")
+        self.assertEqual(statuses["sig-batch-3"], "PREVIEW_READY_ENTRY")
         self.assertEqual(state_store.list_micro_signal_buckets(), [])
 
-    def test_expired_micro_bucket_marks_pending_signals(self) -> None:
-        state_store.accumulate_micro_signal(
+    def test_expired_short_batch_marks_pending_signals(self) -> None:
+        state_store.accumulate_signal_batch(
             leader_wallet="wallet-micro",
             token_id="token-micro",
             side="BUY",
-            signal_id="sig-expired-micro",
+            signal_id="sig-expired-batch",
             amount_usd=0.40,
-            max_age_sec=600,
+            max_window_sec=600,
         )
         state_store.record_signal(
-            signal_id="sig-expired-micro",
+            signal_id="sig-expired-batch",
             leader_wallet="wallet-micro",
             token_id="token-micro",
             side="BUY",
             leader_budget_usd=20.0,
             suggested_amount_usd=0.40,
-            status="ACCUMULATED_PENDING",
-            reason="waiting for min order",
+            status="BATCH_PENDING",
+            reason="waiting for short batch",
         )
         conn = state_store.get_connection()
         conn.execute(
             """
             UPDATE micro_signal_buckets
-            SET updated_at = '2000-01-01 00:00:00'
+            SET first_observed_at = '2000-01-01 00:00:00',
+                updated_at = CURRENT_TIMESTAMP
             WHERE leader_wallet = 'wallet-micro'
               AND token_id = 'token-micro'
               AND side = 'BUY'
@@ -266,20 +267,114 @@ class ExecutionRegressionTests(unittest.TestCase):
         conn.commit()
         conn.close()
 
-        reset_bucket = state_store.accumulate_micro_signal(
+        reset_bucket = state_store.accumulate_signal_batch(
             leader_wallet="wallet-micro",
             token_id="token-micro",
             side="BUY",
-            signal_id="sig-new-micro",
+            signal_id="sig-new-batch",
             amount_usd=0.40,
-            max_age_sec=1,
+            max_window_sec=1,
         )
 
         statuses = {row["signal_id"]: row["status"] for row in state_store.list_processed_signals()}
         self.assertTrue(reset_bucket["reset"])
-        self.assertEqual(reset_bucket["expired_signal_ids"], ["sig-expired-micro"])
-        self.assertEqual(statuses["sig-expired-micro"], "ACCUMULATED_EXPIRED")
+        self.assertEqual(reset_bucket["expired_signal_ids"], ["sig-expired-batch"])
+        self.assertEqual(statuses["sig-expired-batch"], "BATCH_EXPIRED")
         self.assertAlmostEqual(state_store.list_micro_signal_buckets()[0]["pending_amount_usd"], 0.40)
+
+    def test_short_batch_flush_executes_roundable_single_fill(self) -> None:
+        state_store.upsert_leader_registry_row(
+            wallet="wallet-batch-flush",
+            category="SPORTS",
+            user_name="BatchLeader",
+            leader_status="ACTIVE",
+            target_weight=1.0,
+            target_budget_usd=20.0,
+            grace_until=None,
+            source_tag="test",
+        )
+        state_store.accumulate_signal_batch(
+            leader_wallet="wallet-batch-flush",
+            token_id="token-batch-flush",
+            side="BUY",
+            signal_id="sig-batch-flush",
+            amount_usd=0.80,
+            max_window_sec=30,
+        )
+        state_store.record_signal(
+            signal_id="sig-batch-flush",
+            leader_wallet="wallet-batch-flush",
+            token_id="token-batch-flush",
+            side="BUY",
+            leader_budget_usd=20.0,
+            suggested_amount_usd=0.80,
+            status="BATCH_PENDING",
+            reason="waiting for short batch",
+        )
+        conn = state_store.get_connection()
+        conn.execute(
+            """
+            UPDATE micro_signal_buckets
+            SET first_observed_at = '2000-01-01 00:00:00'
+            WHERE leader_wallet = 'wallet-batch-flush'
+              AND token_id = 'token-batch-flush'
+              AND side = 'BUY'
+            """
+        )
+        conn.commit()
+        conn.close()
+
+        config = {
+            "global": {"execution_mode": "paper"},
+            "risk": {
+                "min_order_size_usd": 1.0,
+                "max_per_trade_usd": 10.0,
+                "skip_if_spread_gt": 0.03,
+                "enforce_leader_budget_cap": True,
+            },
+            "filters": {
+                "buy_min_price": 0.01,
+                "buy_max_price": 0.96,
+            },
+            "sizing": {
+                "round_up_to_min_order": True,
+                "max_min_order_round_up_multiple": 2.0,
+            },
+            "signal_batch_coalescer": {
+                "enabled": True,
+                "window_sec": 30,
+            },
+        }
+        snapshot = {
+            "side": "BUY",
+            "midpoint": 0.36,
+            "spread": 0.01,
+            "price_quote": 0.36,
+            "best_bid": 0.355,
+            "best_ask": 0.365,
+        }
+
+        with patch("execution.copy_worker.fetch_market_snapshot", return_value=snapshot), \
+             patch(
+                 "execution.copy_worker.execute_market_order",
+                 return_value=OrderExecutionResult(
+                     accepted=True,
+                     mode="PAPER",
+                     status="PAPER_FILLED",
+                     reason="paper fill",
+                     raw_response={"ok": True},
+                     fill_amount_usd=1.0,
+                     details={"fill_price": 0.365},
+                 ),
+             ):
+            summary = flush_signal_batches(config)
+
+        self.assertEqual(summary["processed"], 1)
+        self.assertEqual(summary["results"][0]["status"], "PAPER_FILLED_ENTRY")
+        self.assertEqual(state_store.list_micro_signal_buckets(), [])
+        pos = state_store.get_open_position("wallet-batch-flush", "token-batch-flush")
+        self.assertIsNotNone(pos)
+        self.assertEqual(float(pos["position_usd"]), 1.0)
 
     def test_duplicate_signal_is_claimed_before_preview(self) -> None:
         signal = LeaderSignal(

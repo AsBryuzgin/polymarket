@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
+from statistics import median
 from typing import Any
 
 
@@ -30,6 +31,32 @@ class BuyDemandEstimate:
     min_order_rounded_signals: int
     min_order_blocked_signals: int
     min_order_extra_demand_usd: float
+
+
+@dataclass(frozen=True)
+class ExecutabilityMetrics:
+    buy_signals: int
+    median_trade_fraction: float
+    raw_executable_signals: int
+    raw_executable_share: float
+    batch_executable_signals: int
+    batch_executable_orders: int
+    batch_executable_share: float
+    dust_signals: int
+    dust_share: float
+    raw_demand_usd: float
+    executable_demand_usd: float
+    idle_capacity_usd: float
+    idle_capacity_share: float
+
+
+@dataclass(frozen=True)
+class _SizedBuySignal:
+    signal_id: str
+    token_id: str
+    observed_at: datetime
+    raw_amount_usd: float
+    trade_fraction: float
 
 
 def _safe_float(value: Any, default: float = 0.0) -> float:
@@ -84,6 +111,10 @@ def _leader_open_exposure(leader_wallet: str, open_positions: list[dict[str, Any
 
 def _config(config: dict[str, Any]) -> dict[str, Any]:
     return config.get("adaptive_sizing", {})
+
+
+def _batch_config(config: dict[str, Any]) -> dict[str, Any]:
+    return config.get("signal_batch_coalescer", {})
 
 
 def adaptive_sizing_enabled(config: dict[str, Any]) -> bool:
@@ -190,6 +221,164 @@ def _selected_buy_demand_usd(
         min_order_rounded_signals=rounded,
         min_order_blocked_signals=blocked,
         min_order_extra_demand_usd=round(min_order_extra, 8),
+    )
+
+
+def _sized_buy_signal(
+    row: dict[str, Any],
+    *,
+    fallback_budget_usd: float,
+    max_leader_trade_budget_fraction: float,
+    max_per_trade_usd: float,
+) -> _SizedBuySignal | None:
+    budget = _safe_float(row.get("target_budget_usd"), fallback_budget_usd)
+    if budget <= 0:
+        budget = fallback_budget_usd
+    notional = _safe_float(row.get("selected_trade_notional_usd"))
+    portfolio_value = _safe_float(row.get("selected_leader_portfolio_value_usd"))
+    observed_at = _safe_dt(row.get("observed_at"))
+    signal_id = str(row.get("selected_signal_id") or "").strip()
+    token_id = str(row.get("token_id") or row.get("latest_token_id") or "").strip()
+    if (
+        budget <= 0
+        or notional <= 0
+        or portfolio_value <= 0
+        or observed_at is None
+        or not signal_id
+        or not token_id
+    ):
+        return None
+    fraction = notional / portfolio_value
+    if max_leader_trade_budget_fraction > 0:
+        fraction = min(fraction, max_leader_trade_budget_fraction)
+    raw_amount = budget * fraction
+    if max_per_trade_usd > 0:
+        raw_amount = min(raw_amount, max_per_trade_usd)
+    raw_amount = min(raw_amount, budget)
+    if raw_amount <= 0:
+        return None
+    return _SizedBuySignal(
+        signal_id=signal_id,
+        token_id=token_id,
+        observed_at=observed_at,
+        raw_amount_usd=raw_amount,
+        trade_fraction=fraction,
+    )
+
+
+def _short_batch_rescue(
+    *,
+    under_min_signals: list[_SizedBuySignal],
+    min_order_size_usd: float,
+    window_sec: float,
+) -> tuple[int, int, float]:
+    rescued_signals = 0
+    rescued_orders = 0
+    rescued_amount = 0.0
+    if min_order_size_usd <= 0 or window_sec <= 0:
+        return 0, 0, 0.0
+
+    by_token: dict[str, list[_SizedBuySignal]] = {}
+    for item in under_min_signals:
+        by_token.setdefault(item.token_id, []).append(item)
+
+    for rows in by_token.values():
+        rows.sort(key=lambda item: item.observed_at)
+        bucket_start: datetime | None = None
+        bucket_amount = 0.0
+        bucket_count = 0
+        for item in rows:
+            if (
+                bucket_start is None
+                or (item.observed_at - bucket_start).total_seconds() > window_sec
+            ):
+                bucket_start = item.observed_at
+                bucket_amount = 0.0
+                bucket_count = 0
+
+            bucket_amount += item.raw_amount_usd
+            bucket_count += 1
+
+            if bucket_amount + 1e-12 >= min_order_size_usd:
+                rescued_signals += bucket_count
+                rescued_orders += 1
+                rescued_amount += bucket_amount
+                bucket_start = None
+                bucket_amount = 0.0
+                bucket_count = 0
+
+    return rescued_signals, rescued_orders, round(rescued_amount, 8)
+
+
+def _executability_metrics(
+    *,
+    selected_rows: list[dict[str, Any]],
+    fallback_budget_usd: float,
+    max_leader_trade_budget_fraction: float,
+    min_order_size_usd: float,
+    max_per_trade_usd: float,
+    target_capacity_usd: float,
+    batch_window_sec: float,
+) -> ExecutabilityMetrics:
+    sized = [
+        item
+        for row in selected_rows
+        if (
+            item := _sized_buy_signal(
+                row,
+                fallback_budget_usd=fallback_budget_usd,
+                max_leader_trade_budget_fraction=max_leader_trade_budget_fraction,
+                max_per_trade_usd=max_per_trade_usd,
+            )
+        )
+        is not None
+    ]
+    if not sized:
+        return ExecutabilityMetrics(
+            buy_signals=0,
+            median_trade_fraction=0.0,
+            raw_executable_signals=0,
+            raw_executable_share=0.0,
+            batch_executable_signals=0,
+            batch_executable_orders=0,
+            batch_executable_share=0.0,
+            dust_signals=0,
+            dust_share=0.0,
+            raw_demand_usd=0.0,
+            executable_demand_usd=0.0,
+            idle_capacity_usd=round(max(target_capacity_usd, 0.0), 8),
+            idle_capacity_share=1.0 if target_capacity_usd > 0 else 0.0,
+        )
+
+    min_order = max(_safe_float(min_order_size_usd), 0.0)
+    raw_executable = [item for item in sized if item.raw_amount_usd + 1e-12 >= min_order]
+    under_min = [item for item in sized if item.raw_amount_usd + 1e-12 < min_order]
+    rescued_signals, rescued_orders, rescued_amount = _short_batch_rescue(
+        under_min_signals=under_min,
+        min_order_size_usd=min_order,
+        window_sec=batch_window_sec,
+    )
+    raw_demand = sum(item.raw_amount_usd for item in sized)
+    direct_amount = sum(item.raw_amount_usd for item in raw_executable)
+    executable_demand = direct_amount + rescued_amount
+    count = len(sized)
+    dust = max(count - len(raw_executable) - rescued_signals, 0)
+    idle = max(target_capacity_usd - executable_demand, 0.0)
+
+    return ExecutabilityMetrics(
+        buy_signals=count,
+        median_trade_fraction=round(float(median(item.trade_fraction for item in sized)), 8),
+        raw_executable_signals=len(raw_executable),
+        raw_executable_share=round(len(raw_executable) / count, 8),
+        batch_executable_signals=rescued_signals,
+        batch_executable_orders=rescued_orders,
+        batch_executable_share=round(rescued_signals / count, 8),
+        dust_signals=dust,
+        dust_share=round(dust / count, 8),
+        raw_demand_usd=round(raw_demand, 8),
+        executable_demand_usd=round(executable_demand, 8),
+        idle_capacity_usd=round(idle, 8),
+        idle_capacity_share=round(idle / target_capacity_usd, 8) if target_capacity_usd > 0 else 0.0,
     )
 
 
@@ -325,26 +514,49 @@ def compute_adaptive_sizing_decision(
     )
     risk_cfg = config.get("risk", {})
     sizing_cfg = config.get("sizing", {})
-    demand_estimate = _selected_buy_demand_usd(
-        selected_rows=selected_buys,
-        fallback_budget_usd=budget,
-        max_leader_trade_budget_fraction=max_budget_fraction,
-        min_order_size_usd=_safe_float(risk_cfg.get("min_order_size_usd"), 0.01),
-        round_up_to_min_order=_safe_bool(sizing_cfg.get("round_up_to_min_order"), False),
-        max_min_order_round_up_multiple=_safe_float(
-            sizing_cfg.get("max_min_order_round_up_multiple"),
-            0.0,
-        ),
-        max_per_trade_usd=_safe_float(risk_cfg.get("max_per_trade_usd"), 0.0),
-    )
-    demand_usd = demand_estimate.effective_demand_usd
-    usable_demand_signals = demand_estimate.usable_signals
-
+    batch_cfg = _batch_config(config)
+    min_order_size = _safe_float(risk_cfg.get("min_order_size_usd"), 0.01)
+    max_per_trade = _safe_float(risk_cfg.get("max_per_trade_usd"), 0.0)
+    batch_enabled = _safe_bool(batch_cfg.get("enabled"), False)
+    batch_window_sec = _safe_float(batch_cfg.get("window_sec"), 30.0)
     min_signals = int(_safe_float(cfg.get("min_buy_signals_for_history"), 5))
     target_turnover = _safe_float(cfg.get("target_budget_turnover"), 0.85)
     min_historical = _safe_float(cfg.get("min_historical_multiplier"), 0.20)
     max_historical = _safe_float(cfg.get("max_historical_multiplier"), 1.0)
     target_capacity = max(budget * target_turnover, 0.0)
+    demand_estimate = _selected_buy_demand_usd(
+        selected_rows=selected_buys,
+        fallback_budget_usd=budget,
+        max_leader_trade_budget_fraction=max_budget_fraction,
+        min_order_size_usd=min_order_size,
+        round_up_to_min_order=(
+            _safe_bool(sizing_cfg.get("round_up_to_min_order"), False)
+            and not batch_enabled
+        ),
+        max_min_order_round_up_multiple=_safe_float(
+            sizing_cfg.get("max_min_order_round_up_multiple"),
+            0.0,
+        ),
+        max_per_trade_usd=max_per_trade,
+    )
+    executable_lookback = _executability_metrics(
+        selected_rows=selected_buys,
+        fallback_budget_usd=budget,
+        max_leader_trade_budget_fraction=max_budget_fraction,
+        min_order_size_usd=min_order_size,
+        max_per_trade_usd=max_per_trade,
+        target_capacity_usd=target_capacity,
+        batch_window_sec=batch_window_sec if batch_enabled else 0.0,
+    )
+    if batch_enabled:
+        demand_usd = executable_lookback.executable_demand_usd
+        usable_demand_signals = (
+            executable_lookback.raw_executable_signals
+            + executable_lookback.batch_executable_orders
+        )
+    else:
+        demand_usd = demand_estimate.effective_demand_usd
+        usable_demand_signals = demand_estimate.usable_signals
 
     if usable_demand_signals >= min_signals and demand_usd > target_capacity > 0:
         demand_multiplier = target_capacity / demand_usd
@@ -391,11 +603,40 @@ def compute_adaptive_sizing_decision(
     if not reasons:
         reasons.append("full size")
 
+    executable_7d = _executability_metrics(
+        selected_rows=_unique_selected_buy_observations(
+            leader_wallet=leader_wallet,
+            observations=observations,
+            since=now - timedelta(days=7),
+        ),
+        fallback_budget_usd=budget,
+        max_leader_trade_budget_fraction=max_budget_fraction,
+        min_order_size_usd=min_order_size,
+        max_per_trade_usd=max_per_trade,
+        target_capacity_usd=target_capacity,
+        batch_window_sec=batch_window_sec if batch_enabled else 0.0,
+    )
+    executable_30d = _executability_metrics(
+        selected_rows=_unique_selected_buy_observations(
+            leader_wallet=leader_wallet,
+            observations=observations,
+            since=now - timedelta(days=30),
+        ),
+        fallback_budget_usd=budget,
+        max_leader_trade_budget_fraction=max_budget_fraction,
+        min_order_size_usd=min_order_size,
+        max_per_trade_usd=max_per_trade,
+        target_capacity_usd=target_capacity,
+        batch_window_sec=batch_window_sec if batch_enabled else 0.0,
+    )
+
     details = {
         "leader_budget_usd": round(budget, 8),
         "open_exposure_usd": open_exposure,
         "utilization": round(utilization, 8),
         "lookback_hours": _safe_float(cfg.get("lookback_hours"), 24.0),
+        "signal_batch_coalescer_enabled": batch_enabled,
+        "signal_batch_window_sec": batch_window_sec,
         "selected_buy_signals": len(selected_buys),
         "raw_sized_buy_signals": demand_estimate.raw_sized_signals,
         "usable_demand_signals": usable_demand_signals,
@@ -421,6 +662,28 @@ def compute_adaptive_sizing_decision(
         "budget_skip_multiplier_reason": skip_reason,
         "historical_multiplier_reason": historical_reason,
     }
+    for suffix, metrics in (
+        ("lookback", executable_lookback),
+        ("7d", executable_7d),
+        ("30d", executable_30d),
+    ):
+        details.update(
+            {
+                f"buy_signals_{suffix}": metrics.buy_signals,
+                f"median_trade_fraction_{suffix}": metrics.median_trade_fraction,
+                f"raw_executable_buy_signals_{suffix}": metrics.raw_executable_signals,
+                f"raw_executable_buy_share_{suffix}": metrics.raw_executable_share,
+                f"batch_executable_buy_signals_{suffix}": metrics.batch_executable_signals,
+                f"batch_executable_buy_orders_{suffix}": metrics.batch_executable_orders,
+                f"batch_executable_buy_share_{suffix}": metrics.batch_executable_share,
+                f"dust_buy_signals_{suffix}": metrics.dust_signals,
+                f"dust_buy_share_{suffix}": metrics.dust_share,
+                f"raw_buy_demand_usd_{suffix}": metrics.raw_demand_usd,
+                f"executable_buy_demand_usd_{suffix}": metrics.executable_demand_usd,
+                f"idle_capacity_usd_{suffix}": metrics.idle_capacity_usd,
+                f"idle_capacity_share_{suffix}": metrics.idle_capacity_share,
+            }
+        )
 
     return AdaptiveSizingDecision(
         enabled=True,

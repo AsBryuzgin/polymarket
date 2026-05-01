@@ -29,12 +29,15 @@ class AdaptiveSizingTests(unittest.TestCase):
         notional: float = 30.0,
         target_budget_usd: float = 20.0,
         portfolio_value_usd: float = 100.0,
+        token_id: str = "tokenA",
+        observed_at: str = "2026-04-29 10:00:00",
     ) -> dict:
         return {
-            "observed_at": "2026-04-29 10:00:00",
+            "observed_at": observed_at,
             "leader_wallet": "wallet1",
             "selected_signal_id": signal_id,
             "selected_side": "BUY",
+            "token_id": token_id,
             "target_budget_usd": target_budget_usd,
             "selected_trade_notional_usd": notional,
             "selected_leader_portfolio_value_usd": portfolio_value_usd,
@@ -140,6 +143,53 @@ class AdaptiveSizingTests(unittest.TestCase):
         self.assertEqual(decision.details["selected_buy_effective_demand_usd"], 0.0)
         self.assertEqual(decision.details["usable_demand_signals"], 0)
         self.assertEqual(decision.details["min_order_blocked_signals"], 5)
+
+    def test_short_batch_metrics_rescue_nearby_small_buys(self) -> None:
+        config = {
+            "risk": {
+                "min_order_size_usd": 1.0,
+                "max_per_trade_usd": 100.0,
+            },
+            "sizing": {
+                "max_leader_trade_budget_fraction": 1.0,
+                "round_up_to_min_order": True,
+                "max_min_order_round_up_multiple": 3.0,
+            },
+            "signal_batch_coalescer": {
+                "enabled": True,
+                "window_sec": 30.0,
+            },
+            "adaptive_sizing": {
+                "enabled": True,
+                "lookback_hours": 24.0,
+                "target_budget_turnover": 0.20,
+                "min_buy_signals_for_history": 1,
+            },
+        }
+        rows = [
+            self._observation("sig-a", notional=2.0, token_id="tokenA", observed_at="2026-04-29 10:00:00"),
+            self._observation("sig-b", notional=2.0, token_id="tokenA", observed_at="2026-04-29 10:00:12"),
+            self._observation("sig-c", notional=2.0, token_id="tokenA", observed_at="2026-04-29 10:00:24"),
+        ]
+
+        decision = compute_adaptive_sizing_decision(
+            leader_wallet="wallet1",
+            leader_budget_usd=20.0,
+            config=config,
+            open_positions=[],
+            observations=rows,
+            processed_signals=[],
+            trade_history=[],
+            now=datetime(2026, 4, 29, 12, 0, tzinfo=timezone.utc),
+        )
+
+        self.assertEqual(decision.details["signal_batch_coalescer_enabled"], True)
+        self.assertEqual(decision.details["buy_signals_7d"], 3)
+        self.assertEqual(decision.details["raw_executable_buy_signals_7d"], 0)
+        self.assertEqual(decision.details["batch_executable_buy_signals_7d"], 3)
+        self.assertEqual(decision.details["batch_executable_buy_orders_7d"], 1)
+        self.assertEqual(decision.details["dust_buy_signals_7d"], 0)
+        self.assertAlmostEqual(decision.details["median_trade_fraction_7d"], 0.02)
 
     def test_historical_pressure_ignores_buy_orderbook_share_minimum(self) -> None:
         config = {

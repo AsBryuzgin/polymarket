@@ -122,6 +122,11 @@ def _status_hint(status: str) -> str:
         "ACCUMULATED_EXECUTED": "микросигнал был исполнен внутри общего BUY",
         "ACCUMULATED_EXPIRED": "микросигнал устарел до накопления min order",
         "ACCUMULATED_EXECUTION_ERROR": "общий BUY по накопленным микросигналам не исполнился",
+        "BATCH_PENDING": "маленький BUY ждет короткой склейки с соседними fill'ами",
+        "BATCH_EXECUTED": "маленький BUY был исполнен внутри короткого batch",
+        "BATCH_EXPIRED": "короткое batch-окно закончилось до min order",
+        "BATCH_BLOCKED": "короткий batch собрался, но был остановлен risk/budget",
+        "BATCH_EXECUTION_ERROR": "короткий batch не исполнился",
     }
     return hints.get(status, "см. latest_reason для деталей")
 
@@ -382,7 +387,7 @@ def build_status_report(
 
     open_rows, snapshot_errors = _open_position_marks(snapshot_loader=snapshot_loader)
     registry = list_leader_registry(limit=100000)
-    micro_buckets = list_micro_signal_buckets(limit=100000)
+    signal_batches = list_micro_signal_buckets(limit=100000)
     observations = list_signal_observations(limit=1)
 
     mark_summary = _open_mark_summary(open_rows)
@@ -448,12 +453,12 @@ def build_status_report(
         lines.append(f"последнее наблюдение: {last_age:.1f} мин назад")
     if alert_count is not None:
         lines.append(f"текущие alerts: {alert_count}")
-    if micro_buckets:
-        micro_amount = sum(_safe_float(row.get("pending_amount_usd")) for row in micro_buckets)
-        micro_signals = sum(int(_safe_float(row.get("signal_count"))) for row in micro_buckets)
+    if signal_batches:
+        batch_amount = sum(_safe_float(row.get("pending_amount_usd")) for row in signal_batches)
+        batch_signals = sum(int(_safe_float(row.get("signal_count"))) for row in signal_batches)
         lines.append(
-            f"micro-накопитель: {len(micro_buckets)} buckets | "
-            f"{micro_signals} signals | {_money(micro_amount)}"
+            f"short batch: {len(signal_batches)} buckets | "
+            f"{batch_signals} signals | {_money(batch_amount)}"
         )
     if funding_error:
         lines.append(f"проверка баланса: ERROR {_short(funding_error, 40, 0)}")
@@ -923,6 +928,19 @@ def build_sizing_report(config: dict[str, Any] | None = None) -> str:
                 "usable_demand_signals": int(_safe_float(details.get("usable_demand_signals"))),
                 "demand": _safe_float(details.get("selected_buy_demand_usd")),
                 "target_capacity": _safe_float(details.get("target_capacity_usd")),
+                "median_trade_fraction_7d": _safe_float(details.get("median_trade_fraction_7d")),
+                "raw_executable_share_7d": _safe_float(details.get("raw_executable_buy_share_7d")),
+                "batch_executable_share_7d": _safe_float(details.get("batch_executable_buy_share_7d")),
+                "batch_executable_orders_7d": int(
+                    _safe_float(details.get("batch_executable_buy_orders_7d"))
+                ),
+                "dust_share_7d": _safe_float(details.get("dust_buy_share_7d")),
+                "idle_share_7d": _safe_float(details.get("idle_capacity_share_7d")),
+                "idle_usd_7d": _safe_float(details.get("idle_capacity_usd_7d")),
+                "raw_executable_share_30d": _safe_float(details.get("raw_executable_buy_share_30d")),
+                "batch_executable_share_30d": _safe_float(details.get("batch_executable_buy_share_30d")),
+                "dust_share_30d": _safe_float(details.get("dust_buy_share_30d")),
+                "idle_share_30d": _safe_float(details.get("idle_capacity_share_30d")),
                 "budget_skips": int(_safe_float(details.get("budget_skips"))),
                 "budget_skip_ratio": _safe_float(details.get("budget_skip_ratio")),
                 "budget_skip_multiplier": _safe_float(details.get("budget_skip_multiplier")) or 1.0,
@@ -960,6 +978,24 @@ def build_sizing_report(config: dict[str, Any] | None = None) -> str:
                 (
                     f"   BUY signals {row['selected_buy_signals']} | demand {_money(row['demand'])} "
                     f"| target {_money(row['target_capacity'])} | pressure {pressure:.1f}x"
+                ),
+                (
+                    f"   7d median fraction {_pct(row['median_trade_fraction_7d'])} | "
+                    f"direct {_pct(row['raw_executable_share_7d'])} | "
+                    f"batch {_pct(row['batch_executable_share_7d'])} "
+                    f"({row['batch_executable_orders_7d']} orders) | "
+                    f"dust {_pct(row['dust_share_7d'])}"
+                ),
+                (
+                    f"   idle capacity 7d {_money(row['idle_usd_7d'])} "
+                    f"({_pct(row['idle_share_7d'])})"
+                ),
+                (
+                    f"   30d direct/batch/dust/idle "
+                    f"{_pct(row['raw_executable_share_30d'])}/"
+                    f"{_pct(row['batch_executable_share_30d'])}/"
+                    f"{_pct(row['dust_share_30d'])}/"
+                    f"{_pct(row['idle_share_30d'])}"
                 ),
                 (
                     f"   entries {row['entries']} / {_money(row['entry_amount'])} "

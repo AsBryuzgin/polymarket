@@ -10,6 +10,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from execution.builder_auth import load_executor_config
+from execution.copy_worker import flush_signal_batches
 from execution.order_router import resolve_execution_mode
 from execution.signal_observation_store import init_signal_observation_table
 from execution.settlement import run_settlement_cycle
@@ -52,7 +53,10 @@ def main() -> None:
         print("No active leaders or exit-only open positions to scan.")
         return
 
-    rows = run_soak_cycle(registry_rows=registry_rows)
+    rows = run_soak_cycle(
+        registry_rows=registry_rows,
+        batch_flusher=lambda: flush_signal_batches(config),
+    )
     summary = summarize_soak_cycle(rows)
     settlement_summary = run_settlement_cycle(
         config=config,

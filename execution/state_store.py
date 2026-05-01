@@ -342,7 +342,7 @@ def _micro_signal_ids(raw: Any) -> list[str]:
     return [str(item) for item in data if str(item)]
 
 
-def accumulate_micro_signal(
+def _accumulate_signal_bucket(
     *,
     leader_wallet: str,
     token_id: str,
@@ -350,11 +350,16 @@ def accumulate_micro_signal(
     signal_id: str,
     amount_usd: float,
     max_age_sec: float | None = None,
+    expiry_status: str,
+    expiry_reason: str,
+    age_anchor_column: str,
 ) -> dict[str, Any]:
     init_db()
     normalized_side = side.upper()
     normalized_wallet = leader_wallet.lower()
     amount = max(float(amount_usd or 0.0), 0.0)
+    if age_anchor_column not in {"first_observed_at", "updated_at"}:
+        age_anchor_column = "updated_at"
 
     conn = get_connection()
     cur = conn.cursor()
@@ -374,9 +379,9 @@ def accumulate_micro_signal(
     reset = False
     expired_signal_ids: list[str] = []
     if existing is not None and max_age_sec is not None and max_age_sec > 0:
-        updated_at = _parse_sqlite_timestamp(existing["updated_at"])
+        age_anchor = _parse_sqlite_timestamp(existing[age_anchor_column])
         now_utc = datetime.now(timezone.utc).replace(tzinfo=None)
-        if updated_at is not None and now_utc - updated_at > timedelta(seconds=float(max_age_sec)):
+        if age_anchor is not None and now_utc - age_anchor > timedelta(seconds=float(max_age_sec)):
             reset = True
             expired_signal_ids = _micro_signal_ids(existing["signal_ids_json"])
 
@@ -424,12 +429,12 @@ def accumulate_micro_signal(
             cur.executemany(
                 """
                 UPDATE processed_signals
-                SET status = 'ACCUMULATED_EXPIRED',
-                    reason = 'micro bucket expired before reaching executable size'
+                SET status = ?,
+                    reason = ?
                 WHERE signal_id = ?
-                  AND status = 'ACCUMULATED_PENDING'
+                  AND status IN ('ACCUMULATED_PENDING', 'BATCH_PENDING')
                 """,
-                [(signal_id,) for signal_id in expired_signal_ids],
+                [(expiry_status, expiry_reason, signal_id) for signal_id in expired_signal_ids],
             )
     else:
         signal_ids = _micro_signal_ids(existing["signal_ids_json"])
@@ -483,6 +488,50 @@ def accumulate_micro_signal(
     }
 
 
+def accumulate_micro_signal(
+    *,
+    leader_wallet: str,
+    token_id: str,
+    side: str,
+    signal_id: str,
+    amount_usd: float,
+    max_age_sec: float | None = None,
+) -> dict[str, Any]:
+    return _accumulate_signal_bucket(
+        leader_wallet=leader_wallet,
+        token_id=token_id,
+        side=side,
+        signal_id=signal_id,
+        amount_usd=amount_usd,
+        max_age_sec=max_age_sec,
+        expiry_status="ACCUMULATED_EXPIRED",
+        expiry_reason="micro bucket expired before reaching executable size",
+        age_anchor_column="updated_at",
+    )
+
+
+def accumulate_signal_batch(
+    *,
+    leader_wallet: str,
+    token_id: str,
+    side: str,
+    signal_id: str,
+    amount_usd: float,
+    max_window_sec: float | None = None,
+) -> dict[str, Any]:
+    return _accumulate_signal_bucket(
+        leader_wallet=leader_wallet,
+        token_id=token_id,
+        side=side,
+        signal_id=signal_id,
+        amount_usd=amount_usd,
+        max_age_sec=max_window_sec,
+        expiry_status="BATCH_EXPIRED",
+        expiry_reason="short batch window expired before reaching executable size",
+        age_anchor_column="first_observed_at",
+    )
+
+
 def consume_micro_signal_bucket(
     *,
     leader_wallet: str,
@@ -525,12 +574,26 @@ def consume_micro_signal_bucket(
     return result
 
 
+def consume_signal_batch(
+    *,
+    leader_wallet: str,
+    token_id: str,
+    side: str,
+) -> dict[str, Any] | None:
+    return consume_micro_signal_bucket(
+        leader_wallet=leader_wallet,
+        token_id=token_id,
+        side=side,
+    )
+
+
 def mark_accumulated_signals(
     *,
     signal_ids: list[str],
     status: str,
     reason: str,
     exclude_signal_id: str | None = None,
+    pending_status: str = "ACCUMULATED_PENDING",
 ) -> int:
     ids = [
         str(signal_id)
@@ -547,14 +610,30 @@ def mark_accumulated_signals(
         SET status = ?,
             reason = ?
         WHERE signal_id = ?
-          AND status = 'ACCUMULATED_PENDING'
+          AND status = ?
         """,
-        [(status, reason, signal_id) for signal_id in ids],
+        [(status, reason, signal_id, pending_status) for signal_id in ids],
     )
     changed = cur.rowcount
     conn.commit()
     conn.close()
     return int(changed or 0)
+
+
+def mark_batched_signals(
+    *,
+    signal_ids: list[str],
+    status: str,
+    reason: str,
+    exclude_signal_id: str | None = None,
+) -> int:
+    return mark_accumulated_signals(
+        signal_ids=signal_ids,
+        status=status,
+        reason=reason,
+        exclude_signal_id=exclude_signal_id,
+        pending_status="BATCH_PENDING",
+    )
 
 
 def list_micro_signal_buckets(limit: int = 100) -> list[dict[str, Any]]:
