@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, asdict, replace
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from execution.budget_accounting import refresh_active_budgets_from_config
 from execution.builder_auth import load_executor_config
@@ -275,7 +275,8 @@ def _batch_due(first_observed_at, *, window_sec: float) -> bool:
     first_seen = _parse_sqlite_datetime(first_observed_at)
     if first_seen is None:
         return True
-    return datetime.utcnow() - first_seen >= timedelta(seconds=max(window_sec, 0.0))
+    now_utc = datetime.now(timezone.utc).replace(tzinfo=None)
+    return now_utc - first_seen >= timedelta(seconds=max(window_sec, 0.0))
 
 
 def flush_signal_batches(config: dict | None = None) -> dict:
