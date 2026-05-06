@@ -70,6 +70,8 @@ generic_webhook_url_env = "POLY_ALERT_GENERIC_WEBHOOK_URL"
 [state_backup]
 enabled = true
 dir = "data/backups"
+retention_keep_last = 6
+retention_max_total_mb = 2048
 
 [market_cache]
 enabled = true

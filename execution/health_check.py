@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from pathlib import Path
+import shutil
 from typing import Any
 
 from execution.allowance import evaluate_live_funding_preflight
@@ -70,6 +71,22 @@ def _row_age_minutes(row: dict[str, Any], *, now: datetime) -> float | None:
     return None
 
 
+def _disk_usage_snapshot(path: Path) -> dict[str, Any]:
+    target = path if path.exists() else path.parent
+    while not target.exists() and target != target.parent:
+        target = target.parent
+    usage = shutil.disk_usage(target)
+    used = usage.total - usage.free
+    used_pct = (used / usage.total * 100.0) if usage.total > 0 else 0.0
+    return {
+        "path": str(target),
+        "total_mb": round(usage.total / 1024 / 1024, 2),
+        "used_mb": round(used / 1024 / 1024, 2),
+        "free_mb": round(usage.free / 1024 / 1024, 2),
+        "used_pct": round(used_pct, 2),
+    }
+
+
 def _processing_age_counts(
     rows: list[dict[str, Any]],
     *,
@@ -135,6 +152,11 @@ def build_executor_health_report(
         10.0,
     )
     now = datetime.now(timezone.utc)
+    disk = _disk_usage_snapshot(Path(state_db_path) if state_db_path else state_store.DB_PATH)
+    disk_free_warning_mb = _safe_float(alert_cfg.get("disk_free_warning_mb"), 1024.0)
+    disk_free_critical_mb = _safe_float(alert_cfg.get("disk_free_critical_mb"), 256.0)
+    disk_usage_warning_pct = _safe_float(alert_cfg.get("disk_usage_warning_pct"), 90.0)
+    disk_usage_critical_pct = _safe_float(alert_cfg.get("disk_usage_critical_pct"), 98.0)
 
     live_enabled = _bool_or_default(global_cfg.get("live_trading_enabled"), False)
     live_ack = str(global_cfg.get("live_trading_ack", ""))
@@ -229,6 +251,23 @@ def build_executor_health_report(
     if mode != "LIVE" and live_enabled:
         warnings.append("live_trading_enabled is true but execution mode is not LIVE")
 
+    if (
+        disk["free_mb"] <= disk_free_critical_mb
+        or disk["used_pct"] >= disk_usage_critical_pct
+    ):
+        blockers.append(
+            "disk space critical: "
+            f"{disk['free_mb']:.0f} MB free, {disk['used_pct']:.1f}% used"
+        )
+    elif (
+        disk["free_mb"] <= disk_free_warning_mb
+        or disk["used_pct"] >= disk_usage_warning_pct
+    ):
+        warnings.append(
+            "disk space low: "
+            f"{disk['free_mb']:.0f} MB free, {disk['used_pct']:.1f}% used"
+        )
+
     health_status = "OK"
     if warnings:
         health_status = "WARN"
@@ -272,6 +311,7 @@ def build_executor_health_report(
             "trade_history_events": len(trade_history_rows),
             "processed_status_counts": processed_status_counts,
             "attempt_status_counts": attempt_status_counts,
+            "disk": disk,
         },
         "reconciliation": reconciliation.summary,
         "env": env_health,
