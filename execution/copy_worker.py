@@ -45,6 +45,9 @@ from risk.guards import build_runtime_risk_limits, evaluate_entry_risk
 from risk.sizing import compute_signal_copy_amount
 
 
+DEFAULT_MAX_MIN_ORDER_ROUND_UP_MULTIPLE = 3.0
+
+
 @dataclass
 class LeaderSignal:
     signal_id: str
@@ -204,6 +207,14 @@ def _safe_bool(value, default: bool = False) -> bool:
     return bool(value)
 
 
+def _max_min_order_round_up_multiple(config: dict) -> float:
+    sizing = config.get("sizing", {})
+    return (
+        _positive_float_or_none(sizing.get("max_min_order_round_up_multiple"))
+        or DEFAULT_MAX_MIN_ORDER_ROUND_UP_MULTIPLE
+    )
+
+
 def _signal_batch_coalescer_enabled(config: dict) -> bool:
     cfg = config.get("signal_batch_coalescer", {})
     return _safe_bool(cfg.get("enabled"), False)
@@ -315,9 +326,7 @@ def flush_signal_batches(config: dict | None = None) -> dict:
     freshness = config.get("signal_freshness", {})
     window_sec = _signal_batch_window_sec(config)
     min_order_size_usd = float(risk.get("min_order_size_usd", 1.0))
-    max_min_order_round_up_multiple = _positive_float_or_none(
-        sizing.get("max_min_order_round_up_multiple")
-    )
+    max_min_order_round_up_multiple = _max_min_order_round_up_multiple(config)
     round_up_to_min_order = _safe_bool(sizing.get("round_up_to_min_order"), False)
 
     results: list[dict] = []
@@ -745,9 +754,7 @@ def process_signal(signal: LeaderSignal) -> dict:
         sizing.get("round_up_to_min_order"),
         False,
     )
-    max_min_order_round_up_multiple = _positive_float_or_none(
-        sizing.get("max_min_order_round_up_multiple")
-    )
+    max_min_order_round_up_multiple = _max_min_order_round_up_multiple(config)
     allow_budget_fallback = _safe_bool(
         sizing.get("allow_budget_fallback"),
         False,

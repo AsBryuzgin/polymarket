@@ -376,6 +376,79 @@ class ExecutionRegressionTests(unittest.TestCase):
         self.assertIsNotNone(pos)
         self.assertEqual(float(pos["position_usd"]), 1.0)
 
+    def test_short_batch_flush_uses_default_round_up_cap(self) -> None:
+        state_store.upsert_leader_registry_row(
+            wallet="wallet-batch-tiny",
+            category="SPORTS",
+            user_name="BatchLeader",
+            leader_status="ACTIVE",
+            target_weight=1.0,
+            target_budget_usd=20.0,
+            grace_until=None,
+            source_tag="test",
+        )
+        state_store.accumulate_signal_batch(
+            leader_wallet="wallet-batch-tiny",
+            token_id="token-batch-tiny",
+            side="BUY",
+            signal_id="sig-batch-tiny",
+            amount_usd=0.20,
+            max_window_sec=30,
+        )
+        state_store.record_signal(
+            signal_id="sig-batch-tiny",
+            leader_wallet="wallet-batch-tiny",
+            token_id="token-batch-tiny",
+            side="BUY",
+            leader_budget_usd=20.0,
+            suggested_amount_usd=0.20,
+            status="BATCH_PENDING",
+            reason="waiting for short batch",
+        )
+        conn = state_store.get_connection()
+        conn.execute(
+            """
+            UPDATE micro_signal_buckets
+            SET first_observed_at = '2000-01-01 00:00:00'
+            WHERE leader_wallet = 'wallet-batch-tiny'
+              AND token_id = 'token-batch-tiny'
+              AND side = 'BUY'
+            """
+        )
+        conn.commit()
+        conn.close()
+
+        config = {
+            "global": {"execution_mode": "paper"},
+            "risk": {
+                "min_order_size_usd": 1.0,
+                "max_per_trade_usd": 10.0,
+                "skip_if_spread_gt": 0.03,
+                "enforce_leader_budget_cap": True,
+            },
+            "filters": {
+                "buy_min_price": 0.01,
+                "buy_max_price": 0.96,
+            },
+            "sizing": {
+                "round_up_to_min_order": True,
+            },
+            "signal_batch_coalescer": {
+                "enabled": True,
+                "window_sec": 30,
+            },
+        }
+
+        with patch("execution.copy_worker.execute_market_order") as execute:
+            summary = flush_signal_batches(config)
+
+        self.assertEqual(summary["processed"], 1)
+        self.assertEqual(summary["results"][0]["status"], "BATCH_EXPIRED")
+        self.assertIn("round-up multiple", summary["results"][0]["reason"])
+        self.assertEqual(execute.call_count, 0)
+        self.assertEqual(state_store.list_micro_signal_buckets(), [])
+        self.assertIsNone(state_store.get_open_position("wallet-batch-tiny", "token-batch-tiny"))
+
     def test_duplicate_signal_is_claimed_before_preview(self) -> None:
         signal = LeaderSignal(
             signal_id="sig-duplicate-claim",
