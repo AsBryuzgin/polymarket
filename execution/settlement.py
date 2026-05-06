@@ -21,14 +21,13 @@ from execution.order_router import LIVE_TRADING_ACK, resolve_execution_mode
 from execution.position_marking import mark_position
 from execution.positions import fetch_exchange_positions
 from execution.state_store import (
+    close_position_and_log_trade,
     get_leader_registry,
     get_open_position,
     get_processed_settlement,
     list_open_positions,
     list_processed_settlements,
-    log_trade_event,
     record_processed_settlement,
-    reduce_or_close_position,
 )
 from execution.trade_notifications import send_trade_notification
 
@@ -577,25 +576,9 @@ def _finalize_candidate(
         if current_open is None:
             continue
 
-        reduced = reduce_or_close_position(
-            leader_wallet=position.leader_wallet,
-            token_id=position.token_id,
-            signal_id=signal_id,
-            amount_usd=float(current_open.get("position_usd") or 0.0),
-        )
-        if reduced is None:
-            continue
-
-        position_before_usd = float(reduced["position_before_usd"])
         payout_usd = round(float(position.payout_usd), 4)
-        payout_total += payout_usd
-        realized_pnl_usd = round(payout_usd - position_before_usd, 4)
-        realized_pnl_pct = None
-        if position_before_usd > 0:
-            realized_pnl_pct = round(realized_pnl_usd / position_before_usd, 6)
-        holding_minutes = _parse_opened_at_to_minutes(reduced.get("opened_at"))
-
-        log_trade_event(
+        holding_minutes = _parse_opened_at_to_minutes(current_open.get("opened_at"))
+        reduced = close_position_and_log_trade(
             signal_id=signal_id,
             leader_wallet=position.leader_wallet,
             leader_user_name=position.leader_user_name,
@@ -604,18 +587,19 @@ def _finalize_candidate(
             token_id=position.token_id,
             side="SELL",
             event_type="EXIT",
-            amount_usd=round(position_before_usd, 2),
             price=position.settlement_price,
             gross_value_usd=round(payout_usd, 2),
-            position_before_usd=position_before_usd,
-            position_after_usd=float(reduced["position_after_usd"]),
-            entry_avg_price=reduced.get("entry_avg_price"),
             exit_price=position.settlement_price,
-            realized_pnl_usd=realized_pnl_usd,
-            realized_pnl_pct=realized_pnl_pct,
             holding_minutes=holding_minutes,
             notes=f"{mode.lower()} settlement redeem | condition_id={candidate.condition_id}",
         )
+        if reduced is None:
+            continue
+
+        payout_total += payout_usd
+        position_before_usd = float(reduced["position_before_usd"])
+        realized_pnl_usd = reduced.get("realized_pnl_usd")
+        realized_pnl_pct = reduced.get("realized_pnl_pct")
 
         if notify:
             send_trade_notification(

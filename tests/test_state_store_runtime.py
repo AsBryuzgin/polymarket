@@ -108,6 +108,44 @@ class StateStoreRuntimeTests(unittest.TestCase):
             self.assertEqual(row["status"], "LIVE_SUBMITTED")
             self.assertEqual(row["transaction_id"], "tx-1")
 
+    def test_close_position_and_log_trade_is_consistent(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            state_store.DB_PATH = Path(tmp) / "executor_state.db"
+            state_store.init_db()
+            state_store.upsert_buy_position(
+                leader_wallet="wallet1",
+                token_id="tokenA",
+                amount_usd=5.0,
+                entry_price=0.5,
+                signal_id="sig-entry",
+            )
+
+            result = state_store.close_position_and_log_trade(
+                leader_wallet="wallet1",
+                leader_user_name="Leader",
+                category="SPORTS",
+                leader_status="ACTIVE",
+                token_id="tokenA",
+                signal_id="settlement:condition-1",
+                side="SELL",
+                event_type="EXIT",
+                price=1.0,
+                gross_value_usd=10.0,
+                exit_price=1.0,
+                holding_minutes=12.0,
+                notes="paper settlement redeem | condition_id=condition-1",
+            )
+
+            self.assertIsNotNone(result)
+            self.assertEqual(state_store.list_open_positions(limit=10), [])
+            history = state_store.list_trade_history(limit=10)
+            self.assertEqual(len(history), 1)
+            self.assertEqual(history[0]["signal_id"], "settlement:condition-1")
+            self.assertEqual(history[0]["event_type"], "EXIT")
+            self.assertAlmostEqual(float(history[0]["amount_usd"]), 5.0)
+            self.assertAlmostEqual(float(history[0]["gross_value_usd"]), 10.0)
+            self.assertAlmostEqual(float(history[0]["realized_pnl_usd"]), 5.0)
+
 
 if __name__ == "__main__":
     unittest.main()

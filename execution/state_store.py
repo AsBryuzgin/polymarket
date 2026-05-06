@@ -1093,6 +1093,111 @@ def reduce_or_close_position(
     }
 
 
+def close_position_and_log_trade(
+    *,
+    leader_wallet: str,
+    leader_user_name: str | None,
+    category: str | None,
+    leader_status: str | None,
+    token_id: str,
+    signal_id: str,
+    side: str,
+    event_type: str,
+    price: float | None,
+    gross_value_usd: float | None,
+    exit_price: float | None,
+    holding_minutes: float | None,
+    notes: str | None,
+) -> dict[str, Any] | None:
+    conn = get_connection()
+    cur = conn.cursor()
+
+    try:
+        cur.execute("BEGIN")
+        cur.execute(
+            """
+            SELECT *
+            FROM copied_positions
+            WHERE leader_wallet = ?
+              AND token_id = ?
+              AND status = 'OPEN'
+            LIMIT 1
+            """,
+            (leader_wallet, token_id),
+        )
+        existing = cur.fetchone()
+        if existing is None:
+            conn.rollback()
+            return None
+
+        old_position = float(existing["position_usd"])
+        entry_avg_price = (
+            float(existing["avg_entry_price"]) if existing["avg_entry_price"] is not None else None
+        )
+        gross = float(gross_value_usd) if gross_value_usd is not None else None
+        realized_pnl_usd = round(gross - old_position, 4) if gross is not None else None
+        realized_pnl_pct = (
+            round(realized_pnl_usd / old_position, 6)
+            if realized_pnl_usd is not None and old_position > EPS
+            else None
+        )
+
+        cur.execute(
+            """
+            UPDATE copied_positions
+            SET position_usd = 0.0,
+                status = 'CLOSED',
+                last_signal_id = ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE leader_wallet = ?
+              AND token_id = ?
+              AND status = 'OPEN'
+            """,
+            (signal_id, leader_wallet, token_id),
+        )
+
+        _insert_trade_event(
+            cur,
+            signal_id=signal_id,
+            leader_wallet=leader_wallet,
+            leader_user_name=leader_user_name,
+            category=category,
+            leader_status=leader_status,
+            token_id=token_id,
+            side=side,
+            event_type=event_type,
+            amount_usd=round(old_position, 2),
+            price=price,
+            gross_value_usd=round(gross, 2) if gross is not None else None,
+            position_before_usd=old_position,
+            position_after_usd=0.0,
+            entry_avg_price=entry_avg_price,
+            exit_price=exit_price,
+            realized_pnl_usd=realized_pnl_usd,
+            realized_pnl_pct=realized_pnl_pct,
+            holding_minutes=holding_minutes,
+            notes=notes,
+        )
+
+        conn.commit()
+        return {
+            "position_before_usd": old_position,
+            "sell_amount_usd": old_position,
+            "position_after_usd": 0.0,
+            "entry_avg_price": entry_avg_price,
+            "opened_at": existing["opened_at"],
+            "closed_fully": True,
+            "gross_value_usd": gross,
+            "realized_pnl_usd": realized_pnl_usd,
+            "realized_pnl_pct": realized_pnl_pct,
+        }
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
 def close_position(
     leader_wallet: str,
     token_id: str,
@@ -1110,7 +1215,9 @@ def close_position(
     )
 
 
-def log_trade_event(
+def _insert_trade_event(
+    cur: sqlite3.Cursor,
+    *,
     signal_id: str | None,
     leader_wallet: str,
     leader_user_name: str | None,
@@ -1131,9 +1238,6 @@ def log_trade_event(
     holding_minutes: float | None,
     notes: str | None,
 ) -> None:
-    conn = get_connection()
-    cur = conn.cursor()
-
     cur.execute(
         """
         INSERT INTO trade_history (
@@ -1179,6 +1283,53 @@ def log_trade_event(
             holding_minutes,
             notes,
         ),
+    )
+
+
+def log_trade_event(
+    signal_id: str | None,
+    leader_wallet: str,
+    leader_user_name: str | None,
+    category: str | None,
+    leader_status: str | None,
+    token_id: str,
+    side: str,
+    event_type: str,
+    amount_usd: float | None,
+    price: float | None,
+    gross_value_usd: float | None,
+    position_before_usd: float | None,
+    position_after_usd: float | None,
+    entry_avg_price: float | None,
+    exit_price: float | None,
+    realized_pnl_usd: float | None,
+    realized_pnl_pct: float | None,
+    holding_minutes: float | None,
+    notes: str | None,
+) -> None:
+    conn = get_connection()
+    cur = conn.cursor()
+    _insert_trade_event(
+        cur,
+        signal_id=signal_id,
+        leader_wallet=leader_wallet,
+        leader_user_name=leader_user_name,
+        category=category,
+        leader_status=leader_status,
+        token_id=token_id,
+        side=side,
+        event_type=event_type,
+        amount_usd=amount_usd,
+        price=price,
+        gross_value_usd=gross_value_usd,
+        position_before_usd=position_before_usd,
+        position_after_usd=position_after_usd,
+        entry_avg_price=entry_avg_price,
+        exit_price=exit_price,
+        realized_pnl_usd=realized_pnl_usd,
+        realized_pnl_pct=realized_pnl_pct,
+        holding_minutes=holding_minutes,
+        notes=notes,
     )
 
     conn.commit()
