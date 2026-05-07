@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict
 from typing import Any, Callable
@@ -255,11 +256,13 @@ def run_soak_cycle(
     observation_logger: ObservationLogger = log_signal_observation,
     max_fetch_workers: int = 1,
     max_process_workers: int = 1,
+    metrics: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     queued_entries: list[dict[str, Any]] = []
     seq = 0
 
+    fetch_started = time.monotonic()
     fetch_workers = min(_positive_int(max_fetch_workers, 1), max(len(registry_rows), 1))
     if fetch_workers <= 1:
         fetched_rows = [
@@ -287,6 +290,8 @@ def run_soak_cycle(
             for future in as_completed(futures):
                 fetched_rows.append(future.result())
         fetched_rows.sort(key=lambda item: int(item["idx"]))
+    if metrics is not None:
+        metrics["fetch_elapsed_sec"] = round(time.monotonic() - fetch_started, 3)
 
     for fetched in fetched_rows:
         registry_row = fetched["registry_row"]
@@ -380,6 +385,7 @@ def run_soak_cycle(
             seq += 1
 
     if queued_entries:
+        process_started = time.monotonic()
         process_workers = min(
             _positive_int(max_process_workers, 1),
             max(len({entry["_wallet"] for entry in queued_entries}), 1),
@@ -402,11 +408,18 @@ def run_soak_cycle(
                 for future in as_completed(futures):
                     processed_rows.extend(future.result())
         rows.extend(processed_rows)
+        if metrics is not None:
+            metrics["process_elapsed_sec"] = round(time.monotonic() - process_started, 3)
+    elif metrics is not None:
+        metrics["process_elapsed_sec"] = 0.0
 
     if batch_flusher is not None:
+        batch_started = time.monotonic()
         try:
             batch_summary = batch_flusher()
         except Exception as e:
+            if metrics is not None:
+                metrics["batch_elapsed_sec"] = round(time.monotonic() - batch_started, 3)
             rows.append(
                 {
                     "idx": None,
@@ -449,6 +462,10 @@ def run_soak_cycle(
                 }
             )
             seq += 1
+        if metrics is not None:
+            metrics["batch_elapsed_sec"] = round(time.monotonic() - batch_started, 3)
+    elif metrics is not None:
+        metrics["batch_elapsed_sec"] = 0.0
 
     return [
         {k: v for k, v in row.items() if k != "_seq"}

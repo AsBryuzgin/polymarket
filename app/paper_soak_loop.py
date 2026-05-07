@@ -97,13 +97,18 @@ def main() -> None:
                 return
 
             started = time.strftime("%Y-%m-%d %H:%M:%S")
+            stale_processing_before = mark_stale_processing_signals(
+                max_age_sec=stale_processing_max_age_sec,
+            )
+            cycle_metrics: dict[str, float] = {}
             rows = run_soak_cycle(
                 registry_rows=registry_rows,
                 batch_flusher=lambda: flush_signal_batches(config),
                 max_fetch_workers=max_fetch_workers,
                 max_process_workers=max_process_workers,
+                metrics=cycle_metrics,
             )
-            stale_processing_summary = mark_stale_processing_signals(
+            stale_processing_after = mark_stale_processing_signals(
                 max_age_sec=stale_processing_max_age_sec,
             )
             summary = summarize_soak_cycle(rows)
@@ -120,7 +125,11 @@ def main() -> None:
             summary["next_sleep_sec"] = round(sleep_sec, 3)
             summary["max_fetch_workers"] = max_fetch_workers
             summary["max_process_workers"] = max_process_workers
-            summary["stale_processing_recovery"] = stale_processing_summary
+            summary.update(cycle_metrics)
+            summary["stale_processing_recovery"] = {
+                "before": stale_processing_before,
+                "after": stale_processing_after,
+            }
 
             print(f"\n--- paper soak cycle {cycle} at {started} ---")
             pprint(summary)
