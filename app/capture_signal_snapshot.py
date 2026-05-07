@@ -1,6 +1,12 @@
 from __future__ import annotations
 
+import sys
+from pathlib import Path
 from pprint import pprint
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 from execution.state_store import init_db, list_leader_registry
 from execution.leader_signal_source import latest_fresh_copyable_signal_from_wallet
@@ -66,10 +72,29 @@ def capture_once(verbose: bool = True) -> list[dict]:
             token_id=selected_token_id,
             selected_trade_age_sec=_safe_float(summary.get("selected_trade_age_sec")),
             selected_trade_notional_usd=_safe_float(summary.get("selected_trade_notional_usd")),
+            selected_leader_portfolio_value_usd=_safe_float(
+                summary.get("selected_leader_portfolio_value_usd")
+            ),
+            selected_leader_token_position_size=_safe_float(
+                summary.get("selected_leader_token_position_size")
+            ),
+            selected_leader_token_position_value_usd=_safe_float(
+                summary.get("selected_leader_token_position_value_usd")
+            ),
+            selected_leader_exit_fraction=_safe_float(summary.get("selected_leader_exit_fraction")),
+            selected_leader_position_context_error=summary.get(
+                "selected_leader_position_context_error"
+            ),
             snapshot_midpoint=snapshot_midpoint,
             snapshot_best_bid=snapshot_best_bid,
             snapshot_best_ask=snapshot_best_ask,
             snapshot_spread=snapshot_spread,
+            latest_token_id=summary.get("latest_token_id"),
+            latest_trade_price=_safe_float(summary.get("latest_trade_price")),
+            latest_snapshot_midpoint=_safe_float(summary.get("latest_snapshot_midpoint")),
+            latest_snapshot_best_bid=_safe_float(summary.get("latest_snapshot_best_bid")),
+            latest_snapshot_best_ask=_safe_float(summary.get("latest_snapshot_best_ask")),
+            latest_snapshot_spread=_safe_float(summary.get("latest_snapshot_spread")),
         )
 
         rows_to_print.append(
@@ -83,8 +108,16 @@ def capture_once(verbose: bool = True) -> list[dict]:
                 "selected_signal_id": selected_signal_id,
                 "selected_side": selected_side,
                 "token_id": selected_token_id,
+                "latest_token_id": summary.get("latest_token_id"),
                 "selected_trade_notional_usd": _safe_float(summary.get("selected_trade_notional_usd")),
+                "selected_leader_portfolio_value_usd": _safe_float(
+                    summary.get("selected_leader_portfolio_value_usd")
+                ),
+                "selected_leader_exit_fraction": _safe_float(
+                    summary.get("selected_leader_exit_fraction")
+                ),
                 "snapshot_spread": snapshot_spread,
+                "latest_snapshot_spread": _safe_float(summary.get("latest_snapshot_spread")),
             }
         )
 

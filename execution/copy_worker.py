@@ -1,20 +1,51 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, asdict
-from datetime import datetime
+from dataclasses import dataclass, asdict, replace
+from datetime import datetime, timedelta, timezone
 
+from execution.budget_accounting import refresh_active_budgets_from_config
 from execution.builder_auth import load_executor_config
 from execution.order_policy import evaluate_order_policy
+from execution.order_router import (
+    OrderExecutionResult,
+    execute_market_order,
+    resolve_execution_mode,
+)
+from execution.price_drift import price_drift_ok
 from execution.polymarket_executor import fetch_market_snapshot, preview_market_order
+from execution.runtime_guard import evaluate_runtime_guard
+from execution.live_safety import evaluate_live_buy_safety
 from execution.state_store import (
     has_signal,
+    claim_signal,
+    create_order_attempt,
+    update_order_attempt,
     record_signal,
+    accumulate_signal_batch,
+    consume_signal_batch,
+    mark_batched_signals,
     get_open_position,
     upsert_buy_position,
     reduce_or_close_position,
     get_leader_registry,
     log_trade_event,
+    list_open_positions,
+    list_processed_signals,
+    list_trade_history,
+    list_micro_signal_buckets,
 )
+from execution.signal_observation_store import list_signal_observations
+from execution.trade_notifications import send_trade_notification
+from risk.adaptive_sizing import (
+    adaptive_sizing_enabled,
+    compute_adaptive_sizing_decision,
+    neutral_adaptive_sizing_decision,
+)
+from risk.guards import build_runtime_risk_limits, evaluate_entry_risk
+from risk.sizing import compute_signal_copy_amount
+
+
+DEFAULT_MAX_MIN_ORDER_ROUND_UP_MULTIPLE = 3.0
 
 
 @dataclass
@@ -27,6 +58,10 @@ class LeaderSignal:
     leader_trade_size: float | None = None
     leader_trade_price: float | None = None
     leader_trade_notional_usd: float | None = None
+    leader_portfolio_value_usd: float | None = None
+    leader_token_position_size: float | None = None
+    leader_token_position_value_usd: float | None = None
+    leader_exit_fraction: float | None = None
 
 
 def _parse_opened_at_to_minutes(opened_at: str | None) -> float | None:
@@ -40,24 +75,566 @@ def _parse_opened_at_to_minutes(opened_at: str | None) -> float | None:
         return None
 
 
-def _compute_signal_copy_amount(
-    signal: LeaderSignal,
+def _entry_price_drift_ok(
     *,
-    min_order_size_usd: float,
-    max_per_trade_usd: float,
-    leader_trade_notional_copy_fraction: float,
-) -> tuple[float, str]:
-    notional = float(signal.leader_trade_notional_usd or 0.0)
+    leader_price: float | None,
+    current_price: float | None,
+    side: str,
+    max_abs: float,
+    max_rel: float,
+) -> tuple[bool, str]:
+    return price_drift_ok(
+        leader_price=leader_price,
+        current_price=current_price,
+        side=side,
+        max_abs=max_abs,
+        max_rel=max_rel,
+    )
 
-    if notional > 0:
-        amount = notional * leader_trade_notional_copy_fraction
-        amount = max(min_order_size_usd, amount)
-        amount = min(max_per_trade_usd, amount, float(signal.leader_budget_usd))
-        return round(amount, 2), "leader_trade_notional"
 
-    fallback = min(max_per_trade_usd, float(signal.leader_budget_usd))
-    fallback = max(min_order_size_usd, fallback)
-    return round(fallback, 2), "fallback_budget"
+def _snapshot_executable_price(snapshot: dict, side: str) -> float | None:
+    side = side.upper()
+    if side == "BUY":
+        price = _positive_float_or_none(snapshot.get("best_ask"))
+    elif side == "SELL":
+        price = _positive_float_or_none(snapshot.get("best_bid"))
+    else:
+        price = None
+    if price is not None:
+        return price
+    return _positive_float_or_none(snapshot.get("price_quote"))
+
+
+def _execute_with_recorded_attempt(
+    *,
+    config: dict,
+    signal: LeaderSignal,
+    amount_usd: float,
+    reason: str,
+) -> OrderExecutionResult:
+    mode = resolve_execution_mode(config)
+    attempt_id = create_order_attempt(
+        signal_id=signal.signal_id,
+        leader_wallet=signal.leader_wallet,
+        token_id=signal.token_id,
+        side=signal.side,
+        amount_usd=amount_usd,
+        mode=mode,
+        status="RISK_APPROVED",
+        reason=reason,
+    )
+
+    try:
+        execution = execute_market_order(
+            config=config,
+            token_id=signal.token_id,
+            amount_usd=amount_usd,
+            side=signal.side,
+            preview_fn=preview_market_order,
+        )
+    except Exception as e:
+        execution = OrderExecutionResult(
+            accepted=False,
+            mode=mode,
+            status="EXECUTION_ERROR",
+            reason=str(e),
+        )
+
+    update_order_attempt(
+        attempt_id=attempt_id,
+        status=execution.status,
+        reason=execution.reason,
+        raw_response=execution.raw_response,
+        order_id=execution.order_id,
+        fill_amount_usd=execution.fill_amount_usd,
+    )
+
+    return execution
+
+
+def _execution_failure_signal_status(execution: OrderExecutionResult) -> str:
+    if execution.status == "LIVE_SUBMITTED_UNVERIFIED":
+        return "EXECUTION_UNKNOWN"
+    if execution.status in {"LIVE_SUBMIT_ERROR", "EXECUTION_ERROR"}:
+        return "EXECUTION_ERROR"
+    return "SKIPPED_EXECUTION"
+
+
+def _entry_success_signal_status(execution: OrderExecutionResult) -> str:
+    if execution.mode == "PAPER":
+        return "PAPER_FILLED_ENTRY"
+    if execution.mode == "LIVE":
+        return "LIVE_FILLED_ENTRY"
+    return "PREVIEW_READY_ENTRY"
+
+
+def _exit_success_signal_status(execution: OrderExecutionResult, *, closed_fully: bool) -> str:
+    if execution.mode == "PAPER":
+        return "PAPER_FILLED_EXIT" if closed_fully else "PAPER_FILLED_PARTIAL_EXIT"
+    if execution.mode == "LIVE":
+        return "LIVE_FILLED_EXIT" if closed_fully else "LIVE_FILLED_PARTIAL_EXIT"
+    return "PREVIEW_READY_EXIT" if closed_fully else "PREVIEW_READY_PARTIAL_EXIT"
+
+
+def _execution_fill_price(execution: OrderExecutionResult, fallback_price: float | None) -> float | None:
+    fill_price = execution.details.get("fill_price") if execution.details else None
+    try:
+        parsed = float(fill_price)
+    except (TypeError, ValueError):
+        parsed = 0.0
+    return parsed if parsed > 0 else fallback_price
+
+
+def _positive_float_or_none(value) -> float | None:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None
+
+
+def _safe_bool(value, default: bool = False) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"1", "true", "yes", "on"}:
+            return True
+        if normalized in {"0", "false", "no", "off"}:
+            return False
+    return bool(value)
+
+
+def _max_min_order_round_up_multiple(config: dict) -> float:
+    sizing = config.get("sizing", {})
+    return (
+        _positive_float_or_none(sizing.get("max_min_order_round_up_multiple"))
+        or DEFAULT_MAX_MIN_ORDER_ROUND_UP_MULTIPLE
+    )
+
+
+def _signal_batch_coalescer_enabled(config: dict) -> bool:
+    cfg = config.get("signal_batch_coalescer", {})
+    return _safe_bool(cfg.get("enabled"), False)
+
+
+def _signal_batch_window_sec(config: dict) -> float:
+    cfg = config.get("signal_batch_coalescer", {})
+    try:
+        return float(cfg.get("window_sec", 30.0))
+    except (TypeError, ValueError):
+        return 30.0
+
+
+def _batch_signal_amount_from_sizing(size_decision, min_order_size_usd: float) -> float | None:
+    details = size_decision.details or {}
+    amount = details.get("pre_min_order_round_amount_usd")
+    if amount is None:
+        amount = details.get("capped_amount_usd")
+    if amount is None:
+        amount = details.get("raw_amount_usd")
+    try:
+        parsed = float(amount)
+    except (TypeError, ValueError):
+        return None
+    if parsed <= 0:
+        return None
+    if parsed >= float(min_order_size_usd):
+        return None
+    return parsed
+
+
+def _is_min_order_sizing_block(size_decision) -> bool:
+    reason = str(size_decision.reason or "").lower()
+    return "min_order" in reason or "min order" in reason or "round-up" in reason
+
+
+def _refresh_active_budgets_after_exit(config: dict) -> dict:
+    try:
+        return refresh_active_budgets_from_config(config=config)
+    except Exception as e:
+        return {
+            "status": "ERROR",
+            "reason": str(e),
+        }
+
+
+def _open_wallet_exposure_usd(leader_wallet: str) -> float:
+    total = 0.0
+    for row in list_open_positions(limit=100000):
+        if str(row.get("leader_wallet") or "") != leader_wallet:
+            continue
+        try:
+            total += float(row.get("position_usd") or 0.0)
+        except (TypeError, ValueError):
+            continue
+    return round(total, 8)
+
+
+def _parse_sqlite_datetime(value) -> datetime | None:
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(str(value).replace(" ", "T"))
+    except ValueError:
+        return None
+
+
+def _batch_due(first_observed_at, *, window_sec: float) -> bool:
+    first_seen = _parse_sqlite_datetime(first_observed_at)
+    if first_seen is None:
+        return True
+    now_utc = datetime.now(timezone.utc).replace(tzinfo=None)
+    return now_utc - first_seen >= timedelta(seconds=max(window_sec, 0.0))
+
+
+def flush_signal_batches(config: dict | None = None) -> dict:
+    config = config or load_executor_config()
+    if not _signal_batch_coalescer_enabled(config):
+        return {"enabled": False, "processed": 0, "results": []}
+
+    runtime_guard = evaluate_runtime_guard(config=config)
+    if not runtime_guard.allowed:
+        return {
+            "enabled": True,
+            "processed": 0,
+            "results": [
+                {
+                    "status": "SKIPPED_RUNTIME",
+                    "reason": runtime_guard.reason,
+                }
+            ],
+        }
+    live_safety = evaluate_live_buy_safety(config=config)
+    if not live_safety.allowed:
+        return {
+            "enabled": True,
+            "processed": 0,
+            "results": [
+                {
+                    "status": "SKIPPED_LIVE_SAFETY",
+                    "reason": live_safety.reason,
+                }
+            ],
+        }
+
+    risk = config.get("risk", {})
+    filters = config.get("filters", {})
+    sizing = config.get("sizing", {})
+    freshness = config.get("signal_freshness", {})
+    window_sec = _signal_batch_window_sec(config)
+    min_order_size_usd = float(risk.get("min_order_size_usd", 1.0))
+    max_min_order_round_up_multiple = _max_min_order_round_up_multiple(config)
+    round_up_to_min_order = _safe_bool(sizing.get("round_up_to_min_order"), False)
+
+    results: list[dict] = []
+    for bucket in list_micro_signal_buckets(limit=100000):
+        if str(bucket.get("side") or "").upper() != "BUY":
+            continue
+        if not _batch_due(bucket.get("first_observed_at"), window_sec=window_sec):
+            continue
+
+        leader_wallet = str(bucket.get("leader_wallet") or "")
+        token_id = str(bucket.get("token_id") or "")
+        signal_id = str(bucket.get("last_signal_id") or bucket.get("first_signal_id") or "")
+        pending_amount = _positive_float_or_none(bucket.get("pending_amount_usd")) or 0.0
+        if not leader_wallet or not token_id or not signal_id or pending_amount <= 0:
+            continue
+
+        registry = get_leader_registry(leader_wallet)
+        leader_budget_usd = _positive_float_or_none(
+            (registry or {}).get("target_budget_usd")
+        ) or 0.0
+        leader_status = str((registry or {}).get("leader_status") or "").upper()
+        leader_user_name = (registry or {}).get("user_name")
+        category = (registry or {}).get("category")
+
+        consumed = consume_signal_batch(
+            leader_wallet=leader_wallet,
+            token_id=token_id,
+            side="BUY",
+        )
+        signal_ids = (consumed or bucket).get("signal_ids", [])
+
+        def finish(status: str, reason: str, amount: float | None = None) -> None:
+            mark_batched_signals(
+                signal_ids=signal_ids,
+                exclude_signal_id=signal_id,
+                status=status,
+                reason=reason,
+            )
+            record_signal(
+                signal_id=signal_id,
+                leader_wallet=leader_wallet,
+                token_id=token_id,
+                side="BUY",
+                leader_budget_usd=leader_budget_usd,
+                suggested_amount_usd=amount,
+                status=status,
+                reason=reason,
+            )
+            results.append(
+                {
+                    "signal_id": signal_id,
+                    "leader_wallet": leader_wallet,
+                    "token_id": token_id,
+                    "status": status,
+                    "reason": reason,
+                    "suggested_amount_usd": amount,
+                    "batch_signal_count": len(signal_ids),
+                }
+            )
+
+        if leader_status and leader_status != "ACTIVE":
+            finish("BATCH_BLOCKED", f"leader status is {leader_status}")
+            continue
+        if leader_budget_usd <= 0:
+            finish("BATCH_BLOCKED", "leader budget <= 0")
+            continue
+
+        amount_usd = pending_amount
+        if amount_usd + 1e-12 < min_order_size_usd:
+            if not round_up_to_min_order:
+                finish("BATCH_EXPIRED", "batch below min order and round-up disabled")
+                continue
+            round_up_multiple = min_order_size_usd / max(amount_usd, 1e-12)
+            if (
+                max_min_order_round_up_multiple is not None
+                and round_up_multiple > max_min_order_round_up_multiple + 1e-12
+            ):
+                finish(
+                    "BATCH_EXPIRED",
+                    (
+                        "batch below min order; round-up multiple "
+                        f"{round_up_multiple:.4f} above max {max_min_order_round_up_multiple:.4f}"
+                    ),
+                )
+                continue
+            amount_usd = min_order_size_usd
+
+        wallet_exposure_usd = _open_wallet_exposure_usd(leader_wallet)
+        remaining_leader_budget_usd = max(leader_budget_usd - wallet_exposure_usd, 0.0)
+        runtime_risk_limits = build_runtime_risk_limits(config)
+        runtime_risk_limits = replace(
+            runtime_risk_limits,
+            min_order_size_usd=min_order_size_usd,
+        )
+        executable_amount = min(
+            round(amount_usd, 2),
+            runtime_risk_limits.max_per_trade_usd,
+            remaining_leader_budget_usd,
+        )
+        if executable_amount + 1e-12 < min_order_size_usd:
+            finish(
+                "BATCH_BLOCKED",
+                "batch flush blocked by remaining budget or max_per_trade",
+                round(executable_amount, 2),
+            )
+            continue
+
+        snapshot = fetch_market_snapshot(token_id=token_id, side="BUY")
+        current_price = _snapshot_executable_price(snapshot, "BUY")
+        policy = evaluate_order_policy(
+            side="BUY",
+            midpoint=snapshot["midpoint"],
+            spread=snapshot["spread"],
+            leader_budget_usd=leader_budget_usd,
+            buy_min_price=float(filters.get("buy_min_price", 0.05)),
+            buy_max_price=float(filters.get("buy_max_price", 0.96)),
+            sell_min_price=0.0,
+            sell_max_price=1.0,
+            max_spread=float(risk.get("skip_if_spread_gt", 0.02)),
+            min_order_size_usd=min_order_size_usd,
+            max_spread_rel=_positive_float_or_none(risk.get("skip_if_spread_rel_gt")),
+            max_spread_hard=_positive_float_or_none(risk.get("skip_if_spread_hard_gt")),
+        )
+        if not policy.allowed:
+            finish("BATCH_BLOCKED", f"batch flush policy blocked: {policy.reason}")
+            continue
+
+        drift_ok, drift_reason = _entry_price_drift_ok(
+            leader_price=None,
+            current_price=current_price,
+            side="BUY",
+            max_abs=float(freshness.get("max_price_drift_abs", 0.02)),
+            max_rel=float(freshness.get("max_price_drift_rel", 0.03)),
+        )
+        if not drift_ok:
+            finish("BATCH_BLOCKED", f"batch flush drift blocked: {drift_reason}")
+            continue
+
+        risk_decision = evaluate_entry_risk(
+            config=config,
+            leader_wallet=leader_wallet,
+            token_id=token_id,
+            amount_usd=executable_amount,
+            leader_budget_usd=leader_budget_usd,
+            category=category,
+            limits=runtime_risk_limits,
+        )
+        if not risk_decision.allowed:
+            finish("BATCH_BLOCKED", f"batch flush risk blocked: {risk_decision.reason}")
+            continue
+
+        flush_signal = LeaderSignal(
+            signal_id=signal_id,
+            leader_wallet=leader_wallet,
+            token_id=token_id,
+            side="BUY",
+            leader_budget_usd=leader_budget_usd,
+        )
+        execution = _execute_with_recorded_attempt(
+            config=config,
+            signal=flush_signal,
+            amount_usd=executable_amount,
+            reason="short batch flush approved",
+        )
+        if not execution.accepted:
+            finish(
+                "BATCH_EXECUTION_ERROR",
+                f"batch flush execution failed: {execution.reason}",
+                executable_amount,
+            )
+            continue
+
+        executed_amount_usd = execution.fill_amount_usd or executable_amount
+        execution_price = _execution_fill_price(execution, current_price)
+        pos_update = upsert_buy_position(
+            leader_wallet=leader_wallet,
+            token_id=token_id,
+            amount_usd=executed_amount_usd,
+            entry_price=execution_price,
+            signal_id=signal_id,
+        )
+        log_trade_event(
+            signal_id=signal_id,
+            leader_wallet=leader_wallet,
+            leader_user_name=leader_user_name,
+            category=category,
+            leader_status=leader_status,
+            token_id=token_id,
+            side="BUY",
+            event_type="ENTRY",
+            amount_usd=executed_amount_usd,
+            price=execution_price,
+            gross_value_usd=executed_amount_usd,
+            position_before_usd=pos_update["position_before_usd"],
+            position_after_usd=pos_update["position_after_usd"],
+            entry_avg_price=pos_update["entry_avg_price_after"],
+            exit_price=None,
+            realized_pnl_usd=None,
+            realized_pnl_pct=None,
+            holding_minutes=None,
+            notes=(
+                f"{execution.mode.lower()} entry generated | sizing=signal_batch_flush "
+                f"| batch_signals={len(signal_ids)} | batch_amount={pending_amount:.4f}"
+            ),
+        )
+        entry_status = _entry_success_signal_status(execution)
+        mark_batched_signals(
+            signal_ids=signal_ids,
+            exclude_signal_id=signal_id,
+            status="BATCH_EXECUTED",
+            reason=f"executed in flushed batch via {signal_id}",
+        )
+        send_trade_notification(
+            config=config,
+            mode=execution.mode,
+            event_type="ENTRY",
+            leader_wallet=leader_wallet,
+            leader_user_name=leader_user_name,
+            category=category,
+            token_id=token_id,
+            amount_usd=executed_amount_usd,
+            price=execution_price,
+            position_before_usd=pos_update["position_before_usd"],
+            position_after_usd=pos_update["position_after_usd"],
+            signal_id=signal_id,
+        )
+        record_signal(
+            signal_id=signal_id,
+            leader_wallet=leader_wallet,
+            token_id=token_id,
+            side="BUY",
+            leader_budget_usd=leader_budget_usd,
+            suggested_amount_usd=executed_amount_usd,
+            status=entry_status,
+            reason="ok via short batch flush",
+        )
+        results.append(
+            {
+                "signal_id": signal_id,
+                "leader_wallet": leader_wallet,
+                "token_id": token_id,
+                "status": entry_status,
+                "reason": "ok via short batch flush",
+                "suggested_amount_usd": executed_amount_usd,
+                "batch_signal_count": len(signal_ids),
+            }
+        )
+
+    return {"enabled": True, "processed": len(results), "results": results}
+
+
+def _adaptive_sizing_for_buy(config: dict, signal: LeaderSignal) -> dict:
+    if signal.side.upper() != "BUY" or not adaptive_sizing_enabled(config):
+        return neutral_adaptive_sizing_decision(
+            "adaptive sizing disabled",
+            enabled=False,
+        ).to_dict()
+    try:
+        return compute_adaptive_sizing_decision(
+            leader_wallet=signal.leader_wallet,
+            leader_budget_usd=signal.leader_budget_usd,
+            config=config,
+            open_positions=list_open_positions(limit=100000),
+            observations=list_signal_observations(limit=100000),
+            processed_signals=list_processed_signals(limit=100000),
+            trade_history=list_trade_history(limit=100000),
+        ).to_dict()
+    except Exception as e:
+        return neutral_adaptive_sizing_decision(
+            f"adaptive sizing unavailable: {e}"
+        ).to_dict()
+
+
+def _snapshot_min_order_size_usd(snapshot: dict, configured_min_order_usd: float) -> float:
+    snapshot_min_order = _positive_float_or_none(snapshot.get("min_order_size"))
+    configured_min_order = float(configured_min_order_usd or 0.0)
+    side = str(snapshot.get("side") or "").upper()
+    if side == "BUY":
+        return configured_min_order
+    if snapshot_min_order is None:
+        return configured_min_order
+    if side == "SELL":
+        price_quote = _positive_float_or_none(snapshot.get("best_bid"))
+    else:
+        price_quote = None
+    if price_quote is None:
+        price_quote = _positive_float_or_none(snapshot.get("price_quote"))
+    if price_quote is None:
+        price_quote = _positive_float_or_none(snapshot.get("midpoint"))
+    if price_quote is None:
+        return configured_min_order
+    return round(snapshot_min_order * price_quote, 8)
+
+
+def _sizing_max_per_trade_for_exit(config: dict, *, position_usd: float) -> float:
+    risk = config.get("risk", {})
+    explicit = _positive_float_or_none(risk.get("max_per_trade_usd"))
+    if explicit is not None:
+        return explicit
+
+    fixed_capital_base = _positive_float_or_none(
+        config.get("capital", {}).get("total_capital_usd")
+    )
+    pct = _positive_float_or_none(risk.get("max_per_trade_pct"))
+    if pct is not None and fixed_capital_base is not None:
+        return round(fixed_capital_base * pct, 8)
+
+    return max(position_usd, float(risk.get("min_order_size_usd", 1.0)))
 
 
 def process_signal(signal: LeaderSignal) -> dict:
@@ -69,10 +646,76 @@ def process_signal(signal: LeaderSignal) -> dict:
         }
 
     config = load_executor_config()
+    runtime_guard = evaluate_runtime_guard(config=config)
+    if not runtime_guard.allowed:
+        if not claim_signal(
+            signal_id=signal.signal_id,
+            leader_wallet=signal.leader_wallet,
+            token_id=signal.token_id,
+            side=signal.side,
+            leader_budget_usd=signal.leader_budget_usd,
+        ):
+            return {
+                "signal_id": signal.signal_id,
+                "status": "DUPLICATE",
+                "reason": "signal already processed",
+            }
+
+        record_signal(
+            signal_id=signal.signal_id,
+            leader_wallet=signal.leader_wallet,
+            token_id=signal.token_id,
+            side=signal.side,
+            leader_budget_usd=signal.leader_budget_usd,
+            suggested_amount_usd=None,
+            status="SKIPPED_RUNTIME",
+            reason=runtime_guard.reason,
+        )
+        return {
+            "signal": asdict(signal),
+            "status": "SKIPPED_RUNTIME",
+            "reason": runtime_guard.reason,
+            "runtime_guard": asdict(runtime_guard),
+        }
+
     risk = config.get("risk", {})
     filters = config.get("filters", {})
     sizing = config.get("sizing", {})
     exit_cfg = config.get("exit", {})
+    freshness = config.get("signal_freshness", {})
+
+    if signal.side.upper() == "BUY":
+        live_safety = evaluate_live_buy_safety(config=config)
+        if not live_safety.allowed:
+            if not claim_signal(
+                signal_id=signal.signal_id,
+                leader_wallet=signal.leader_wallet,
+                token_id=signal.token_id,
+                side=signal.side,
+                leader_budget_usd=signal.leader_budget_usd,
+            ):
+                return {
+                    "signal_id": signal.signal_id,
+                    "status": "DUPLICATE",
+                    "reason": "signal already processed",
+                }
+
+            record_signal(
+                signal_id=signal.signal_id,
+                leader_wallet=signal.leader_wallet,
+                token_id=signal.token_id,
+                side=signal.side,
+                leader_budget_usd=signal.leader_budget_usd,
+                suggested_amount_usd=None,
+                status="SKIPPED_LIVE_SAFETY",
+                reason=live_safety.reason,
+            )
+            return {
+                "signal": asdict(signal),
+                "status": "SKIPPED_LIVE_SAFETY",
+                "reason": live_safety.reason,
+                "live_safety": asdict(live_safety),
+            }
 
     registry = get_leader_registry(signal.leader_wallet)
     leader_user_name = registry["user_name"] if registry else None
@@ -80,12 +723,41 @@ def process_signal(signal: LeaderSignal) -> dict:
     leader_status = registry["leader_status"] if registry else None
 
     snapshot = fetch_market_snapshot(token_id=signal.token_id, side=signal.side)
-    current_price = snapshot["price_quote"]
+    current_price = _snapshot_executable_price(snapshot, signal.side)
+
+    if not claim_signal(
+        signal_id=signal.signal_id,
+        leader_wallet=signal.leader_wallet,
+        token_id=signal.token_id,
+        side=signal.side,
+        leader_budget_usd=signal.leader_budget_usd,
+    ):
+        return {
+            "signal_id": signal.signal_id,
+            "status": "DUPLICATE",
+            "reason": "signal already processed",
+        }
 
     min_order_size_usd = float(risk.get("min_order_size_usd", 1.0))
-    max_per_trade_usd = float(risk.get("max_per_trade_usd", 2.0))
+    min_order_size_usd = _snapshot_min_order_size_usd(snapshot, min_order_size_usd)
     leader_trade_notional_copy_fraction = float(
         sizing.get("leader_trade_notional_copy_fraction", 0.20)
+    )
+    max_leader_trade_budget_fraction = _positive_float_or_none(
+        sizing.get("max_leader_trade_budget_fraction")
+    )
+    allow_notional_fallback = _safe_bool(
+        sizing.get("allow_notional_fallback"),
+        False,
+    )
+    round_up_to_min_order = _safe_bool(
+        sizing.get("round_up_to_min_order"),
+        False,
+    )
+    max_min_order_round_up_multiple = _max_min_order_round_up_multiple(config)
+    allow_budget_fallback = _safe_bool(
+        sizing.get("allow_budget_fallback"),
+        False,
     )
 
     if signal.side.upper() == "SELL":
@@ -115,11 +787,13 @@ def process_signal(signal: LeaderSignal) -> dict:
             spread=snapshot["spread"],
             leader_budget_usd=signal.leader_budget_usd,
             buy_min_price=float(filters.get("buy_min_price", 0.05)),
-            buy_max_price=float(filters.get("buy_max_price", 0.95)),
+            buy_max_price=float(filters.get("buy_max_price", 0.96)),
             sell_min_price=0.0,
             sell_max_price=1.0,
             max_spread=float(exit_cfg.get("exit_max_spread", 0.05)),
             min_order_size_usd=0.0,
+            max_spread_rel=_positive_float_or_none(exit_cfg.get("exit_max_spread_rel")),
+            max_spread_hard=_positive_float_or_none(exit_cfg.get("exit_max_spread_hard")),
         )
 
         if not policy.allowed:
@@ -138,6 +812,35 @@ def process_signal(signal: LeaderSignal) -> dict:
                 "market_snapshot": snapshot,
                 "status": "SKIPPED_POLICY",
                 "reason": policy.reason,
+            }
+
+        drift_ok = True
+        drift_reason = "ok"
+        if not bool(exit_cfg.get("ignore_exit_drift", True)):
+            drift_ok, drift_reason = _entry_price_drift_ok(
+                leader_price=signal.leader_trade_price,
+                current_price=current_price,
+                side=signal.side,
+                max_abs=float(freshness.get("max_price_drift_abs", 0.02)),
+                max_rel=float(freshness.get("max_price_drift_rel", 0.03)),
+            )
+
+        if not drift_ok:
+            record_signal(
+                signal_id=signal.signal_id,
+                leader_wallet=signal.leader_wallet,
+                token_id=signal.token_id,
+                side=signal.side,
+                leader_budget_usd=signal.leader_budget_usd,
+                suggested_amount_usd=None,
+                status="SKIPPED_DRIFT",
+                reason=drift_reason,
+            )
+            return {
+                "signal": asdict(signal),
+                "market_snapshot": snapshot,
+                "status": "SKIPPED_DRIFT",
+                "reason": drift_reason,
             }
 
         position_usd = float(open_position["position_usd"])
@@ -159,25 +862,83 @@ def process_signal(signal: LeaderSignal) -> dict:
                 "reason": "open position has zero size",
             }
 
-        suggested_sell_amount, sizing_source = _compute_signal_copy_amount(
-            signal,
+        max_per_trade_usd = _sizing_max_per_trade_for_exit(
+            config,
+            position_usd=position_usd,
+        )
+        size_decision = compute_signal_copy_amount(
+            leader_budget_usd=position_usd,
+            remaining_leader_budget_usd=position_usd,
+            leader_trade_notional_usd=signal.leader_trade_notional_usd,
             min_order_size_usd=min_order_size_usd,
             max_per_trade_usd=max_per_trade_usd,
             leader_trade_notional_copy_fraction=leader_trade_notional_copy_fraction,
+            side=signal.side,
+            leader_exit_fraction=signal.leader_exit_fraction,
+            round_up_to_min_order=round_up_to_min_order,
+            max_min_order_round_up_multiple=max_min_order_round_up_multiple,
+            allow_notional_fallback=allow_notional_fallback,
+            allow_budget_fallback=allow_budget_fallback,
         )
+        if not size_decision.allowed:
+            record_signal(
+                signal_id=signal.signal_id,
+                leader_wallet=signal.leader_wallet,
+                token_id=signal.token_id,
+                side=signal.side,
+                leader_budget_usd=signal.leader_budget_usd,
+                suggested_amount_usd=None,
+                status="SKIPPED_SIZING",
+                reason=size_decision.reason,
+            )
+            return {
+                "signal": asdict(signal),
+                "market_snapshot": snapshot,
+                "status": "SKIPPED_SIZING",
+                "reason": size_decision.reason,
+                "sizing": asdict(size_decision),
+            }
+
+        suggested_sell_amount = size_decision.amount_usd
+        sizing_source = size_decision.source
         sell_amount = min(position_usd, suggested_sell_amount)
 
-        preview = preview_market_order(
-            token_id=signal.token_id,
+        execution = _execute_with_recorded_attempt(
+            config=config,
+            signal=signal,
             amount_usd=round(sell_amount, 2),
-            side=signal.side,
+            reason="exit policy approved",
         )
+
+        if not execution.accepted:
+            failure_status = _execution_failure_signal_status(execution)
+            record_signal(
+                signal_id=signal.signal_id,
+                leader_wallet=signal.leader_wallet,
+                token_id=signal.token_id,
+                side=signal.side,
+                leader_budget_usd=signal.leader_budget_usd,
+                suggested_amount_usd=round(sell_amount, 2),
+                status=failure_status,
+                reason=execution.reason,
+            )
+            return {
+                "signal": asdict(signal),
+                "market_snapshot": snapshot,
+                "status": failure_status,
+                "reason": execution.reason,
+                "suggested_amount_usd": round(sell_amount, 2),
+                "execution": asdict(execution),
+            }
+
+        actual_execution_amount = execution.fill_amount_usd or sell_amount
+        execution_price = _execution_fill_price(execution, current_price)
 
         reduced = reduce_or_close_position(
             leader_wallet=signal.leader_wallet,
             token_id=signal.token_id,
             signal_id=signal.signal_id,
-            amount_usd=sell_amount,
+            amount_usd=actual_execution_amount,
         )
 
         entry_avg_price = reduced["entry_avg_price"] if reduced else None
@@ -190,11 +951,14 @@ def process_signal(signal: LeaderSignal) -> dict:
         realized_pnl_usd = None
         realized_pnl_pct = None
 
-        if entry_avg_price is not None and current_price is not None:
-            realized_pnl_pct = round((float(current_price) - float(entry_avg_price)) / float(entry_avg_price), 6)
+        if entry_avg_price is not None and execution_price is not None:
+            realized_pnl_pct = round((float(execution_price) - float(entry_avg_price)) / float(entry_avg_price), 6)
             realized_pnl_usd = round(actual_sell_amount * realized_pnl_pct, 4)
 
-        notes = f"preview {'full' if closed_fully else 'partial'} exit generated | sizing={sizing_source}"
+        notes = (
+            f"{execution.mode.lower()} {'full' if closed_fully else 'partial'} exit generated "
+            f"| sizing={sizing_source}"
+        )
 
         log_trade_event(
             signal_id=signal.signal_id,
@@ -206,19 +970,37 @@ def process_signal(signal: LeaderSignal) -> dict:
             side=signal.side,
             event_type="EXIT",
             amount_usd=round(actual_sell_amount, 2),
-            price=current_price,
+            price=execution_price,
             gross_value_usd=round(actual_sell_amount, 2),
             position_before_usd=position_before_usd,
             position_after_usd=position_after_usd,
             entry_avg_price=entry_avg_price,
-            exit_price=current_price,
+            exit_price=execution_price,
             realized_pnl_usd=realized_pnl_usd,
             realized_pnl_pct=realized_pnl_pct,
             holding_minutes=holding_minutes,
             notes=notes,
         )
 
-        status = "PREVIEW_READY_EXIT" if closed_fully else "PREVIEW_READY_PARTIAL_EXIT"
+        status = _exit_success_signal_status(execution, closed_fully=closed_fully)
+        send_trade_notification(
+            config=config,
+            mode=execution.mode,
+            event_type="EXIT",
+            leader_wallet=signal.leader_wallet,
+            leader_user_name=leader_user_name,
+            category=category,
+            token_id=signal.token_id,
+            amount_usd=round(actual_sell_amount, 2),
+            price=execution_price,
+            position_before_usd=position_before_usd,
+            position_after_usd=position_after_usd,
+            signal_id=signal.signal_id,
+            realized_pnl_usd=realized_pnl_usd,
+            realized_pnl_pct=realized_pnl_pct,
+            holding_minutes=holding_minutes,
+            closed_fully=closed_fully,
+        )
 
         record_signal(
             signal_id=signal.signal_id,
@@ -230,6 +1012,7 @@ def process_signal(signal: LeaderSignal) -> dict:
             status=status,
             reason="ok",
         )
+        budget_rebalance = _refresh_active_budgets_after_exit(config)
 
         return {
             "signal": asdict(signal),
@@ -237,11 +1020,13 @@ def process_signal(signal: LeaderSignal) -> dict:
             "status": status,
             "reason": "ok",
             "suggested_amount_usd": round(actual_sell_amount, 2),
-            "preview_order": preview,
+            "preview_order": execution.raw_response,
+            "execution": asdict(execution),
             "realized_pnl_usd": realized_pnl_usd,
             "realized_pnl_pct": realized_pnl_pct,
             "holding_minutes": holding_minutes,
             "position_after_usd": position_after_usd,
+            "budget_rebalance": budget_rebalance,
         }
 
     policy = evaluate_order_policy(
@@ -250,11 +1035,13 @@ def process_signal(signal: LeaderSignal) -> dict:
         spread=snapshot["spread"],
         leader_budget_usd=signal.leader_budget_usd,
         buy_min_price=float(filters.get("buy_min_price", 0.05)),
-        buy_max_price=float(filters.get("buy_max_price", 0.95)),
+        buy_max_price=float(filters.get("buy_max_price", 0.96)),
         sell_min_price=0.0,
         sell_max_price=1.0,
         max_spread=float(risk.get("skip_if_spread_gt", 0.02)),
         min_order_size_usd=min_order_size_usd,
+        max_spread_rel=_positive_float_or_none(risk.get("skip_if_spread_rel_gt")),
+        max_spread_hard=_positive_float_or_none(risk.get("skip_if_spread_hard_gt")),
     )
 
     if not policy.allowed:
@@ -273,28 +1060,337 @@ def process_signal(signal: LeaderSignal) -> dict:
             "market_snapshot": snapshot,
             "status": "SKIPPED_POLICY",
             "reason": policy.reason,
+            }
+
+    runtime_risk_limits = build_runtime_risk_limits(config)
+    runtime_risk_limits = replace(
+        runtime_risk_limits,
+        min_order_size_usd=min_order_size_usd,
+    )
+    if runtime_risk_limits.capital_base_missing:
+        reason = "risk percent limits require account collateral balance"
+        if runtime_risk_limits.capital_base_error:
+            reason = f"{reason}: {runtime_risk_limits.capital_base_error}"
+        record_signal(
+            signal_id=signal.signal_id,
+            leader_wallet=signal.leader_wallet,
+            token_id=signal.token_id,
+            side=signal.side,
+            leader_budget_usd=signal.leader_budget_usd,
+            suggested_amount_usd=None,
+            status="SKIPPED_RISK",
+            reason=reason,
+        )
+        return {
+            "signal": asdict(signal),
+            "market_snapshot": snapshot,
+            "status": "SKIPPED_RISK",
+            "reason": reason,
+            "risk": asdict(runtime_risk_limits),
         }
 
-    amount_usd, sizing_source = _compute_signal_copy_amount(
-        signal,
+    wallet_exposure_usd = _open_wallet_exposure_usd(signal.leader_wallet)
+    remaining_leader_budget_usd = max(signal.leader_budget_usd - wallet_exposure_usd, 0.0)
+    adaptive_sizing = _adaptive_sizing_for_buy(config, signal)
+
+    size_decision = compute_signal_copy_amount(
+        leader_budget_usd=signal.leader_budget_usd,
+        remaining_leader_budget_usd=remaining_leader_budget_usd,
+        leader_trade_notional_usd=signal.leader_trade_notional_usd,
         min_order_size_usd=min_order_size_usd,
-        max_per_trade_usd=max_per_trade_usd,
+        max_per_trade_usd=runtime_risk_limits.max_per_trade_usd,
         leader_trade_notional_copy_fraction=leader_trade_notional_copy_fraction,
+        side=signal.side,
+        leader_portfolio_value_usd=signal.leader_portfolio_value_usd,
+        max_leader_trade_budget_fraction=max_leader_trade_budget_fraction,
+        adaptive_size_multiplier=float(adaptive_sizing.get("multiplier") or 1.0),
+        round_up_to_min_order=round_up_to_min_order,
+        max_min_order_round_up_multiple=max_min_order_round_up_multiple,
+        allow_notional_fallback=allow_notional_fallback,
+        allow_budget_fallback=allow_budget_fallback,
     )
 
-    preview = preview_market_order(
+    signal_batch = None
+    batch_signal_amount = None
+    signal_batch_ready = False
+    if _signal_batch_coalescer_enabled(config):
+        batch_signal_amount = _batch_signal_amount_from_sizing(
+            size_decision,
+            min_order_size_usd,
+        )
+
+    if batch_signal_amount is not None and (
+        size_decision.allowed or _is_min_order_sizing_block(size_decision)
+    ):
+        drift_ok, drift_reason = _entry_price_drift_ok(
+            leader_price=signal.leader_trade_price,
+            current_price=current_price,
+            side=signal.side,
+            max_abs=float(freshness.get("max_price_drift_abs", 0.02)),
+            max_rel=float(freshness.get("max_price_drift_rel", 0.03)),
+        )
+        if not drift_ok:
+            record_signal(
+                signal_id=signal.signal_id,
+                leader_wallet=signal.leader_wallet,
+                token_id=signal.token_id,
+                side=signal.side,
+                leader_budget_usd=signal.leader_budget_usd,
+                suggested_amount_usd=batch_signal_amount,
+                status="SKIPPED_DRIFT",
+                reason=drift_reason,
+            )
+            return {
+                "signal": asdict(signal),
+                "market_snapshot": snapshot,
+                "status": "SKIPPED_DRIFT",
+                "reason": drift_reason,
+                "suggested_amount_usd": batch_signal_amount,
+                "sizing": asdict(size_decision),
+                "adaptive_sizing": adaptive_sizing,
+            }
+
+        signal_batch = accumulate_signal_batch(
+            leader_wallet=signal.leader_wallet,
+            token_id=signal.token_id,
+            side=signal.side,
+            signal_id=signal.signal_id,
+            amount_usd=batch_signal_amount,
+            max_window_sec=_signal_batch_window_sec(config),
+        )
+        pending_amount = float(signal_batch["pending_amount_usd"])
+        executable_amount = min(
+            pending_amount,
+            runtime_risk_limits.max_per_trade_usd,
+            remaining_leader_budget_usd,
+        )
+        if executable_amount + 1e-12 < min_order_size_usd:
+            cap_reason = ""
+            if (
+                pending_amount >= min_order_size_usd
+                and remaining_leader_budget_usd < min_order_size_usd
+            ):
+                cap_reason = f"; remaining leader budget {remaining_leader_budget_usd:.4f} below min order"
+            elif (
+                pending_amount >= min_order_size_usd
+                and runtime_risk_limits.max_per_trade_usd < min_order_size_usd
+            ):
+                cap_reason = f"; max_per_trade {runtime_risk_limits.max_per_trade_usd:.4f} below min order"
+            reason = (
+                "signal batch pending "
+                f"{pending_amount:.4f}/{min_order_size_usd:.4f} min_order_size_usd"
+                f"{cap_reason}"
+            )
+            record_signal(
+                signal_id=signal.signal_id,
+                leader_wallet=signal.leader_wallet,
+                token_id=signal.token_id,
+                side=signal.side,
+                leader_budget_usd=signal.leader_budget_usd,
+                suggested_amount_usd=batch_signal_amount,
+                status="BATCH_PENDING",
+                reason=reason,
+            )
+            return {
+                "signal": asdict(signal),
+                "market_snapshot": snapshot,
+                "status": "BATCH_PENDING",
+                "reason": reason,
+                "suggested_amount_usd": batch_signal_amount,
+                "sizing": asdict(size_decision),
+                "adaptive_sizing": adaptive_sizing,
+                "signal_batch": signal_batch,
+            }
+
+        amount_usd = round(executable_amount, 2)
+        if amount_usd + 1e-12 < min_order_size_usd:
+            amount_usd = min_order_size_usd
+        sizing_source = f"{size_decision.source}+signal_batch"
+        signal_batch_ready = True
+    else:
+        if not size_decision.allowed:
+            record_signal(
+                signal_id=signal.signal_id,
+                leader_wallet=signal.leader_wallet,
+                token_id=signal.token_id,
+                side=signal.side,
+                leader_budget_usd=signal.leader_budget_usd,
+                suggested_amount_usd=None,
+                status="SKIPPED_SIZING",
+                reason=size_decision.reason,
+            )
+            return {
+                "signal": asdict(signal),
+                "market_snapshot": snapshot,
+                "status": "SKIPPED_SIZING",
+                "reason": size_decision.reason,
+                "sizing": asdict(size_decision),
+                "adaptive_sizing": adaptive_sizing,
+            }
+        amount_usd = size_decision.amount_usd
+        sizing_source = size_decision.source
+
+    if not signal_batch_ready:
+        drift_ok, drift_reason = _entry_price_drift_ok(
+            leader_price=signal.leader_trade_price,
+            current_price=current_price,
+            side=signal.side,
+            max_abs=float(freshness.get("max_price_drift_abs", 0.02)),
+            max_rel=float(freshness.get("max_price_drift_rel", 0.03)),
+        )
+
+        if not drift_ok:
+            record_signal(
+                signal_id=signal.signal_id,
+                leader_wallet=signal.leader_wallet,
+                token_id=signal.token_id,
+                side=signal.side,
+                leader_budget_usd=signal.leader_budget_usd,
+                suggested_amount_usd=amount_usd,
+                status="SKIPPED_DRIFT",
+                reason=drift_reason,
+            )
+            return {
+                "signal": asdict(signal),
+                "market_snapshot": snapshot,
+                "status": "SKIPPED_DRIFT",
+                "reason": drift_reason,
+                "suggested_amount_usd": amount_usd,
+                "adaptive_sizing": adaptive_sizing,
+            }
+
+    risk_decision = evaluate_entry_risk(
+        config=config,
+        leader_wallet=signal.leader_wallet,
         token_id=signal.token_id,
         amount_usd=amount_usd,
-        side=signal.side,
+        leader_budget_usd=signal.leader_budget_usd,
+        category=category,
+        limits=runtime_risk_limits,
     )
+
+    if not risk_decision.allowed:
+        if signal_batch_ready and signal_batch is not None:
+            consumed = consume_signal_batch(
+                leader_wallet=signal.leader_wallet,
+                token_id=signal.token_id,
+                side=signal.side,
+            )
+            if consumed:
+                mark_batched_signals(
+                    signal_ids=consumed.get("signal_ids", []),
+                    exclude_signal_id=signal.signal_id,
+                    status="BATCH_BLOCKED",
+                    reason=f"batch blocked by risk via {signal.signal_id}: {risk_decision.reason}",
+                )
+            reason = f"signal batch blocked by risk: {risk_decision.reason}"
+            record_signal(
+                signal_id=signal.signal_id,
+                leader_wallet=signal.leader_wallet,
+                token_id=signal.token_id,
+                side=signal.side,
+                leader_budget_usd=signal.leader_budget_usd,
+                suggested_amount_usd=amount_usd,
+                status="BATCH_BLOCKED",
+                reason=reason,
+            )
+            return {
+                "signal": asdict(signal),
+                "market_snapshot": snapshot,
+                "status": "BATCH_BLOCKED",
+                "reason": reason,
+                "suggested_amount_usd": amount_usd,
+                "risk": asdict(risk_decision),
+                "adaptive_sizing": adaptive_sizing,
+                "signal_batch": signal_batch,
+                "signal_batch_consumed": consumed,
+            }
+        record_signal(
+            signal_id=signal.signal_id,
+            leader_wallet=signal.leader_wallet,
+            token_id=signal.token_id,
+            side=signal.side,
+            leader_budget_usd=signal.leader_budget_usd,
+            suggested_amount_usd=amount_usd,
+            status="SKIPPED_RISK",
+            reason=risk_decision.reason,
+        )
+        return {
+            "signal": asdict(signal),
+            "market_snapshot": snapshot,
+            "status": "SKIPPED_RISK",
+            "reason": risk_decision.reason,
+            "suggested_amount_usd": amount_usd,
+            "risk": asdict(risk_decision),
+            "adaptive_sizing": adaptive_sizing,
+            "signal_batch": signal_batch,
+        }
+
+    execution = _execute_with_recorded_attempt(
+        config=config,
+        signal=signal,
+        amount_usd=amount_usd,
+        reason="entry policy and risk approved",
+    )
+    signal_batch_consumed = None
+    if signal_batch_ready and signal_batch is not None:
+        signal_batch_consumed = consume_signal_batch(
+            leader_wallet=signal.leader_wallet,
+            token_id=signal.token_id,
+            side=signal.side,
+        )
+
+    if not execution.accepted:
+        failure_status = _execution_failure_signal_status(execution)
+        if signal_batch_consumed:
+            mark_batched_signals(
+                signal_ids=signal_batch_consumed.get("signal_ids", []),
+                exclude_signal_id=signal.signal_id,
+                status="BATCH_EXECUTION_ERROR",
+                reason=f"batch execution failed via {signal.signal_id}: {execution.reason}",
+            )
+        record_signal(
+            signal_id=signal.signal_id,
+            leader_wallet=signal.leader_wallet,
+            token_id=signal.token_id,
+            side=signal.side,
+            leader_budget_usd=signal.leader_budget_usd,
+            suggested_amount_usd=amount_usd,
+            status=failure_status,
+            reason=execution.reason,
+        )
+        return {
+            "signal": asdict(signal),
+            "market_snapshot": snapshot,
+            "status": failure_status,
+            "reason": execution.reason,
+            "suggested_amount_usd": amount_usd,
+            "execution": asdict(execution),
+            "adaptive_sizing": adaptive_sizing,
+            "signal_batch": signal_batch,
+            "signal_batch_consumed": signal_batch_consumed,
+        }
+
+    executed_amount_usd = execution.fill_amount_usd or amount_usd
+    execution_price = _execution_fill_price(execution, current_price)
 
     pos_update = upsert_buy_position(
         leader_wallet=signal.leader_wallet,
         token_id=signal.token_id,
-        amount_usd=amount_usd,
-        entry_price=current_price,
+        amount_usd=executed_amount_usd,
+        entry_price=execution_price,
         signal_id=signal.signal_id,
     )
+
+    entry_notes = (
+        f"{execution.mode.lower()} entry generated | sizing={sizing_source} "
+        f"| adaptive_multiplier={float(adaptive_sizing.get('multiplier') or 1.0):.4f}"
+    )
+    if signal_batch_consumed:
+        entry_notes = (
+            f"{entry_notes} | batch_signals={len(signal_batch_consumed.get('signal_ids', []))} "
+            f"| batch_amount={float(signal_batch_consumed.get('pending_amount_usd') or 0.0):.4f}"
+        )
 
     log_trade_event(
         signal_id=signal.signal_id,
@@ -305,9 +1401,9 @@ def process_signal(signal: LeaderSignal) -> dict:
         token_id=signal.token_id,
         side=signal.side,
         event_type="ENTRY",
-        amount_usd=amount_usd,
-        price=current_price,
-        gross_value_usd=amount_usd,
+        amount_usd=executed_amount_usd,
+        price=execution_price,
+        gross_value_usd=executed_amount_usd,
         position_before_usd=pos_update["position_before_usd"],
         position_after_usd=pos_update["position_after_usd"],
         entry_avg_price=pos_update["entry_avg_price_after"],
@@ -315,7 +1411,30 @@ def process_signal(signal: LeaderSignal) -> dict:
         realized_pnl_usd=None,
         realized_pnl_pct=None,
         holding_minutes=None,
-        notes=f"preview entry generated | sizing={sizing_source}",
+        notes=entry_notes,
+    )
+
+    entry_status = _entry_success_signal_status(execution)
+    if signal_batch_consumed:
+        mark_batched_signals(
+            signal_ids=signal_batch_consumed.get("signal_ids", []),
+            exclude_signal_id=signal.signal_id,
+            status="BATCH_EXECUTED",
+            reason=f"executed in batched entry via {signal.signal_id}",
+        )
+    send_trade_notification(
+        config=config,
+        mode=execution.mode,
+        event_type="ENTRY",
+        leader_wallet=signal.leader_wallet,
+        leader_user_name=leader_user_name,
+        category=category,
+        token_id=signal.token_id,
+        amount_usd=executed_amount_usd,
+        price=execution_price,
+        position_before_usd=pos_update["position_before_usd"],
+        position_after_usd=pos_update["position_after_usd"],
+        signal_id=signal.signal_id,
     )
 
     record_signal(
@@ -324,16 +1443,21 @@ def process_signal(signal: LeaderSignal) -> dict:
         token_id=signal.token_id,
         side=signal.side,
         leader_budget_usd=signal.leader_budget_usd,
-        suggested_amount_usd=amount_usd,
-        status="PREVIEW_READY_ENTRY",
+        suggested_amount_usd=executed_amount_usd,
+        status=entry_status,
         reason="ok",
     )
 
     return {
         "signal": asdict(signal),
         "market_snapshot": snapshot,
-        "status": "PREVIEW_READY_ENTRY",
+        "status": entry_status,
         "reason": "ok",
-        "suggested_amount_usd": amount_usd,
-        "preview_order": preview,
+        "suggested_amount_usd": executed_amount_usd,
+        "preview_order": execution.raw_response,
+        "execution": asdict(execution),
+        "sizing": asdict(size_decision),
+        "adaptive_sizing": adaptive_sizing,
+        "signal_batch": signal_batch,
+        "signal_batch_consumed": signal_batch_consumed,
     }

@@ -1,0 +1,238 @@
+[global]
+simulation = false
+preview_mode = false
+execution_mode = "live"
+live_trading_enabled = false
+live_trading_ack = ""
+poll_interval_sec = 4
+
+[state]
+db_path = "data/executor_state_live.db"
+
+[runtime_guard]
+require_isolated_db_for_paper = true
+require_isolated_db_for_live = true
+
+[capital]
+source = "collateral_balance"
+
+[risk]
+min_order_size_usd = 1.0
+slippage_tolerance = 0.02
+skip_if_spread_gt = 0.03
+skip_if_spread_rel_gt = 0.08
+skip_if_spread_hard_gt = 0.06
+skip_if_minutes_to_resolve_lt = 30
+trading_disabled = false
+enforce_leader_budget_cap = true
+max_per_trade_pct = 0.05
+max_position_pct = 0.08
+# Per-leader budgets come from WSS allocation via leader_registry.target_budget_usd.
+# Keep these static caps disabled so top-4/top-8 weights can move with WSS.
+max_wallet_exposure_pct = 0.0
+max_category_exposure_pct = 0.0
+max_portfolio_exposure_pct = 0.90
+max_daily_realized_loss_pct = 0.075
+
+[funding]
+require_balance_allowance = true
+cash_reserve_pct = 0.05
+collateral_decimals = 6
+require_positive_balance = true
+min_live_allowance_pct = 0.05
+
+[live_execution]
+require_verified_fill = true
+post_submit_poll_attempts = 5
+post_submit_poll_interval_sec = 1.0
+
+[live_safety]
+enable_stop_buy_on_critical = true
+
+[runtime_lock]
+enabled = true
+activate_on_critical_alerts = true
+path = "data/live_trading.lock"
+
+[alerts]
+include_warnings = true
+processing_warning_minutes = 2.0
+processing_critical_minutes = 10.0
+
+[alert_delivery]
+enabled = true
+send_empty_alerts = false
+notify_trades = true
+title = "Polymarket live bot alert"
+timeout_sec = 5.0
+telegram_bot_token_env = "POLY_ALERT_TELEGRAM_BOT_TOKEN"
+telegram_chat_id_env = "POLY_ALERT_TELEGRAM_CHAT_ID"
+discord_webhook_url_env = "POLY_ALERT_DISCORD_WEBHOOK_URL"
+email_webhook_url_env = "POLY_ALERT_EMAIL_WEBHOOK_URL"
+generic_webhook_url_env = "POLY_ALERT_GENERIC_WEBHOOK_URL"
+
+[state_backup]
+enabled = true
+dir = "data/backups"
+retention_keep_last = 6
+retention_max_total_mb = 2048
+
+[market_cache]
+enabled = true
+ws_url = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
+max_age_sec = 10.0
+refresh_sec = 15.0
+ping_sec = 10.0
+timeout_sec = 5.0
+recent_token_minutes = 360
+max_tokens = 250
+require_orderbook_metadata = true
+fallback_to_rest_on_metadata_error = true
+
+[onchain_shadow]
+enabled = true
+use_as_signal_source = true
+signal_limit = 50
+signal_window_sec = 600
+rpc_url_env = "POLYGON_RPC_URL"
+rpc_url = "https://polygon-bor-rpc.publicnode.com"
+rpc_url_envs = ["POLYGON_RPC_URL", "POLYGON_RPC_URL_2", "POLYGON_RPC_URL_3"]
+rpc_urls = [
+  "https://polygon.drpc.org",
+  "https://polygon-bor-rpc.publicnode.com",
+  "https://polygon.api.onfinality.io/public",
+  "https://1rpc.io/matic",
+]
+chain_id = 137
+poll_interval_sec = 4.0
+confirmation_blocks = 2
+startup_backfill_blocks = 300
+max_block_range = 100
+timeout_sec = 4.0
+retries_per_endpoint = 1
+retry_sleep_sec = 0.15
+adaptive_backoff_blocks = 12
+decimals = 6
+exchange_addresses = [
+  "0xE111180000d2663C0091e4f400237545B87B996B",
+  "0xe2222d279d744050d28e00520010520000310F59",
+]
+
+[config_safety]
+enabled = true
+min_recent_trades = 50
+min_signals_per_cycle = 20
+min_price_drift_abs = 0.02
+min_price_drift_rel = 0.03
+min_buy_max_price = 0.96
+max_buy_max_price = 0.99
+max_min_order_size_usd = 1.0
+max_per_trade_pct = 0.05
+max_position_pct = 0.08
+max_portfolio_exposure_pct = 0.90
+max_daily_realized_loss_pct = 0.075
+min_post_submit_poll_attempts = 5
+
+[paper_soak]
+required_mode = "PAPER"
+min_hours = 24.0
+max_last_event_age_minutes = 60.0
+max_event_gap_minutes = 120.0
+min_order_attempts = 10
+min_processed_signals = 10
+min_signal_observations = 50
+max_error_attempts = 0
+max_unknown_attempts = 0
+max_error_signals = 0
+require_live_readiness = true
+require_isolated_db = true
+max_fetch_workers = 4
+max_process_workers = 2
+stale_processing_max_age_sec = 900
+
+[reconciliation]
+fetch_exchange_positions = true
+fetch_exchange_open_orders = true
+position_qty_tolerance = 0.01
+
+[filters]
+buy_min_price = 0.05
+buy_max_price = 0.96
+
+[trade_source]
+# false matches the profile Activity feed and includes passive/maker fills.
+data_api_taker_only = false
+
+[exit]
+ignore_exit_drift = true
+exit_max_spread = 0.05
+exit_max_spread_rel = 0.12
+exit_max_spread_hard = 0.08
+
+[portfolio]
+max_wallet_weight = 1.0
+max_category_weight = 1.0
+max_experimental_weight = 0.08
+
+[sizing]
+leader_trade_notional_copy_fraction = 0.20
+round_up_to_min_order = true
+max_min_order_round_up_multiple = 3.0
+allow_notional_fallback = false
+allow_budget_fallback = false
+max_leader_trade_budget_fraction = 0.25
+
+[signal_batch_coalescer]
+enabled = true
+window_sec = 30
+
+[micro_signal_accumulator]
+enabled = false
+max_bucket_age_sec = 600
+
+[adaptive_sizing]
+enabled = true
+lookback_hours = 24.0
+target_budget_turnover = 0.85
+min_buy_signals_for_history = 5
+min_historical_multiplier = 0.20
+max_historical_multiplier = 1.0
+min_budget_skip_samples = 10
+budget_skip_ratio_start = 0.20
+min_budget_skip_multiplier = 0.25
+utilization_throttle_start = 0.60
+utilization_throttle_full = 0.90
+min_utilization_multiplier = 0.25
+min_multiplier = 0.10
+max_multiplier = 1.0
+
+[economic_copyability]
+enabled = true
+lookback_hours = 168.0
+min_buy_signals = 20
+min_executable_ratio = 0.10
+min_batchable_ratio = 0.35
+
+[signal_freshness]
+preferred_signal_age_sec = 30
+max_buy_signal_age_sec = 600
+max_exit_signal_age_sec = 86400
+max_recent_trades = 50
+max_signals_per_cycle = 20
+leader_position_context_max_pages = 20
+max_price_drift_abs = 0.02
+max_price_drift_rel = 0.03
+
+[settlement]
+enabled = true
+collateral_token_address = "0xC011a7E12a19f7B1f670d46F03B03f3342E82DFB"
+ctf_contract_address = "0x4D97DCd97eC945f40cF65F87097ACe5EA0476045"
+proxy_factory_address = "0xaB45c5A4B0c941a2F231C04C3f49182e1A254052"
+relay_hub_address = "0xD216153c06E857cD7f72665E0aF1d7D82172F494"
+parent_collection_id = "0x0000000000000000000000000000000000000000000000000000000000000000"
+gas_price = "0"
+gas_limit = "10000000"
+poll_attempts = 10
+poll_interval_sec = 2.0
+live_require_exchange_position = true
+live_finalize_missing_exchange_position = true

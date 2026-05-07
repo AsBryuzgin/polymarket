@@ -1,25 +1,88 @@
 from __future__ import annotations
 
 import csv
+import tomllib
 from collections import defaultdict
+from dataclasses import dataclass
 from pathlib import Path
 
 
 INPUT_FILE = Path("data/shortlists/final_portfolio_candidates.csv")
 OUTPUT_FILE = Path("data/shortlists/final_portfolio_allocation.csv")
+REBALANCE_CONFIG = Path("config/rebalance.toml")
+EXECUTOR_CONFIG = Path("config/executor.toml")
 
-MAX_WALLET_WEIGHT = 0.12
-MAX_CATEGORY_WEIGHT = 0.25
-MAX_EXPERIMENTAL_WEIGHT = 0.08
+DEFAULT_MAX_WALLET_WEIGHT = 1.0
+DEFAULT_MAX_CATEGORY_WEIGHT = 1.0
+DEFAULT_MAX_EXPERIMENTAL_WEIGHT = 0.08
 EXPERIMENTAL_CATEGORIES = {"MENTIONS"}
 
 EPS = 1e-12
 
 
+@dataclass(frozen=True)
+class AllocationCaps:
+    max_wallet_weight: float
+    max_category_weight: float
+    max_experimental_weight: float
+    wallet_cap_source: str
+
+
+def load_toml(path: Path) -> dict:
+    if not path.exists():
+        return {}
+    with path.open("rb") as f:
+        return tomllib.load(f)
+
+
+def _positive_float(value, default: float) -> float:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return default
+    return parsed if parsed > 0 else default
+
+
+def resolve_allocation_caps(
+    *,
+    rebalance_config: dict | None = None,
+    executor_config: dict | None = None,
+) -> AllocationCaps:
+    rebalance_config = rebalance_config if rebalance_config is not None else load_toml(REBALANCE_CONFIG)
+    executor_config = executor_config if executor_config is not None else load_toml(EXECUTOR_CONFIG)
+
+    portfolio_cfg = executor_config.get("portfolio", {})
+    # max_live_categories controls how many categories reach the live universe.
+    # It must not become a synthetic per-leader cap: a high-WSS leader can
+    # legitimately receive more than 1/N of the live book.
+    max_wallet_weight = _positive_float(
+        portfolio_cfg.get("max_wallet_weight"),
+        DEFAULT_MAX_WALLET_WEIGHT,
+    )
+    wallet_cap_source = "executor.portfolio.max_wallet_weight"
+
+    return AllocationCaps(
+        max_wallet_weight=max_wallet_weight,
+        max_category_weight=_positive_float(
+            portfolio_cfg.get("max_category_weight"),
+            DEFAULT_MAX_CATEGORY_WEIGHT,
+        ),
+        max_experimental_weight=_positive_float(
+            portfolio_cfg.get("max_experimental_weight"),
+            DEFAULT_MAX_EXPERIMENTAL_WEIGHT,
+        ),
+        wallet_cap_source=wallet_cap_source,
+    )
+
+
 def load_csv(path: Path) -> list[dict]:
     with path.open("r", encoding="utf-8", newline="") as f:
         reader = csv.DictReader(f)
-        rows = list(reader)
+        rows = [
+            row
+            for row in reader
+            if str(row.get("eligible", "true")).strip().lower() == "true"
+        ]
 
     for row in rows:
         row["final_wss"] = float(row["final_wss"])
@@ -41,11 +104,11 @@ def normalize_raw_weights(rows: list[dict]) -> None:
         row["raw_weight"] = max(row["final_wss"], 0.0) / total_score
 
 
-def category_cap(category: str) -> float:
-    return MAX_EXPERIMENTAL_WEIGHT if category in EXPERIMENTAL_CATEGORIES else MAX_CATEGORY_WEIGHT
+def category_cap(category: str, caps: AllocationCaps) -> float:
+    return caps.max_experimental_weight if category in EXPERIMENTAL_CATEGORIES else caps.max_category_weight
 
 
-def allocate_with_hard_caps(rows: list[dict]) -> tuple[float, bool]:
+def allocate_with_hard_caps(rows: list[dict], caps: AllocationCaps) -> tuple[float, bool]:
     for row in rows:
         row["weight"] = 0.0
 
@@ -60,8 +123,8 @@ def allocate_with_hard_caps(rows: list[dict]) -> tuple[float, bool]:
 
     for category, items in by_category.items():
         max_possible += min(
-            category_cap(category),
-            sum(MAX_WALLET_WEIGHT for _ in items),
+            category_cap(category, caps),
+            sum(caps.max_wallet_weight for _ in items),
         )
 
     if max_possible + EPS < 1.0:
@@ -76,8 +139,8 @@ def allocate_with_hard_caps(rows: list[dict]) -> tuple[float, bool]:
 
         eligible = []
         for row in rows:
-            wallet_remaining = MAX_WALLET_WEIGHT - row["weight"]
-            cat_remaining = category_cap(row["category"]) - category_used[row["category"]]
+            wallet_remaining = caps.max_wallet_weight - row["weight"]
+            cat_remaining = category_cap(row["category"], caps) - category_used[row["category"]]
             if wallet_remaining > EPS and cat_remaining > EPS and row["raw_weight"] > 0:
                 eligible.append((row, wallet_remaining, cat_remaining))
 
@@ -116,10 +179,45 @@ def save_csv(rows: list[dict], path: Path) -> None:
         "category",
         "all_categories",
         "final_wss",
+        "raw_wss",
+        "consistency_score",
+        "drawdown_score",
+        "specialization_score",
+        "copyability_score",
+        "copyability_score_raw",
+        "copyability_smoothing_samples",
+        "activity_score",
+        "return_quality_score",
+        "track_record_multiplier",
+        "data_depth_multiplier",
         "leaderboard_pnl",
+        "leaderboard_week_pnl",
+        "leaderboard_month_pnl",
+        "profile_week_pnl",
+        "profile_month_pnl",
         "leaderboard_volume",
         "raw_weight",
         "weight",
+        "trades_30d",
+        "trades_90d",
+        "buy_trades_30d",
+        "sell_trades_30d",
+        "buy_trade_share_30d",
+        "economic_copyability_status",
+        "economic_copyability_reason",
+        "economic_copyability_buy_signals",
+        "economic_copyability_executable_ratio",
+        "economic_copyability_batchable_ratio",
+        "economic_copyability_dust_ratio",
+        "economic_copyability_median_copy_amount_usd",
+        "days_since_last_trade",
+        "median_spread",
+        "slippage_proxy",
+        "current_position_pnl_ratio",
+        "total_pnl_ratio",
+        "open_loss_exposure",
+        "roi_7",
+        "roi_30",
     ]
 
     with path.open("w", encoding="utf-8", newline="") as f:
@@ -134,15 +232,55 @@ def save_csv(rows: list[dict], path: Path) -> None:
                     "category": row["category"],
                     "all_categories": row["all_categories"],
                     "final_wss": round(row["final_wss"], 2),
+                    "raw_wss": row.get("raw_wss", ""),
+                    "consistency_score": row.get("consistency_score", ""),
+                    "drawdown_score": row.get("drawdown_score", ""),
+                    "specialization_score": row.get("specialization_score", ""),
+                    "copyability_score": row.get("copyability_score", ""),
+                    "copyability_score_raw": row.get("copyability_score_raw", ""),
+                    "copyability_smoothing_samples": row.get("copyability_smoothing_samples", ""),
+                    "activity_score": row.get("activity_score", ""),
+                    "return_quality_score": row.get("return_quality_score", ""),
+                    "track_record_multiplier": row.get("track_record_multiplier", ""),
+                    "data_depth_multiplier": row.get("data_depth_multiplier", ""),
                     "leaderboard_pnl": round(row["leaderboard_pnl"], 2),
+                    "leaderboard_week_pnl": row.get("leaderboard_week_pnl", ""),
+                    "leaderboard_month_pnl": row.get("leaderboard_month_pnl", ""),
+                    "profile_week_pnl": row.get("profile_week_pnl", ""),
+                    "profile_month_pnl": row.get("profile_month_pnl", ""),
                     "leaderboard_volume": round(row["leaderboard_volume"], 2),
                     "raw_weight": round(row["raw_weight"], 6),
                     "weight": round(row["weight"], 6),
+                    "trades_30d": row.get("trades_30d", ""),
+                    "trades_90d": row.get("trades_90d", ""),
+                    "buy_trades_30d": row.get("buy_trades_30d", ""),
+                    "sell_trades_30d": row.get("sell_trades_30d", ""),
+                    "buy_trade_share_30d": row.get("buy_trade_share_30d", ""),
+                    "economic_copyability_status": row.get("economic_copyability_status", ""),
+                    "economic_copyability_reason": row.get("economic_copyability_reason", ""),
+                    "economic_copyability_buy_signals": row.get("economic_copyability_buy_signals", ""),
+                    "economic_copyability_executable_ratio": row.get("economic_copyability_executable_ratio", ""),
+                    "economic_copyability_batchable_ratio": row.get("economic_copyability_batchable_ratio", ""),
+                    "economic_copyability_dust_ratio": row.get("economic_copyability_dust_ratio", ""),
+                    "economic_copyability_median_copy_amount_usd": row.get("economic_copyability_median_copy_amount_usd", ""),
+                    "days_since_last_trade": row.get("days_since_last_trade", ""),
+                    "median_spread": row.get("median_spread", ""),
+                    "slippage_proxy": row.get("slippage_proxy", ""),
+                    "current_position_pnl_ratio": row.get("current_position_pnl_ratio", ""),
+                    "total_pnl_ratio": row.get("total_pnl_ratio", ""),
+                    "open_loss_exposure": row.get("open_loss_exposure", ""),
+                    "roi_7": row.get("roi_7", ""),
+                    "roi_30": row.get("roi_30", ""),
                 }
             )
 
 
-def print_summary(rows: list[dict], remaining_total: float, feasible: bool) -> None:
+def print_summary(
+    rows: list[dict],
+    remaining_total: float,
+    feasible: bool,
+    caps: AllocationCaps,
+) -> None:
     print("=" * 120)
     print("FINAL PORTFOLIO ALLOCATION")
     print("=" * 120)
@@ -160,7 +298,7 @@ def print_summary(rows: list[dict], remaining_total: float, feasible: bool) -> N
 
     print("\nCATEGORY TOTALS")
     for category, total in sorted(category_totals.items(), key=lambda x: x[1], reverse=True):
-        cap = category_cap(category)
+        cap = category_cap(category, caps)
         print(f"{category}: {total:.4f} (cap={cap:.4f})")
 
     max_wallet = max((row["weight"] for row in rows), default=0.0)
@@ -169,19 +307,21 @@ def print_summary(rows: list[dict], remaining_total: float, feasible: bool) -> N
     print("\nCHECKS")
     print(f"total_weight={total_weight:.6f}")
     print(f"max_wallet_weight_observed={max_wallet:.6f}")
+    print(f"max_wallet_weight_cap={caps.max_wallet_weight:.6f} ({caps.wallet_cap_source})")
     print(f"feasible={feasible}")
     print(f"unallocated_weight={remaining_total:.10f}")
 
 
 def main() -> None:
+    caps = resolve_allocation_caps()
     rows = load_csv(INPUT_FILE)
     normalize_raw_weights(rows)
 
-    remaining_total, feasible = allocate_with_hard_caps(rows)
+    remaining_total, feasible = allocate_with_hard_caps(rows, caps)
 
     rows.sort(key=lambda x: x["weight"], reverse=True)
 
-    print_summary(rows, remaining_total, feasible)
+    print_summary(rows, remaining_total, feasible, caps)
     save_csv(rows, OUTPUT_FILE)
     print(f"\nSaved: {OUTPUT_FILE}")
 

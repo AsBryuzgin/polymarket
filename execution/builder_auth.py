@@ -6,9 +6,14 @@ from pathlib import Path
 import tomllib
 
 from dotenv import load_dotenv
-from py_clob_client.client import ClobClient
+from py_clob_client_v2.client import ClobClient
+from py_clob_client_v2.clob_types import ApiCreds
+from py_builder_signing_sdk.config import BuilderConfig
+from py_builder_signing_sdk.sdk_types import BuilderApiKeyCreds
 
 load_dotenv()
+
+EXECUTOR_CONFIG_ENV_VAR = "POLY_EXECUTOR_CONFIG_PATH"
 
 
 @dataclass
@@ -39,7 +44,7 @@ def load_executor_env() -> ExecutorEnv:
 
 
 def load_executor_config(path: str = "config/executor.toml") -> dict:
-    p = Path(path)
+    p = Path(os.getenv(EXECUTOR_CONFIG_ENV_VAR, path) if path == "config/executor.toml" else path)
     if not p.exists():
         return {}
     with p.open("rb") as f:
@@ -74,6 +79,24 @@ def build_clob_client(env: ExecutorEnv) -> ClobClient:
     return client
 
 
+def derive_or_create_api_key(client: ClobClient) -> ApiCreds:
+    try:
+        return client.derive_api_key()
+    except Exception:
+        return client.create_api_key()
+
+
+def build_builder_config(env: ExecutorEnv) -> BuilderConfig | None:
+    if not env.builder_api_key or not env.builder_secret or not env.builder_passphrase:
+        return None
+    creds = BuilderApiKeyCreds(
+        key=env.builder_api_key,
+        secret=env.builder_secret,
+        passphrase=env.builder_passphrase,
+    )
+    return BuilderConfig(local_builder_creds=creds)
+
+
 def health_snapshot() -> dict:
     env = load_executor_env()
     config = load_executor_config()
@@ -82,6 +105,7 @@ def health_snapshot() -> dict:
     snapshot = {
         "env_ok": len(missing) == 0,
         "missing_env": missing,
+        "executor_config_path": os.getenv(EXECUTOR_CONFIG_ENV_VAR, "config/executor.toml"),
         "clob_host": env.clob_host,
         "relayer_url": env.relayer_url,
         "chain_id": env.chain_id,
@@ -110,7 +134,7 @@ def health_snapshot() -> dict:
         return snapshot
 
     try:
-        creds = client.create_or_derive_api_creds()
+        creds = derive_or_create_api_key(client)
         snapshot["api_creds_ok"] = True
         snapshot["derived_api_key_present"] = bool(getattr(creds, "api_key", None))
     except Exception as e:
