@@ -621,6 +621,7 @@ def fresh_copyable_signals_from_wallet(
             leader_token_position_size=position_context["leader_token_position_size"],
             leader_token_position_value_usd=position_context["leader_token_position_value_usd"],
             leader_exit_fraction=position_context["leader_exit_fraction"],
+            market_snapshot=snapshot,
         )
 
         candidates.append(

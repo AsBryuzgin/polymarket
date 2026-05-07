@@ -62,6 +62,7 @@ class LeaderSignal:
     leader_token_position_size: float | None = None
     leader_token_position_value_usd: float | None = None
     leader_exit_fraction: float | None = None
+    market_snapshot: dict | None = None
 
 
 def _parse_opened_at_to_minutes(opened_at: str | None) -> float | None:
@@ -717,12 +718,19 @@ def process_signal(signal: LeaderSignal) -> dict:
                 "live_safety": asdict(live_safety),
             }
 
+    mode = resolve_execution_mode(config)
     registry = get_leader_registry(signal.leader_wallet)
     leader_user_name = registry["user_name"] if registry else None
     category = registry["category"] if registry else None
     leader_status = registry["leader_status"] if registry else None
 
-    snapshot = fetch_market_snapshot(token_id=signal.token_id, side=signal.side)
+    # PAPER soak already fetched and policy-checked this snapshot in the source layer.
+    # LIVE still re-fetches here so submit uses the freshest available orderbook.
+    snapshot = (
+        signal.market_snapshot
+        if mode == "PAPER" and signal.market_snapshot is not None
+        else fetch_market_snapshot(token_id=signal.token_id, side=signal.side)
+    )
     current_price = _snapshot_executable_price(snapshot, signal.side)
 
     if not claim_signal(
