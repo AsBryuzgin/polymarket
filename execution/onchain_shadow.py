@@ -242,6 +242,13 @@ def init_onchain_shadow_tables() -> None:
     _ensure_column(cur, "onchain_shadow_fills", "block_timestamp", "INTEGER")
     cur.execute(
         """
+        CREATE INDEX IF NOT EXISTS idx_onchain_shadow_fills_missing_block_timestamp
+        ON onchain_shadow_fills(block_timestamp)
+        WHERE block_timestamp IS NULL AND raw_log_json IS NOT NULL
+        """
+    )
+    cur.execute(
+        """
         SELECT exchange_address, transaction_hash, log_index, raw_log_json
         FROM onchain_shadow_fills
         WHERE block_timestamp IS NULL
@@ -278,6 +285,24 @@ def init_onchain_shadow_tables() -> None:
             last_block INTEGER NOT NULL,
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
+        """
+    )
+    cur.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_onchain_shadow_fills_wallet_block
+        ON onchain_shadow_fills(leader_wallet, block_timestamp DESC)
+        """
+    )
+    cur.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_onchain_shadow_fills_wallet_tx_token_side
+        ON onchain_shadow_fills(leader_wallet, transaction_hash, token_id, side)
+        """
+    )
+    cur.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_onchain_shadow_fills_tx_token_side_wallet
+        ON onchain_shadow_fills(transaction_hash, token_id, side, leader_wallet)
         """
     )
     conn.commit()
@@ -626,6 +651,7 @@ def list_recent_onchain_shadow_trades(
     max_age_sec: int = 600,
 ) -> list[dict[str, Any]]:
     init_onchain_shadow_tables()
+    cutoff_ts = int(time.time()) - int(max_age_sec)
     conn = get_connection()
     cur = conn.cursor()
     cur.execute(
@@ -650,18 +676,22 @@ def list_recent_onchain_shadow_trades(
             SUM(notional_usd) AS notional_usd,
             COUNT(*) AS raw_fills
         FROM onchain_shadow_fills
-        WHERE lower(leader_wallet) = lower(?)
+        WHERE leader_wallet = lower(?)
           AND transaction_hash IS NOT NULL
           AND transaction_hash != ''
           AND token_id IS NOT NULL
           AND token_id != ''
           AND side IN ('BUY', 'SELL')
+          AND COALESCE(
+                block_timestamp,
+                data_api_trade_timestamp,
+                CAST(strftime('%s', observed_at) AS INTEGER)
+              ) >= ?
         GROUP BY transaction_hash, token_id, side
-        HAVING trade_timestamp >= CAST(strftime('%s', 'now', ?) AS INTEGER)
         ORDER BY trade_timestamp DESC
         LIMIT ?
         """,
-        (leader_wallet, f"-{int(max_age_sec)} seconds", int(limit)),
+        (leader_wallet, cutoff_ts, int(limit)),
     )
     rows = [dict(row) for row in cur.fetchall()]
     conn.close()
