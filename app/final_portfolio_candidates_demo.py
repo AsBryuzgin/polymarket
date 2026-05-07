@@ -40,6 +40,8 @@ def select_by_category(rows: list[dict], quota_per_category: int) -> list[dict]:
     for row in rows:
         if not row["eligible"]:
             continue
+        if str(row.get("economic_copyability_status") or "").upper() == "FAIL":
+            continue
         if row["final_wss"] < MIN_WSS:
             continue
         grouped[row["category"]].append(row)
@@ -129,6 +131,17 @@ def save_csv(rows: list[dict], path: Path) -> None:
         "buy_trades_30d",
         "sell_trades_30d",
         "buy_trade_share_30d",
+        "economic_copyability_status",
+        "economic_copyability_reason",
+        "economic_copyability_buy_signals",
+        "economic_copyability_executable_ratio",
+        "economic_copyability_batchable_ratio",
+        "economic_copyability_dust_ratio",
+        "economic_copyability_median_copy_amount_usd",
+        "economic_copyability_executable_now",
+        "economic_copyability_executable_with_roundup",
+        "economic_copyability_executable_after_batch",
+        "economic_copyability_dust_signals",
         "days_since_last_trade",
         "closed_positions_used",
     ]

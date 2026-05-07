@@ -215,6 +215,77 @@ class SoakRunnerTests(unittest.TestCase):
         self.assertEqual(summary["leaders_checked"], 1)
         self.assertEqual(summary["selected_signals"], 2)
 
+    def test_soak_cycle_can_process_wallet_queues_in_parallel(self) -> None:
+        processed = []
+
+        def candidate(wallet: str, token: str) -> CopyableSignalCandidate:
+            signal = LeaderSignal(
+                signal_id=f"sig-{wallet}-{token}",
+                leader_wallet=wallet,
+                token_id=token,
+                side="BUY",
+                leader_budget_usd=10.0,
+                leader_trade_notional_usd=1.0,
+            )
+            return CopyableSignalCandidate(
+                signal=signal,
+                snapshot={"midpoint": 0.5, "best_bid": 0.49, "best_ask": 0.51, "spread": 0.02},
+                summary={
+                    "latest_trade_side": "BUY",
+                    "latest_trade_age_sec": 1.0,
+                    "latest_trade_hash": signal.signal_id,
+                    "latest_status": "FRESH_COPYABLE",
+                    "latest_reason": "copyable",
+                    "selected_trade_age_sec": 1.0,
+                    "selected_trade_notional_usd": 1.0,
+                },
+            )
+
+        def multi_fetcher(*, wallet: str, leader_budget_usd: float):
+            return [candidate(wallet, "A"), candidate(wallet, "B")], {
+                "latest_trade_side": "BUY",
+                "latest_trade_age_sec": 1.0,
+                "latest_trade_hash": f"sig-{wallet}-A",
+                "latest_status": "FRESH_COPYABLE",
+                "latest_reason": "copyable",
+            }
+
+        def processor(selected_signal: LeaderSignal):
+            processed.append((selected_signal.leader_wallet, selected_signal.token_id))
+            return {"status": "PAPER_FILLED_ENTRY", "reason": "ok"}
+
+        rows = run_soak_cycle(
+            registry_rows=[
+                {
+                    "wallet": "wallet1",
+                    "user_name": "leader1",
+                    "category": "SPORTS",
+                    "leader_status": "ACTIVE",
+                    "target_budget_usd": 10.0,
+                },
+                {
+                    "wallet": "wallet2",
+                    "user_name": "leader2",
+                    "category": "TECH",
+                    "leader_status": "ACTIVE",
+                    "target_budget_usd": 10.0,
+                },
+            ],
+            multi_signal_fetcher=multi_fetcher,
+            signal_processor=processor,
+            observation_logger=lambda **_kwargs: None,
+            max_fetch_workers=2,
+            max_process_workers=2,
+        )
+
+        self.assertEqual(len(rows), 4)
+        self.assertNotIn("_seq", rows[0])
+        by_wallet = {}
+        for wallet, token in processed:
+            by_wallet.setdefault(wallet, []).append(token)
+        self.assertEqual(by_wallet["wallet1"], ["B", "A"])
+        self.assertEqual(by_wallet["wallet2"], ["B", "A"])
+
     def test_soak_cycle_records_source_errors_as_observations(self) -> None:
         logged_observations = []
 

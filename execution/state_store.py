@@ -85,6 +85,13 @@ def init_db() -> None:
 
     cur.execute(
         """
+        CREATE INDEX IF NOT EXISTS idx_processed_signals_status_created_at
+        ON processed_signals(status, created_at)
+        """
+    )
+
+    cur.execute(
+        """
         CREATE TABLE IF NOT EXISTS order_attempts (
             attempt_id INTEGER PRIMARY KEY AUTOINCREMENT,
             signal_id TEXT NOT NULL,
@@ -319,6 +326,58 @@ def record_signal(
 
     conn.commit()
     conn.close()
+
+
+def mark_stale_processing_signals(
+    *,
+    max_age_sec: float,
+    status: str = "SKIPPED_STALE_PROCESSING",
+    reason: str | None = None,
+) -> dict[str, Any]:
+    init_db()
+    age_sec = max(float(max_age_sec or 0.0), 0.0)
+    cutoff_modifier = f"-{age_sec:.3f} seconds"
+    final_reason = reason or f"processing claim stale after {age_sec:.0f}s"
+
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT COUNT(*) AS count
+        FROM processed_signals ps
+        WHERE ps.status = 'PROCESSING'
+          AND ps.created_at < datetime('now', ?)
+          AND (
+              EXISTS (SELECT 1 FROM order_attempts oa WHERE oa.signal_id = ps.signal_id)
+              OR EXISTS (SELECT 1 FROM trade_history th WHERE th.signal_id = ps.signal_id)
+          )
+        """,
+        (cutoff_modifier,),
+    )
+    protected_count = int(cur.fetchone()["count"] or 0)
+
+    cur.execute(
+        """
+        UPDATE processed_signals
+        SET status = ?,
+            reason = ?
+        WHERE status = 'PROCESSING'
+          AND created_at < datetime('now', ?)
+          AND NOT EXISTS (SELECT 1 FROM order_attempts oa WHERE oa.signal_id = processed_signals.signal_id)
+          AND NOT EXISTS (SELECT 1 FROM trade_history th WHERE th.signal_id = processed_signals.signal_id)
+        """,
+        (status, final_reason, cutoff_modifier),
+    )
+    marked = int(cur.rowcount or 0)
+    conn.commit()
+    conn.close()
+    return {
+        "marked": marked,
+        "protected": protected_count,
+        "max_age_sec": age_sec,
+        "status": status,
+        "reason": final_reason,
+    }
 
 
 def _parse_sqlite_timestamp(value: Any) -> datetime | None:

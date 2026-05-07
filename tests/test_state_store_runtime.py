@@ -146,6 +146,45 @@ class StateStoreRuntimeTests(unittest.TestCase):
             self.assertAlmostEqual(float(history[0]["gross_value_usd"]), 10.0)
             self.assertAlmostEqual(float(history[0]["realized_pnl_usd"]), 5.0)
 
+    def test_mark_stale_processing_signals_skips_attempted_signals(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            state_store.DB_PATH = Path(tmp) / "executor_state.db"
+            state_store.init_db()
+            state_store.claim_signal("stale-clean", "wallet1", "tokenA", "BUY", 10.0)
+            state_store.claim_signal("stale-attempted", "wallet1", "tokenB", "BUY", 10.0)
+            state_store.create_order_attempt(
+                signal_id="stale-attempted",
+                leader_wallet="wallet1",
+                token_id="tokenB",
+                side="BUY",
+                amount_usd=1.0,
+                mode="PAPER",
+                status="RISK_APPROVED",
+            )
+
+            conn = state_store.get_connection()
+            cur = conn.cursor()
+            cur.execute(
+                """
+                UPDATE processed_signals
+                SET created_at = datetime('now', '-2 hours')
+                WHERE signal_id IN ('stale-clean', 'stale-attempted')
+                """
+            )
+            conn.commit()
+            conn.close()
+
+            result = state_store.mark_stale_processing_signals(max_age_sec=900)
+
+            self.assertEqual(result["marked"], 1)
+            self.assertEqual(result["protected"], 1)
+            statuses = {
+                row["signal_id"]: row["status"]
+                for row in state_store.list_processed_signals(limit=10)
+            }
+            self.assertEqual(statuses["stale-clean"], "SKIPPED_STALE_PROCESSING")
+            self.assertEqual(statuses["stale-attempted"], "PROCESSING")
+
 
 if __name__ == "__main__":
     unittest.main()

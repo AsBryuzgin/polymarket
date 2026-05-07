@@ -8,6 +8,7 @@ from pathlib import Path
 from app.final_portfolio_candidates_demo import (
     deduplicate_wallets,
     save_csv as save_candidates_csv,
+    select_by_category,
 )
 from app.portfolio_allocation_demo import load_csv as load_allocation_csv
 
@@ -129,6 +130,29 @@ class PortfolioPipelineTests(unittest.TestCase):
 
         self.assertEqual(rows[0]["category"], "FINANCE")
         self.assertEqual(rows[0]["all_categories"], "FINANCE, POLITICS")
+
+    def test_final_candidates_filters_runtime_economic_copyability_failures(self) -> None:
+        rows = select_by_category(
+            [
+                {
+                    "wallet": "dust",
+                    "category": "SPORTS",
+                    "eligible": True,
+                    "final_wss": 80.0,
+                    "economic_copyability_status": "FAIL",
+                },
+                {
+                    "wallet": "ok",
+                    "category": "SPORTS",
+                    "eligible": True,
+                    "final_wss": 60.0,
+                    "economic_copyability_status": "PASS",
+                },
+            ],
+            quota_per_category=2,
+        )
+
+        self.assertEqual([row["wallet"] for row in rows], ["ok"])
 
 
 if __name__ == "__main__":

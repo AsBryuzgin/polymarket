@@ -146,6 +146,9 @@ max_unknown_attempts = 0
 max_error_signals = 0
 require_live_readiness = true
 require_isolated_db = true
+max_fetch_workers = 4
+max_process_workers = 2
+stale_processing_max_age_sec = 900
 
 [reconciliation]
 fetch_exchange_positions = true
@@ -202,6 +205,13 @@ utilization_throttle_full = 0.90
 min_utilization_multiplier = 0.25
 min_multiplier = 0.10
 max_multiplier = 1.0
+
+[economic_copyability]
+enabled = true
+lookback_hours = 168.0
+min_buy_signals = 20
+min_executable_ratio = 0.10
+min_batchable_ratio = 0.35
 
 [signal_freshness]
 preferred_signal_age_sec = 30

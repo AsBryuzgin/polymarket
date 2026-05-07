@@ -19,6 +19,8 @@ if str(ROOT) not in sys.path:
 import app.build_live_universe_stable as stable_universe
 from app import final_portfolio_candidates_demo, multi_category_shortlist_demo, portfolio_allocation_demo
 from app.apply_rebalance_lifecycle import main as apply_rebalance_lifecycle
+from execution.builder_auth import load_executor_config
+from signals.economic_copyability import annotate_rows_with_economic_copyability
 
 
 SHORTLIST_DIR = Path("data/shortlists")
@@ -71,6 +73,17 @@ REVIEW_COLUMNS = [
     "buy_trades_30d",
     "sell_trades_30d",
     "buy_trade_share_30d",
+    "economic_copyability_status",
+    "economic_copyability_reason",
+    "economic_copyability_buy_signals",
+    "economic_copyability_executable_ratio",
+    "economic_copyability_batchable_ratio",
+    "economic_copyability_dust_ratio",
+    "economic_copyability_median_copy_amount_usd",
+    "economic_copyability_executable_now",
+    "economic_copyability_executable_with_roundup",
+    "economic_copyability_executable_after_batch",
+    "economic_copyability_dust_signals",
     "days_since_last_trade",
     "median_spread",
     "median_liquidity",
@@ -365,8 +378,13 @@ def write_review_xlsx(rows: list[dict[str, Any]], path: Path) -> None:
             "rejects SELL-only or near SELL-only recent taker flow that cannot open copy entries",
         ],
         [
+            "economic copyability",
+            "runtime gate only; not included in WSS",
+            "when enough paper history exists, rejects leaders whose BUY signals are mostly too small for the current bankroll/min-order model even after short batching",
+        ],
+        [
             "hard gates",
-            "age>=120, closed>=40, unique>=15, notional concentration<=35%, open_pnl>=-10%, trades30>=30, last_trade<=5d, copyability>=60, positive week/month PnL, copy-flow buy presence",
+            "age>=120, closed>=40, unique>=15, notional concentration<=35%, open_pnl>=-10%, trades30>=30, last_trade<=5d, copyability>=60, positive week/month PnL, copy-flow buy presence, economic copyability if runtime samples are sufficient",
             "",
         ],
     ]
@@ -415,9 +433,29 @@ def refresh_shortlists() -> str:
     buf = StringIO()
     with redirect_stdout(buf):
         multi_category_shortlist_demo.main()
+    _apply_economic_copyability_annotations(load_executor_config())
     rows = _all_review_rows()
     _validate_review_rows(rows)
     return buf.getvalue()
+
+
+def _append_fieldnames(existing: list[str], rows: list[dict[str, Any]]) -> list[str]:
+    fieldnames = list(existing)
+    for row in rows:
+        for key in row:
+            if key not in fieldnames:
+                fieldnames.append(key)
+    return fieldnames
+
+
+def _apply_economic_copyability_annotations(config: dict[str, Any]) -> None:
+    for path in (MASTER_CORE_FILE, MASTER_EXPERIMENTAL_FILE):
+        rows = _read_csv(path)
+        if not rows:
+            continue
+        original_fieldnames = list(rows[0].keys())
+        annotate_rows_with_economic_copyability(rows, config=config)
+        _write_csv(rows, path, _append_fieldnames(original_fieldnames, rows))
 
 
 def _copy_required(src: Path, dst: Path) -> None:
@@ -499,6 +537,8 @@ def create_rebalance_review(*, refresh: bool = True) -> dict[str, Any]:
     refresh_log = ""
     if refresh:
         refresh_log = refresh_shortlists()
+    else:
+        _apply_economic_copyability_annotations(load_executor_config())
 
     all_rows = _all_review_rows()
     _validate_review_rows(all_rows)
@@ -582,6 +622,12 @@ def _live_fieldnames(rows: list[dict[str, Any]]) -> list[str]:
         "buy_trades_30d",
         "sell_trades_30d",
         "buy_trade_share_30d",
+        "economic_copyability_status",
+        "economic_copyability_buy_signals",
+        "economic_copyability_executable_ratio",
+        "economic_copyability_batchable_ratio",
+        "economic_copyability_dust_ratio",
+        "economic_copyability_reason",
         "days_since_last_trade",
         "median_spread",
         "slippage_proxy",

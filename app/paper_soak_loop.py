@@ -17,7 +17,12 @@ from execution.polling import remaining_cycle_sleep_sec, sleep_until_next_cycle
 from execution.signal_observation_store import init_signal_observation_table
 from execution.settlement import run_settlement_cycle
 from execution.soak_runner import filter_registry_rows_for_scan, run_soak_cycle, summarize_soak_cycle
-from execution.state_store import init_db, list_leader_registry, list_open_positions
+from execution.state_store import (
+    init_db,
+    list_leader_registry,
+    list_open_positions,
+    mark_stale_processing_signals,
+)
 from execution.polymarket_executor import fetch_market_snapshot
 import execution.state_store as state_store
 
@@ -54,6 +59,12 @@ def main() -> None:
     interval_sec = args.interval_sec
     if interval_sec is None:
         interval_sec = float(config.get("global", {}).get("poll_interval_sec", 2))
+    soak_cfg = config.get("paper_soak", {})
+    max_fetch_workers = int(soak_cfg.get("max_fetch_workers", 1))
+    max_process_workers = int(soak_cfg.get("max_process_workers", 1))
+    stale_processing_max_age_sec = float(
+        soak_cfg.get("stale_processing_max_age_sec", 900.0)
+    )
 
     init_db()
     init_signal_observation_table()
@@ -89,6 +100,11 @@ def main() -> None:
             rows = run_soak_cycle(
                 registry_rows=registry_rows,
                 batch_flusher=lambda: flush_signal_batches(config),
+                max_fetch_workers=max_fetch_workers,
+                max_process_workers=max_process_workers,
+            )
+            stale_processing_summary = mark_stale_processing_signals(
+                max_age_sec=stale_processing_max_age_sec,
             )
             summary = summarize_soak_cycle(rows)
             settlement_summary = run_settlement_cycle(
@@ -102,6 +118,9 @@ def main() -> None:
             )
             summary["cycle_elapsed_sec"] = round(cycle_elapsed_sec, 3)
             summary["next_sleep_sec"] = round(sleep_sec, 3)
+            summary["max_fetch_workers"] = max_fetch_workers
+            summary["max_process_workers"] = max_process_workers
+            summary["stale_processing_recovery"] = stale_processing_summary
 
             print(f"\n--- paper soak cycle {cycle} at {started} ---")
             pprint(summary)
