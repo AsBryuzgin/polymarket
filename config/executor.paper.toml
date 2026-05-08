@@ -212,6 +212,7 @@ lookback_hours = 168.0
 min_buy_signals = 20
 min_executable_ratio = 0.10
 min_batchable_ratio = 0.35
+min_median_trade_fraction = 0.001
 
 [signal_freshness]
 preferred_signal_age_sec = 30

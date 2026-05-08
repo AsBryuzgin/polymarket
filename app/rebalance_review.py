@@ -79,6 +79,9 @@ REVIEW_COLUMNS = [
     "economic_copyability_executable_ratio",
     "economic_copyability_batchable_ratio",
     "economic_copyability_dust_ratio",
+    "economic_copyability_trade_fraction_samples",
+    "economic_copyability_median_trade_fraction",
+    "economic_copyability_mean_trade_fraction",
     "economic_copyability_median_copy_amount_usd",
     "economic_copyability_executable_now",
     "economic_copyability_executable_with_roundup",
@@ -185,6 +188,13 @@ def _manual_selection_reason(row: dict[str, Any], base_reason: str) -> str:
 
 
 def format_manual_candidate_line(index: int, row: dict[str, Any]) -> str:
+    econ = ""
+    if str(row.get("economic_copyability_median_trade_fraction") or "").strip():
+        econ = (
+            " | econ med/avg "
+            f"{_safe_float(row.get('economic_copyability_median_trade_fraction')):.2%}/"
+            f"{_safe_float(row.get('economic_copyability_mean_trade_fraction')):.2%}"
+        )
     line = (
         f"{index}. {row.get('user_name')} | WSS {row.get('final_wss')} | "
         f"copy {row.get('copyability_score')} | "
@@ -193,6 +203,7 @@ def format_manual_candidate_line(index: int, row: dict[str, Any]) -> str:
         f"flow BUY/SELL {row.get('buy_trades_30d', '')}/{row.get('sell_trades_30d', '')} | "
         f"openPnL {row.get('current_position_pnl_ratio')} | "
         f"totalPnL {row.get('total_pnl_ratio')}"
+        f"{econ}"
     )
     if not _is_eligible(row):
         reason = _short_text(row.get("filter_reasons"), limit=120)
@@ -380,7 +391,7 @@ def write_review_xlsx(rows: list[dict[str, Any]], path: Path) -> None:
         [
             "economic copyability",
             "runtime gate only; not included in WSS",
-            "when enough paper history exists, rejects leaders whose BUY signals are mostly too small for the current bankroll/min-order model even after short batching",
+            "when enough paper history exists, rejects leaders whose BUY signals are mostly too small for the current bankroll/min-order model even after short batching; median leader trade fraction is used as an additional dust-risk diagnostic/gate",
         ],
         [
             "hard gates",
@@ -627,6 +638,9 @@ def _live_fieldnames(rows: list[dict[str, Any]]) -> list[str]:
         "economic_copyability_executable_ratio",
         "economic_copyability_batchable_ratio",
         "economic_copyability_dust_ratio",
+        "economic_copyability_trade_fraction_samples",
+        "economic_copyability_median_trade_fraction",
+        "economic_copyability_mean_trade_fraction",
         "economic_copyability_reason",
         "days_since_last_trade",
         "median_spread",

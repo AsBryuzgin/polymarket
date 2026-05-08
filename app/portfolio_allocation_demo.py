@@ -209,6 +209,9 @@ def save_csv(rows: list[dict], path: Path) -> None:
         "economic_copyability_executable_ratio",
         "economic_copyability_batchable_ratio",
         "economic_copyability_dust_ratio",
+        "economic_copyability_trade_fraction_samples",
+        "economic_copyability_median_trade_fraction",
+        "economic_copyability_mean_trade_fraction",
         "economic_copyability_median_copy_amount_usd",
         "days_since_last_trade",
         "median_spread",
@@ -262,7 +265,22 @@ def save_csv(rows: list[dict], path: Path) -> None:
                     "economic_copyability_executable_ratio": row.get("economic_copyability_executable_ratio", ""),
                     "economic_copyability_batchable_ratio": row.get("economic_copyability_batchable_ratio", ""),
                     "economic_copyability_dust_ratio": row.get("economic_copyability_dust_ratio", ""),
-                    "economic_copyability_median_copy_amount_usd": row.get("economic_copyability_median_copy_amount_usd", ""),
+                    "economic_copyability_trade_fraction_samples": row.get(
+                        "economic_copyability_trade_fraction_samples",
+                        "",
+                    ),
+                    "economic_copyability_median_trade_fraction": row.get(
+                        "economic_copyability_median_trade_fraction",
+                        "",
+                    ),
+                    "economic_copyability_mean_trade_fraction": row.get(
+                        "economic_copyability_mean_trade_fraction",
+                        "",
+                    ),
+                    "economic_copyability_median_copy_amount_usd": row.get(
+                        "economic_copyability_median_copy_amount_usd",
+                        "",
+                    ),
                     "days_since_last_trade": row.get("days_since_last_trade", ""),
                     "median_spread": row.get("median_spread", ""),
                     "slippage_proxy": row.get("slippage_proxy", ""),

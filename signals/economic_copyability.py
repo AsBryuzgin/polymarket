@@ -17,6 +17,7 @@ DEFAULT_LOOKBACK_HOURS = 168.0
 DEFAULT_BATCH_WINDOW_SEC = 30.0
 DEFAULT_MIN_ORDER_USD = 1.0
 DEFAULT_MAX_ROUND_UP_MULTIPLE = 3.0
+DEFAULT_MIN_MEDIAN_TRADE_FRACTION = 0.001
 
 
 @dataclass(frozen=True)
@@ -27,6 +28,9 @@ class EconomicCopyabilityMetrics:
     executable_with_roundup: int
     executable_after_batch: int
     dust_signals: int
+    trade_fraction_samples: int
+    median_trade_fraction: float
+    mean_trade_fraction: float
     median_copy_amount_usd: float
     executable_ratio: float
     batchable_ratio: float
@@ -90,16 +94,26 @@ def _metric_cfg(config: dict[str, Any]) -> dict[str, Any]:
             DEFAULT_MAX_ROUND_UP_MULTIPLE,
         ),
         "batch_window_sec": _safe_float(batch.get("window_sec"), DEFAULT_BATCH_WINDOW_SEC),
+        "min_median_trade_fraction": _safe_float(
+            cfg.get("min_median_trade_fraction"),
+            DEFAULT_MIN_MEDIAN_TRADE_FRACTION,
+        ),
     }
+
+
+def _leader_trade_fraction(row: dict[str, Any]) -> float:
+    notional = _safe_float(row.get("selected_trade_notional_usd"))
+    portfolio = _safe_float(row.get("selected_leader_portfolio_value_usd"))
+    if notional <= 0 or portfolio <= 0:
+        return 0.0
+    return min(notional / portfolio, 1.0)
 
 
 def _copy_amount(row: dict[str, Any]) -> float:
     target_budget = _safe_float(row.get("target_budget_usd"))
-    notional = _safe_float(row.get("selected_trade_notional_usd"))
-    portfolio = _safe_float(row.get("selected_leader_portfolio_value_usd"))
-    if target_budget <= 0 or notional <= 0 or portfolio <= 0:
+    if target_budget <= 0:
         return 0.0
-    return target_budget * min(notional / portfolio, 1.0)
+    return target_budget * _leader_trade_fraction(row)
 
 
 def _min_order(row: dict[str, Any], default: float) -> float:
@@ -207,8 +221,10 @@ def compute_economic_copyability_by_wallet(
         if not wallet or not signal_id:
             continue
         amount = _copy_amount(row)
+        trade_fraction = _leader_trade_fraction(row)
         min_order = _min_order(row, float(cfg["min_order_usd"]))
         row["economic_copy_amount_usd"] = amount
+        row["economic_trade_fraction"] = trade_fraction
         row["economic_min_order_usd"] = min_order
         by_wallet.setdefault(wallet, []).append(row)
         amounts[signal_id] = amount
@@ -228,12 +244,16 @@ def compute_economic_copyability_by_wallet(
         roundup_count = 0
         batch_count = 0
         copy_amounts: list[float] = []
+        trade_fractions: list[float] = []
 
         for row in wallet_rows:
             signal_id = str(row.get("selected_signal_id") or "")
             amount = float(row["economic_copy_amount_usd"])
+            trade_fraction = float(row["economic_trade_fraction"])
             min_order = float(row["economic_min_order_usd"])
             copy_amounts.append(amount)
+            if trade_fraction > 0:
+                trade_fractions.append(trade_fraction)
             if amount >= min_order:
                 now_count += 1
                 batch_count += 1
@@ -250,6 +270,10 @@ def compute_economic_copyability_by_wallet(
         executable_ratio = executable_count / buy_signals if buy_signals else 0.0
         batchable_ratio = batch_count / buy_signals if buy_signals else 0.0
         dust_ratio = dust_count / buy_signals if buy_signals else 0.0
+        median_trade_fraction = median(trade_fractions) if trade_fractions else 0.0
+        mean_trade_fraction = (
+            sum(trade_fractions) / len(trade_fractions) if trade_fractions else 0.0
+        )
 
         if buy_signals < int(cfg["min_buy_signals"]):
             status = "UNKNOWN"
@@ -264,6 +288,18 @@ def compute_economic_copyability_by_wallet(
                 f"exec {executable_ratio:.2f} < {cfg['min_executable_ratio']:.2f}, "
                 f"batch {batchable_ratio:.2f} < {cfg['min_batchable_ratio']:.2f}"
             )
+        elif (
+            len(trade_fractions) >= int(cfg["min_buy_signals"])
+            and median_trade_fraction < float(cfg["min_median_trade_fraction"])
+            and batchable_ratio < float(cfg["min_batchable_ratio"])
+        ):
+            status = "FAIL"
+            reason = (
+                "runtime leader trade fraction below threshold: "
+                f"median {median_trade_fraction:.4%} < "
+                f"{float(cfg['min_median_trade_fraction']):.4%}, "
+                f"batch {batchable_ratio:.2f} < {cfg['min_batchable_ratio']:.2f}"
+            )
         else:
             status = "PASS"
             reason = "runtime economic copyability ok"
@@ -275,6 +311,9 @@ def compute_economic_copyability_by_wallet(
             executable_with_roundup=roundup_count,
             executable_after_batch=batch_count,
             dust_signals=dust_count,
+            trade_fraction_samples=len(trade_fractions),
+            median_trade_fraction=round(median_trade_fraction, 8),
+            mean_trade_fraction=round(mean_trade_fraction, 8),
             median_copy_amount_usd=round(median(copy_amounts), 6) if copy_amounts else 0.0,
             executable_ratio=round(executable_ratio, 6),
             batchable_ratio=round(batchable_ratio, 6),
