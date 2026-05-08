@@ -2,9 +2,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass, asdict, replace
 from datetime import datetime, timedelta, timezone
+import threading
+import time
+from typing import Any
 
 from execution.budget_accounting import refresh_active_budgets_from_config
 from execution.builder_auth import load_executor_config
+from execution import state_store as _state_store
 from execution.order_policy import evaluate_order_policy
 from execution.order_router import (
     OrderExecutionResult,
@@ -46,6 +50,14 @@ from risk.sizing import compute_signal_copy_amount
 
 
 DEFAULT_MAX_MIN_ORDER_ROUND_UP_MULTIPLE = 3.0
+DEFAULT_ADAPTIVE_CONTEXT_CACHE_TTL_SEC = 300.0
+
+_ADAPTIVE_CONTEXT_CACHE_LOCK = threading.Lock()
+_ADAPTIVE_CONTEXT_CACHE: dict[str, Any] = {
+    "key": None,
+    "expires_at": 0.0,
+    "data": None,
+}
 
 
 @dataclass
@@ -214,6 +226,78 @@ def _max_min_order_round_up_multiple(config: dict) -> float:
         _positive_float_or_none(sizing.get("max_min_order_round_up_multiple"))
         or DEFAULT_MAX_MIN_ORDER_ROUND_UP_MULTIPLE
     )
+
+
+def _adaptive_context_cache_ttl_sec(config: dict) -> float:
+    cfg = config.get("adaptive_sizing", {})
+    try:
+        value = float(cfg.get("context_cache_ttl_sec", DEFAULT_ADAPTIVE_CONTEXT_CACHE_TTL_SEC))
+    except (TypeError, ValueError):
+        value = DEFAULT_ADAPTIVE_CONTEXT_CACHE_TTL_SEC
+    return max(value, 0.0)
+
+
+def clear_adaptive_sizing_context_cache() -> None:
+    with _ADAPTIVE_CONTEXT_CACHE_LOCK:
+        _ADAPTIVE_CONTEXT_CACHE.update(
+            {
+                "key": None,
+                "expires_at": 0.0,
+                "data": None,
+            }
+        )
+
+
+def _adaptive_sizing_context(config: dict) -> dict[str, Any]:
+    ttl_sec = _adaptive_context_cache_ttl_sec(config)
+    cache_key = str(_state_store.DB_PATH)
+    now = time.monotonic()
+
+    if ttl_sec > 0:
+        cached = _ADAPTIVE_CONTEXT_CACHE.get("data")
+        if (
+            cached is not None
+            and _ADAPTIVE_CONTEXT_CACHE.get("key") == cache_key
+            and float(_ADAPTIVE_CONTEXT_CACHE.get("expires_at") or 0.0) > now
+        ):
+            cached["cache_hit"] = True
+            return cached
+
+    with _ADAPTIVE_CONTEXT_CACHE_LOCK:
+        now = time.monotonic()
+        if ttl_sec > 0:
+            cached = _ADAPTIVE_CONTEXT_CACHE.get("data")
+            if (
+                cached is not None
+                and _ADAPTIVE_CONTEXT_CACHE.get("key") == cache_key
+                and float(_ADAPTIVE_CONTEXT_CACHE.get("expires_at") or 0.0) > now
+            ):
+                cached["cache_hit"] = True
+                return cached
+
+        started = time.monotonic()
+        data = {
+            "open_positions": list_open_positions(limit=100000),
+            "observations": list_signal_observations(limit=100000),
+            "processed_signals": list_processed_signals(limit=100000),
+            "trade_history": list_trade_history(limit=100000),
+            "cache_hit": False,
+        }
+        data["load_elapsed_sec"] = round(time.monotonic() - started, 3)
+        data["counts"] = {
+            "open_positions": len(data["open_positions"]),
+            "observations": len(data["observations"]),
+            "processed_signals": len(data["processed_signals"]),
+            "trade_history": len(data["trade_history"]),
+        }
+        _ADAPTIVE_CONTEXT_CACHE.update(
+            {
+                "key": cache_key,
+                "expires_at": time.monotonic() + ttl_sec,
+                "data": data,
+            }
+        )
+        return data
 
 
 def _signal_batch_coalescer_enabled(config: dict) -> bool:
@@ -586,15 +670,22 @@ def _adaptive_sizing_for_buy(config: dict, signal: LeaderSignal) -> dict:
             enabled=False,
         ).to_dict()
     try:
-        return compute_adaptive_sizing_decision(
+        context = _adaptive_sizing_context(config)
+        decision = compute_adaptive_sizing_decision(
             leader_wallet=signal.leader_wallet,
             leader_budget_usd=signal.leader_budget_usd,
             config=config,
-            open_positions=list_open_positions(limit=100000),
-            observations=list_signal_observations(limit=100000),
-            processed_signals=list_processed_signals(limit=100000),
-            trade_history=list_trade_history(limit=100000),
+            open_positions=context["open_positions"],
+            observations=context["observations"],
+            processed_signals=context["processed_signals"],
+            trade_history=context["trade_history"],
         ).to_dict()
+        details = decision.setdefault("details", {})
+        details["context_cache_hit"] = bool(context.get("cache_hit"))
+        details["context_load_elapsed_sec"] = context.get("load_elapsed_sec")
+        details["context_counts"] = context.get("counts")
+        details["context_cache_ttl_sec"] = _adaptive_context_cache_ttl_sec(config)
+        return decision
     except Exception as e:
         return neutral_adaptive_sizing_decision(
             f"adaptive sizing unavailable: {e}"

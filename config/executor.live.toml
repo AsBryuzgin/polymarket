@@ -193,6 +193,7 @@ max_bucket_age_sec = 600
 [adaptive_sizing]
 enabled = true
 lookback_hours = 24.0
+context_cache_ttl_sec = 300.0
 target_budget_turnover = 0.85
 min_buy_signals_for_history = 5
 min_historical_multiplier = 0.20

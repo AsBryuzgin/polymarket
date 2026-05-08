@@ -7,7 +7,11 @@ from pathlib import Path
 from unittest.mock import patch
 
 import execution.state_store as state_store
-from execution.copy_worker import LeaderSignal, process_signal
+from execution.copy_worker import (
+    LeaderSignal,
+    clear_adaptive_sizing_context_cache,
+    process_signal,
+)
 from execution.signal_observation_store import init_signal_observation_table, log_signal_observation
 from risk.adaptive_sizing import compute_adaptive_sizing_decision
 
@@ -18,8 +22,10 @@ class AdaptiveSizingTests(unittest.TestCase):
         state_store.DB_PATH = Path(self.tmpdir.name) / "executor_state.db"
         state_store.init_db()
         init_signal_observation_table()
+        clear_adaptive_sizing_context_cache()
 
     def tearDown(self) -> None:
+        clear_adaptive_sizing_context_cache()
         self.tmpdir.cleanup()
 
     def _observation(
@@ -370,6 +376,71 @@ class AdaptiveSizingTests(unittest.TestCase):
         self.assertEqual(result["status"], "PREVIEW_READY_ENTRY")
         self.assertEqual(result["suggested_amount_usd"], 1.0)
         self.assertEqual(result["adaptive_sizing"]["multiplier"], 0.5)
+
+    def test_copy_worker_reuses_adaptive_context_across_buy_signals(self) -> None:
+        config = {
+            "risk": {
+                "min_order_size_usd": 0.01,
+                "max_per_trade_usd": 100.0,
+                "skip_if_spread_gt": 0.02,
+                "enforce_leader_budget_cap": True,
+            },
+            "filters": {
+                "buy_min_price": 0.05,
+                "buy_max_price": 0.95,
+            },
+            "exit": {
+                "exit_max_spread": 0.05,
+            },
+            "sizing": {
+                "leader_trade_notional_copy_fraction": 0.20,
+                "max_leader_trade_budget_fraction": 1.0,
+            },
+            "adaptive_sizing": {
+                "enabled": True,
+                "lookback_hours": 24.0,
+                "context_cache_ttl_sec": 300.0,
+            },
+        }
+        snapshot = {
+            "midpoint": 0.50,
+            "spread": 0.01,
+            "price_quote": 0.50,
+            "best_bid": 0.49,
+            "best_ask": 0.51,
+        }
+
+        signals = [
+            LeaderSignal(
+                signal_id=f"sig-cache-{idx}",
+                leader_wallet="wallet-cache",
+                token_id=f"token-cache-{idx}",
+                side="BUY",
+                leader_budget_usd=20.0,
+                leader_trade_notional_usd=5.0,
+                leader_portfolio_value_usd=100.0,
+            )
+            for idx in range(2)
+        ]
+
+        with (
+            patch("execution.copy_worker.load_executor_config", return_value=config),
+            patch("execution.copy_worker.fetch_market_snapshot", return_value=snapshot),
+            patch("execution.copy_worker.preview_market_order", return_value={"ok": True}),
+            patch("execution.copy_worker.list_signal_observations", return_value=[]) as observations_mock,
+            patch("execution.copy_worker.list_processed_signals", return_value=[]) as processed_mock,
+            patch("execution.copy_worker.list_trade_history", return_value=[]) as trade_history_mock,
+        ):
+            first = process_signal(signals[0])
+            second = process_signal(signals[1])
+
+        self.assertEqual(first["status"], "PREVIEW_READY_ENTRY")
+        self.assertEqual(second["status"], "PREVIEW_READY_ENTRY")
+        self.assertFalse(first["adaptive_sizing"]["details"]["context_cache_hit"])
+        self.assertTrue(second["adaptive_sizing"]["details"]["context_cache_hit"])
+        self.assertEqual(observations_mock.call_count, 1)
+        self.assertEqual(processed_mock.call_count, 1)
+        self.assertEqual(trade_history_mock.call_count, 1)
 
 
 if __name__ == "__main__":
