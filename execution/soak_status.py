@@ -37,6 +37,28 @@ def _progress(actual: float, required: float) -> dict[str, Any]:
     }
 
 
+def _processing_signal_counts(
+    rows: list[dict[str, Any]],
+    *,
+    stale_after_sec: float,
+    now: datetime,
+) -> tuple[int, int]:
+    total = 0
+    stale = 0
+    for row in rows:
+        if str(row.get("status") or "") != "PROCESSING":
+            continue
+        total += 1
+        created_at = _parse_timestamp(row.get("created_at"))
+        if created_at is None:
+            stale += 1
+            continue
+        age_sec = max((now - created_at).total_seconds(), 0.0)
+        if age_sec >= stale_after_sec:
+            stale += 1
+    return total, stale
+
+
 def flatten_paper_soak_status_report(report: dict[str, Any]) -> dict[str, Any]:
     soak_window = report.get("soak_window", {})
     counts = report.get("counts", {})
@@ -71,6 +93,7 @@ def flatten_paper_soak_status_report(report: dict[str, Any]) -> dict[str, Any]:
         "unknown_attempts": counts.get("unknown_attempts", 0),
         "error_signals": counts.get("error_signals", 0),
         "processing_signals": counts.get("processing_signals", 0),
+        "stale_processing_signals": counts.get("stale_processing_signals", 0),
         "hours_progress": progress.get("hours", {}).get("progress", 0.0),
         "order_attempts_progress": progress.get("order_attempts", {}).get("progress", 0.0),
         "processed_signals_progress": progress.get("processed_signals", {}).get("progress", 0.0),
@@ -111,6 +134,10 @@ def build_paper_soak_status_report(
     max_error_attempts = _safe_int(soak_cfg.get("max_error_attempts"), 0)
     max_unknown_attempts = _safe_int(soak_cfg.get("max_unknown_attempts"), 0)
     max_error_signals = _safe_int(soak_cfg.get("max_error_signals"), 0)
+    stale_processing_max_age_sec = _safe_float(
+        soak_cfg.get("stale_processing_max_age_sec"),
+        900.0,
+    )
 
     mode = resolve_execution_mode(config)
     now = now.astimezone(timezone.utc) if now is not None else datetime.now(timezone.utc)
@@ -138,7 +165,11 @@ def build_paper_soak_status_report(
     error_signals = sum(
         count for status, count in signal_status_counts.items() if status in ERROR_SIGNAL_STATUSES
     )
-    processing_signals = signal_status_counts.get("PROCESSING", 0)
+    processing_signals, stale_processing_signals = _processing_signal_counts(
+        processed_signal_rows,
+        stale_after_sec=stale_processing_max_age_sec,
+        now=now,
+    )
 
     last_event_fresh = (
         last_event_age_minutes is not None
@@ -167,8 +198,13 @@ def build_paper_soak_status_report(
         blockers.append(f"unknown attempts {unknown_attempts} above allowed {max_unknown_attempts}")
     if error_signals > max_error_signals:
         blockers.append(f"error signals {error_signals} above allowed {max_error_signals}")
-    if processing_signals:
-        blockers.append(f"processing signals {processing_signals} above allowed 0")
+    if stale_processing_signals:
+        blockers.append(
+            (
+                f"stale processing signals {stale_processing_signals} above allowed 0 "
+                f"(age >= {stale_processing_max_age_sec:.0f}s)"
+            )
+        )
 
     all_minimums_met = all(item["ok"] for item in progress.values())
     if not signal_observation_rows and not order_attempt_rows and not processed_signal_rows:
@@ -224,6 +260,7 @@ def build_paper_soak_status_report(
             "unknown_attempts": unknown_attempts,
             "error_signals": error_signals,
             "processing_signals": processing_signals,
+            "stale_processing_signals": stale_processing_signals,
         },
         "status_counts": {
             "observations": observation_status_counts,

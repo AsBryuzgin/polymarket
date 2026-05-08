@@ -120,6 +120,82 @@ class PaperSoakStatusTests(unittest.TestCase):
         self.assertIn("error attempts 1 above allowed 0", report["blockers"])
         self.assertIn("error signals 1 above allowed 0", report["blockers"])
 
+    def test_fresh_processing_signal_does_not_block_status(self) -> None:
+        config = self._config()
+        config["paper_soak"]["stale_processing_max_age_sec"] = 900.0
+        report = build_paper_soak_status_report(
+            config=config,
+            leader_registry_rows=[{"leader_status": "ACTIVE"}],
+            open_position_rows=[],
+            processed_signal_rows=[
+                {
+                    "signal_id": "sig-processing",
+                    "status": "PROCESSING",
+                    "created_at": "2026-04-18 12:09:30",
+                }
+            ],
+            order_attempt_rows=[
+                {
+                    "signal_id": "sig-old",
+                    "status": "PAPER_FILLED",
+                    "created_at": "2026-04-18 11:50:00",
+                }
+            ],
+            trade_history_rows=[],
+            signal_observation_rows=[
+                {
+                    "observation_id": 1,
+                    "latest_status": "FRESH_COPYABLE",
+                    "selected_signal_id": "sig-processing",
+                    "observed_at": "2026-04-18 12:09:30",
+                }
+            ],
+            now=datetime(2026, 4, 18, 12, 10, tzinfo=timezone.utc),
+        )
+
+        self.assertNotEqual(report["soak_status"], "BLOCKED")
+        self.assertEqual(report["counts"]["processing_signals"], 1)
+        self.assertEqual(report["counts"]["stale_processing_signals"], 0)
+        self.assertEqual(report["blockers"], [])
+
+    def test_stale_processing_signal_blocks_status(self) -> None:
+        config = self._config()
+        config["paper_soak"]["stale_processing_max_age_sec"] = 900.0
+        report = build_paper_soak_status_report(
+            config=config,
+            leader_registry_rows=[{"leader_status": "ACTIVE"}],
+            open_position_rows=[],
+            processed_signal_rows=[
+                {
+                    "signal_id": "sig-stale",
+                    "status": "PROCESSING",
+                    "created_at": "2026-04-18 11:00:00",
+                }
+            ],
+            order_attempt_rows=[
+                {
+                    "signal_id": "sig-old",
+                    "status": "PAPER_FILLED",
+                    "created_at": "2026-04-18 11:50:00",
+                }
+            ],
+            trade_history_rows=[],
+            signal_observation_rows=[
+                {
+                    "observation_id": 1,
+                    "latest_status": "FRESH_COPYABLE",
+                    "selected_signal_id": "sig-stale",
+                    "observed_at": "2026-04-18 12:00:00",
+                }
+            ],
+            now=datetime(2026, 4, 18, 12, 10, tzinfo=timezone.utc),
+        )
+
+        self.assertEqual(report["soak_status"], "BLOCKED")
+        self.assertEqual(report["counts"]["processing_signals"], 1)
+        self.assertEqual(report["counts"]["stale_processing_signals"], 1)
+        self.assertIn("stale processing signals 1 above allowed 0", report["blockers"][0])
+
     def test_flatten_status_report_keeps_core_metrics_and_status_counts(self) -> None:
         report = build_paper_soak_status_report(
             config=self._config(),
