@@ -656,17 +656,55 @@ def list_recent_onchain_shadow_trades(
     cur = conn.cursor()
     cur.execute(
         """
+        WITH deduped_fills AS (
+            SELECT
+                transaction_hash,
+                token_id,
+                side,
+                MAX(
+                    COALESCE(
+                        block_timestamp,
+                        data_api_trade_timestamp,
+                        CAST(strftime('%s', observed_at) AS INTEGER)
+                    )
+                ) AS trade_timestamp,
+                MAX(block_timestamp) AS block_timestamp,
+                MIN(observed_at) AS observed_at,
+                MIN(data_api_seen_at) AS data_api_seen_at,
+                MAX(data_api_trade_timestamp) AS data_api_trade_timestamp,
+                MAX(raw_log_json) AS raw_log_json,
+                MAX(size) AS size,
+                MAX(notional_usd) AS notional_usd,
+                COUNT(*) AS duplicate_rows
+            FROM onchain_shadow_fills
+            WHERE leader_wallet = lower(?)
+              AND transaction_hash IS NOT NULL
+              AND transaction_hash != ''
+              AND token_id IS NOT NULL
+              AND token_id != ''
+              AND side IN ('BUY', 'SELL')
+              AND COALESCE(
+                    block_timestamp,
+                    data_api_trade_timestamp,
+                    CAST(strftime('%s', observed_at) AS INTEGER)
+                  ) >= ?
+            GROUP BY
+                transaction_hash,
+                token_id,
+                side,
+                COALESCE(order_hash, ''),
+                COALESCE(maker_asset_id, ''),
+                COALESCE(taker_asset_id, ''),
+                COALESCE(maker_amount_filled, ''),
+                COALESCE(taker_amount_filled, ''),
+                ROUND(COALESCE(size, 0), 12),
+                ROUND(COALESCE(notional_usd, 0), 12)
+        )
         SELECT
             transaction_hash,
             token_id,
             side,
-            MAX(
-                COALESCE(
-                    block_timestamp,
-                    data_api_trade_timestamp,
-                    CAST(strftime('%s', observed_at) AS INTEGER)
-                )
-            ) AS trade_timestamp,
+            MAX(trade_timestamp) AS trade_timestamp,
             MAX(block_timestamp) AS block_timestamp,
             MIN(observed_at) AS observed_at,
             MIN(data_api_seen_at) AS data_api_seen_at,
@@ -674,19 +712,9 @@ def list_recent_onchain_shadow_trades(
             MAX(raw_log_json) AS raw_log_json,
             SUM(size) AS size,
             SUM(notional_usd) AS notional_usd,
-            COUNT(*) AS raw_fills
-        FROM onchain_shadow_fills
-        WHERE leader_wallet = lower(?)
-          AND transaction_hash IS NOT NULL
-          AND transaction_hash != ''
-          AND token_id IS NOT NULL
-          AND token_id != ''
-          AND side IN ('BUY', 'SELL')
-          AND COALESCE(
-                block_timestamp,
-                data_api_trade_timestamp,
-                CAST(strftime('%s', observed_at) AS INTEGER)
-              ) >= ?
+            COUNT(*) AS raw_fills,
+            SUM(duplicate_rows) AS raw_rows
+        FROM deduped_fills
         GROUP BY transaction_hash, token_id, side
         ORDER BY trade_timestamp DESC
         LIMIT ?

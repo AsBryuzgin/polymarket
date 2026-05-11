@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -275,6 +276,92 @@ class OnchainShadowTests(unittest.TestCase):
 
         self.assertEqual(len(trades), 1)
         self.assertEqual(trades[0]["timestamp"], block_timestamp)
+
+    def test_recent_trades_dedupe_duplicate_raw_fill_rows_before_summing(self) -> None:
+        leader = "0x1234567890abcdef1234567890abcdef12345678"
+        token_id = "12345"
+        block_timestamp = int(time.time()) - 10
+
+        with tempfile.TemporaryDirectory() as tmp:
+            state_store.DB_PATH = Path(tmp) / "executor_state.db"
+            state_store.init_db()
+            init_onchain_shadow_tables()
+            conn = state_store.get_connection()
+            cur = conn.cursor()
+            rows = [
+                ("0xe111180000d2663c0091e4f400237545b87b996b", "0xtx", 10, "0xorder-a", 10.0, 5.0, "5000000", "10000000"),
+                ("0xe111180000d2663c0091e4f400237545b87b996b", "0xtx", 11, "0xorder-a", 10.0, 5.0, "5000000", "10000000"),
+                ("0xe111180000d2663c0091e4f400237545b87b996b", "0xtx", 12, "0xorder-b", 20.0, 10.0, "10000000", "20000000"),
+            ]
+            cur.executemany(
+                """
+                INSERT INTO onchain_shadow_fills (
+                    exchange_address,
+                    transaction_hash,
+                    log_index,
+                    block_number,
+                    block_timestamp,
+                    leader_wallet,
+                    order_hash,
+                    side,
+                    token_id,
+                    size,
+                    price,
+                    notional_usd,
+                    maker_asset_id,
+                    taker_asset_id,
+                    maker_amount_filled,
+                    taker_amount_filled,
+                    observed_at,
+                    raw_log_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                [
+                    (
+                        exchange_address,
+                        tx,
+                        log_index,
+                        100,
+                        block_timestamp,
+                        leader.lower(),
+                        order_hash,
+                        "BUY",
+                        token_id,
+                        size,
+                        0.5,
+                        notional,
+                        "0",
+                        token_id,
+                        maker_amount,
+                        taker_amount,
+                        "2026-05-11 12:37:26",
+                        "{}",
+                    )
+                    for (
+                        exchange_address,
+                        tx,
+                        log_index,
+                        order_hash,
+                        size,
+                        notional,
+                        maker_amount,
+                        taker_amount,
+                    ) in rows
+                ],
+            )
+            conn.commit()
+            conn.close()
+
+            trades = list_recent_onchain_shadow_trades(
+                leader_wallet=leader,
+                limit=10,
+                max_age_sec=600,
+            )
+
+        self.assertEqual(len(trades), 1)
+        self.assertAlmostEqual(trades[0]["size"], 30.0)
+        self.assertAlmostEqual(trades[0]["price"], 0.5)
+        self.assertEqual(trades[0]["rawFills"], 2)
 
 
 if __name__ == "__main__":
