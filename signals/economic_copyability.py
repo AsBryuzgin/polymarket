@@ -175,9 +175,12 @@ def _min_order(row: dict[str, Any], default: float) -> float:
 
 
 def _load_buy_observations(lookback_hours: float) -> list[dict[str, Any]]:
-    init_signal_observation_table()
-    conn = state_store.get_connection()
-    cur = conn.cursor()
+    try:
+        init_signal_observation_table()
+        conn = state_store.get_connection()
+        cur = conn.cursor()
+    except sqlite3.Error:
+        return []
     try:
         cur.execute(
             """
