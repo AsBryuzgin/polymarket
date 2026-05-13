@@ -558,6 +558,103 @@ def _annotate_budget_volume_coverage(
     return rows
 
 
+def _capital_required_p95_volume(row: dict[str, Any]) -> float:
+    return _safe_float(row.get("economic_copyability_required_bankroll_p95_volume_usd"))
+
+
+def _capital_copy_rank(row: dict[str, Any], *, total_capital_usd: float) -> tuple[float, float, float]:
+    required = _capital_required_p95_volume(row)
+    affordability = total_capital_usd / required if required > 0 else 0.0
+    return (
+        affordability,
+        1.0 if required > 0 else 0.0,
+        _safe_float(row.get("final_wss")),
+    )
+
+
+def _capital_fit_note(
+    rows: list[dict[str, Any]],
+    *,
+    total_capital_usd: float,
+) -> str | None:
+    if not rows or total_capital_usd <= 0:
+        return None
+    for row in rows:
+        required = _capital_required_p95_volume(row)
+        if required <= 0:
+            return (
+                f"{row.get('user_name')} has no runtime economic-copyability history; "
+                "capital-aware review treats it as unproven"
+            )
+        budget = resolve_leader_budget_usd(row, total_capital_usd=total_capital_usd)
+        if budget + 1e-12 < required:
+            return (
+                f"{row.get('user_name')} needs about ${required:.0f} per-leader bankroll "
+                f"for p95 volume, but proposed budget is ${budget:.0f}"
+            )
+    return None
+
+
+def _capital_prune_live_rows(
+    rows: list[dict[str, Any]],
+    *,
+    config: dict[str, Any],
+) -> tuple[list[dict[str, Any]], str]:
+    if not rows:
+        return rows, ""
+
+    cfg = config.get("economic_copyability", {})
+    enabled = str(cfg.get("capital_aware_rebalance", "true")).strip().lower() not in {
+        "0",
+        "false",
+        "no",
+        "off",
+    }
+    if not enabled:
+        return rows, ""
+
+    total_capital_usd = _review_total_capital_usd(config)
+    if total_capital_usd <= 0:
+        return rows, ""
+
+    min_live_leaders = max(1, _safe_int(cfg.get("min_live_leaders"), 1))
+    ranked = sorted(
+        (dict(row) for row in rows),
+        key=lambda row: _capital_copy_rank(row, total_capital_usd=total_capital_usd),
+        reverse=True,
+    )
+    original_count = len(ranked)
+
+    best_subset: list[dict[str, Any]] | None = None
+    best_note = ""
+    for size in range(original_count, min_live_leaders - 1, -1):
+        subset = _reweight_live_rows([dict(row) for row in ranked[:size]])
+        note = _capital_fit_note(subset, total_capital_usd=total_capital_usd)
+        if note is None:
+            best_subset = subset
+            break
+        best_note = note
+
+    if best_subset is None:
+        best_subset = _reweight_live_rows([dict(ranked[0])])
+        note = _capital_fit_note(best_subset, total_capital_usd=total_capital_usd)
+        if note:
+            best_note = note
+
+    if len(best_subset) == original_count:
+        return best_subset, ""
+
+    return (
+        best_subset,
+        (
+            "Capital-aware pruning: "
+            f"${total_capital_usd:.0f} bankroll reduced proposed universe "
+            f"from {original_count} to {len(best_subset)} leader(s). "
+            f"{best_note}"
+        ),
+    )
+
+
 def _copy_required(src: Path, dst: Path) -> None:
     if not src.exists():
         raise FileNotFoundError(f"Missing expected file: {src}")
@@ -674,6 +771,7 @@ def create_rebalance_review(*, refresh: bool = True) -> dict[str, Any]:
 
     live_rows = _read_csv(paths["live"])
     config = load_executor_config()
+    live_rows, capital_pruning_note = _capital_prune_live_rows(live_rows, config=config)
     live_rows = _annotate_budget_volume_coverage(live_rows, config=config)
     _write_csv(live_rows, paths["live"], _live_fieldnames(live_rows))
     review = {
@@ -684,6 +782,7 @@ def create_rebalance_review(*, refresh: bool = True) -> dict[str, Any]:
         "manual_overrides": {},
         "files": {key: str(path) for key, path in paths.items() if key != "root"},
         "proposed_live": live_rows,
+        "capital_pruning_note": capital_pruning_note,
         "refresh_log_tail": refresh_log[-4000:],
         "preview_log_tail": preview_log[-4000:],
     }
@@ -709,11 +808,14 @@ def _set_pending_review(review: dict[str, Any]) -> None:
 
 
 def build_review_message(review: dict[str, Any]) -> str:
+    pruning = str(review.get("capital_pruning_note") or "").strip()
+    pruning_text = f"\n\n{pruning}" if pruning else ""
     return (
         "Rebalance review готов\n"
         f"id: {review['review_id']}\n\n"
         "Предложенный live-universe:\n"
-        f"{_summarize_live_rows(review.get('proposed_live') or [])}\n\n"
+        f"{_summarize_live_rows(review.get('proposed_live') or [])}"
+        f"{pruning_text}\n\n"
         "Файлы с top-30 и формулами приложены. Execution не меняется до подтверждения."
     )
 
@@ -880,6 +982,10 @@ def apply_manual_pick(
     live_row["all_categories"] = chosen.get("all_categories") or chosen.get("category")
     live_rows[replace_idx] = live_row
     live_rows = _reweight_live_rows(live_rows)
+    live_rows, capital_pruning_note = _capital_prune_live_rows(
+        live_rows,
+        config=load_executor_config(),
+    )
     live_rows = _annotate_budget_volume_coverage(live_rows, config=load_executor_config())
     _write_csv(live_rows, live_path, _live_fieldnames(live_rows))
     _write_csv(
@@ -916,6 +1022,7 @@ def apply_manual_pick(
         "filter_reasons": chosen.get("filter_reasons"),
     }
     review["proposed_live"] = live_rows
+    review["capital_pruning_note"] = capital_pruning_note
     _set_pending_review(review)
 
     return {
@@ -971,6 +1078,10 @@ def apply_manual_replacement(
     live_row["all_categories"] = chosen.get("all_categories") or chosen.get("category")
     live_rows[replace_idx] = live_row
     live_rows = _reweight_live_rows(live_rows)
+    live_rows, capital_pruning_note = _capital_prune_live_rows(
+        live_rows,
+        config=load_executor_config(),
+    )
     live_rows = _annotate_budget_volume_coverage(live_rows, config=load_executor_config())
     _write_csv(live_rows, live_path, _live_fieldnames(live_rows))
     _write_csv(
@@ -1010,6 +1121,7 @@ def apply_manual_replacement(
         "filter_reasons": chosen.get("filter_reasons"),
     }
     review["proposed_live"] = live_rows
+    review["capital_pruning_note"] = capital_pruning_note
     _set_pending_review(review)
 
     return {

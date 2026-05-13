@@ -19,6 +19,29 @@ DEFAULT_MIN_ORDER_USD = 1.0
 DEFAULT_MAX_ROUND_UP_MULTIPLE = 3.0
 DEFAULT_MIN_MEDIAN_TRADE_FRACTION = 0.001
 
+_METRIC_FIELD_DEFAULTS: dict[str, Any] = {
+    "status": "UNKNOWN",
+    "reason": "no runtime economic copyability history for wallet",
+    "buy_signals": 0,
+    "executable_ratio": 0.0,
+    "batchable_ratio": 0.0,
+    "dust_ratio": 0.0,
+    "trade_fraction_samples": 0,
+    "median_trade_fraction": 0.0,
+    "mean_trade_fraction": 0.0,
+    "median_copy_amount_usd": 0.0,
+    "required_bankroll_p95_signals_usd": "n/a",
+    "required_bankroll_p99_signals_usd": "n/a",
+    "required_bankroll_p95_batch_usd": "n/a",
+    "required_bankroll_p99_batch_usd": "n/a",
+    "required_bankroll_p95_volume_usd": "n/a",
+    "required_bankroll_p99_volume_usd": "n/a",
+    "executable_now": 0,
+    "executable_with_roundup": 0,
+    "executable_after_batch": 0,
+    "dust_signals": 0,
+}
+
 
 @dataclass(frozen=True)
 class EconomicCopyabilityMetrics:
@@ -512,21 +535,26 @@ def annotate_rows_with_economic_copyability(
     *,
     config: dict[str, Any],
 ) -> list[dict[str, Any]]:
-    metrics_by_wallet = compute_economic_copyability_by_wallet(config=config)
-    if not metrics_by_wallet:
+    cfg = _metric_cfg(config)
+    if not cfg["enabled"]:
         return rows
+
+    metrics_by_wallet = compute_economic_copyability_by_wallet(config=config)
 
     for row in rows:
         wallet = str(row.get("wallet") or "").lower()
         metrics = metrics_by_wallet.get(wallet)
         if metrics is None:
-            continue
-        data = asdict(metrics)
+            data = dict(_METRIC_FIELD_DEFAULTS)
+        else:
+            data = asdict(metrics)
         for key, value in data.items():
             if key == "wallet":
                 continue
             row[f"economic_copyability_{key}"] = value
-        if metrics.status == "FAIL":
+        for key in ("budget_usd", "volume_coverage", "volume_coverage_with_roundup"):
+            row.setdefault(f"economic_copyability_{key}", "n/a")
+        if metrics is not None and metrics.status == "FAIL":
             row["eligible"] = False
             existing_reason = str(row.get("filter_reasons") or "").strip()
             reason = f"economic_copyability: {metrics.reason}"

@@ -75,6 +75,65 @@ class RebalanceReviewTests(unittest.TestCase):
         self.assertIn("budget $75", text)
         self.assertIn("vol 82%/94% round", text)
 
+    def test_capital_pruning_reduces_universe_when_bankroll_is_too_small(self) -> None:
+        rows = [
+            {
+                "user_name": "A",
+                "wallet": "wallet-a",
+                "category": "SPORTS",
+                "final_wss": "80",
+                "weight": "0.34",
+                "economic_copyability_required_bankroll_p95_volume_usd": "400",
+            },
+            {
+                "user_name": "B",
+                "wallet": "wallet-b",
+                "category": "CULTURE",
+                "final_wss": "79",
+                "weight": "0.33",
+                "economic_copyability_required_bankroll_p95_volume_usd": "800",
+            },
+            {
+                "user_name": "C",
+                "wallet": "wallet-c",
+                "category": "POLITICS",
+                "final_wss": "78",
+                "weight": "0.33",
+                "economic_copyability_required_bankroll_p95_volume_usd": "1200",
+            },
+        ]
+
+        pruned, note = rebalance_review._capital_prune_live_rows(
+            rows,
+            config={
+                "capital": {"total_capital_usd": 160.0},
+                "economic_copyability": {"capital_aware_rebalance": True},
+            },
+        )
+
+        self.assertEqual(len(pruned), 1)
+        self.assertEqual(pruned[0]["user_name"], "A")
+        self.assertEqual(pruned[0]["weight"], 1.0)
+        self.assertIn("reduced proposed universe from 3 to 1", note)
+
+    def test_review_message_includes_capital_pruning_note(self) -> None:
+        text = rebalance_review.build_review_message(
+            {
+                "review_id": "review-1",
+                "proposed_live": [
+                    {
+                        "user_name": "A",
+                        "category": "SPORTS",
+                        "final_wss": "80",
+                        "weight": "1.0",
+                    }
+                ],
+                "capital_pruning_note": "Capital-aware pruning: test note",
+            }
+        )
+
+        self.assertIn("Capital-aware pruning: test note", text)
+
     def test_manual_pick_replaces_category_and_reweights(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

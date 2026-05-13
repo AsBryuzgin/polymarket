@@ -193,6 +193,27 @@ class EconomicCopyabilityTests(unittest.TestCase):
             places=6,
         )
 
+    def test_annotation_fills_unknown_when_wallet_has_no_runtime_history(self) -> None:
+        rows = [{"wallet": "new-wallet", "eligible": True, "filter_reasons": ""}]
+        config = {
+            "risk": {"min_order_size_usd": 1.0},
+            "sizing": {"max_min_order_round_up_multiple": 3.0},
+            "signal_batch_coalescer": {"window_sec": 30.0},
+            "economic_copyability": {"enabled": True, "lookback_hours": 168.0},
+        }
+
+        annotate_rows_with_economic_copyability(rows, config=config)
+
+        self.assertEqual(rows[0]["economic_copyability_status"], "UNKNOWN")
+        self.assertEqual(rows[0]["economic_copyability_buy_signals"], 0)
+        self.assertEqual(
+            rows[0]["economic_copyability_required_bankroll_p95_volume_usd"],
+            "n/a",
+        )
+        self.assertEqual(rows[0]["economic_copyability_budget_usd"], "n/a")
+        self.assertEqual(rows[0]["economic_copyability_volume_coverage"], "n/a")
+        self.assertTrue(rows[0]["eligible"])
+
 
 if __name__ == "__main__":
     unittest.main()
