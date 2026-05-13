@@ -213,7 +213,11 @@ class RebalanceReviewTests(unittest.TestCase):
             }
             pending_json.write_text(json.dumps(review), encoding="utf-8")
 
-            with patch.object(rebalance_review, "PENDING_FILE", pending_json):
+            with patch.object(rebalance_review, "PENDING_FILE", pending_json), patch.object(
+                rebalance_review,
+                "load_executor_config",
+                return_value={"economic_copyability": {"capital_aware_rebalance": False}},
+            ):
                 result = rebalance_review.apply_manual_pick("FINANCE", 2)
 
             with live_csv.open("r", encoding="utf-8") as f:
@@ -305,7 +309,11 @@ class RebalanceReviewTests(unittest.TestCase):
             }
             pending_json.write_text(json.dumps(review), encoding="utf-8")
 
-            with patch.object(rebalance_review, "PENDING_FILE", pending_json):
+            with patch.object(rebalance_review, "PENDING_FILE", pending_json), patch.object(
+                rebalance_review,
+                "load_executor_config",
+                return_value={"economic_copyability": {"capital_aware_rebalance": False}},
+            ):
                 result = rebalance_review.apply_manual_replacement(
                     replace_index=1,
                     candidate_category="WEATHER",
@@ -440,7 +448,11 @@ class RebalanceReviewTests(unittest.TestCase):
             }
             pending_json.write_text(json.dumps(review), encoding="utf-8")
 
-            with patch.object(rebalance_review, "PENDING_FILE", pending_json):
+            with patch.object(rebalance_review, "PENDING_FILE", pending_json), patch.object(
+                rebalance_review,
+                "load_executor_config",
+                return_value={"economic_copyability": {"capital_aware_rebalance": False}},
+            ):
                 result = rebalance_review.apply_manual_replacement(
                     replace_index=1,
                     candidate_category="SPORTS",
