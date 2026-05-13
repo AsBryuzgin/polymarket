@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+import urllib.error
 from unittest.mock import patch
 
 from app import telegram_bot
@@ -150,6 +151,13 @@ class TelegramBotTests(unittest.TestCase):
             response = telegram_bot._build_response("latency", {})
 
         self.assertEqual(response, "latency report")
+
+    def test_poll_timeout_is_transient(self) -> None:
+        self.assertTrue(telegram_bot._is_transient_poll_error(TimeoutError("timeout")))
+        self.assertTrue(
+            telegram_bot._is_transient_poll_error(urllib.error.URLError("temporary"))
+        )
+        self.assertFalse(telegram_bot._is_transient_poll_error(RuntimeError("bad response")))
 
     def test_unwind_selection_markup_lists_all_and_leaders(self) -> None:
         with patch(

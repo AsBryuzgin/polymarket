@@ -6,6 +6,7 @@ import json
 import os
 import sys
 import time
+import urllib.error
 import urllib.request
 import uuid
 from pathlib import Path
@@ -231,6 +232,14 @@ def _get_updates(
         raise RuntimeError(f"Telegram getUpdates failed: {response}")
     result = response.get("result") or []
     return result if isinstance(result, list) else []
+
+
+def _is_transient_poll_error(exc: BaseException) -> bool:
+    if isinstance(exc, TimeoutError):
+        return True
+    if isinstance(exc, urllib.error.URLError):
+        return True
+    return isinstance(exc, OSError)
 
 
 def _prime_offset(
@@ -897,12 +906,19 @@ def run_bot(*, poll_sec: float, timeout_sec: float, process_pending: bool) -> No
     print({"poll_sec": poll_sec, "process_pending": process_pending, "offset": offset})
 
     while True:
-        updates = _get_updates(
-            token=token,
-            offset=offset,
-            poll_timeout_sec=max(int(poll_sec), 1),
-            request_timeout_sec=timeout_sec + max(float(poll_sec), 1.0),
-        )
+        try:
+            updates = _get_updates(
+                token=token,
+                offset=offset,
+                poll_timeout_sec=max(int(poll_sec), 1),
+                request_timeout_sec=timeout_sec + max(float(poll_sec), 1.0),
+            )
+        except Exception as e:
+            if not _is_transient_poll_error(e):
+                raise
+            print(f"Telegram getUpdates transient error: {type(e).__name__}: {e}")
+            time.sleep(max(float(poll_sec), 1.0))
+            continue
 
         for update in updates:
             update_id = int(update.get("update_id"))
