@@ -119,6 +119,7 @@ class TelegramBotTests(unittest.TestCase):
                     "category": "WEATHER",
                     "final_wss": "72",
                     "copyability_score": "81",
+                    "economic_copyability_required_bankroll_p95_volume_usd": "420",
                     "buy_trades_30d": "12",
                     "sell_trades_30d": "3",
                     "days_since_last_trade": "0",
@@ -129,6 +130,7 @@ class TelegramBotTests(unittest.TestCase):
             markup = telegram_bot._rebalance_candidate_markup("review-1", 1, "WEATHER")
 
         self.assertIn("WeatherLeader", text)
+        self.assertIn("req vol95 $420", text)
         self.assertRegex(
             markup["inline_keyboard"][0][0]["callback_data"],
             r"^rebalance_pick_any:review-1:1:WEATHER:1:[0-9a-f]{10}$",

@@ -32,6 +32,12 @@ class EconomicCopyabilityMetrics:
     median_trade_fraction: float
     mean_trade_fraction: float
     median_copy_amount_usd: float
+    required_bankroll_p95_signals_usd: float
+    required_bankroll_p99_signals_usd: float
+    required_bankroll_p95_batch_usd: float
+    required_bankroll_p99_batch_usd: float
+    required_bankroll_p95_volume_usd: float
+    required_bankroll_p99_volume_usd: float
     executable_ratio: float
     batchable_ratio: float
     dust_ratio: float
@@ -98,6 +104,10 @@ def _metric_cfg(config: dict[str, Any]) -> dict[str, Any]:
             cfg.get("min_median_trade_fraction"),
             DEFAULT_MIN_MEDIAN_TRADE_FRACTION,
         ),
+        "max_leader_trade_budget_fraction": _safe_float(
+            sizing.get("max_leader_trade_budget_fraction"),
+            0.0,
+        ),
     }
 
 
@@ -109,11 +119,51 @@ def _leader_trade_fraction(row: dict[str, Any]) -> float:
     return min(notional / portfolio, 1.0)
 
 
+def _effective_trade_fraction(row: dict[str, Any], max_fraction: float) -> float:
+    fraction = _leader_trade_fraction(row)
+    if max_fraction > 0:
+        return min(fraction, max_fraction)
+    return fraction
+
+
 def _copy_amount(row: dict[str, Any]) -> float:
     target_budget = _safe_float(row.get("target_budget_usd"))
     if target_budget <= 0:
         return 0.0
     return target_budget * _leader_trade_fraction(row)
+
+
+def _weighted_quantile(values: list[float], weights: list[float], q: float) -> float:
+    pairs = sorted(
+        (value, weight)
+        for value, weight in zip(values, weights)
+        if value > 0 and weight > 0
+    )
+    if not pairs:
+        return 0.0
+    total = sum(weight for _value, weight in pairs)
+    threshold = total * q
+    running = 0.0
+    for value, weight in pairs:
+        running += weight
+        if running >= threshold:
+            return value
+    return pairs[-1][0]
+
+
+def _quantile(values: list[float], q: float) -> float:
+    vals = sorted(value for value in values if value > 0)
+    if not vals:
+        return 0.0
+    if len(vals) == 1:
+        return vals[0]
+    pos = (len(vals) - 1) * q
+    lo = int(pos)
+    hi = min(lo + 1, len(vals) - 1)
+    if lo == hi:
+        return vals[lo]
+    frac = pos - lo
+    return vals[lo] * (1.0 - frac) + vals[hi] * frac
 
 
 def _min_order(row: dict[str, Any], default: float) -> float:
@@ -202,6 +252,67 @@ def _batchable_signal_ids(
     return {signal_id for signal_id in batchable if signal_id}
 
 
+def _batch_requirement_pairs(
+    rows: list[dict[str, Any]],
+    *,
+    batch_window_sec: float,
+    default_min_order_usd: float,
+    max_trade_fraction: float,
+) -> list[tuple[float, float]]:
+    pairs: list[tuple[float, float]] = []
+    grouped: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    for row in rows:
+        wallet = str(row.get("leader_wallet") or "").lower()
+        token_id = str(row.get("token_id") or "")
+        grouped.setdefault((wallet, token_id), []).append(row)
+
+    for items in grouped.values():
+        current: list[dict[str, Any]] = []
+        start_ts = 0.0
+
+        def flush(batch: list[dict[str, Any]]) -> None:
+            if not batch:
+                return
+            fraction_sum = sum(
+                _effective_trade_fraction(item, max_trade_fraction)
+                for item in batch
+            )
+            if fraction_sum <= 0:
+                return
+            min_order = max(
+                _min_order(item, default_min_order_usd)
+                for item in batch
+            )
+            pairs.append((min_order / fraction_sum, fraction_sum))
+
+        for row in items:
+            observed_ts = _parse_ts(row.get("observed_at"))
+            if not current:
+                current = [row]
+                start_ts = observed_ts
+            elif observed_ts - start_ts <= batch_window_sec:
+                current.append(row)
+            else:
+                flush(current)
+                current = [row]
+                start_ts = observed_ts
+        flush(current)
+
+    return pairs
+
+
+def _volume_coverage(requirements: list[tuple[float, float]], budget_usd: float) -> float:
+    total_weight = sum(weight for _required, weight in requirements if weight > 0)
+    if total_weight <= 0 or budget_usd <= 0:
+        return 0.0
+    covered = sum(
+        weight
+        for required, weight in requirements
+        if weight > 0 and budget_usd + 1e-12 >= required
+    )
+    return covered / total_weight
+
+
 def compute_economic_copyability_by_wallet(
     *,
     config: dict[str, Any],
@@ -220,8 +331,11 @@ def compute_economic_copyability_by_wallet(
         signal_id = str(row.get("selected_signal_id") or "")
         if not wallet or not signal_id:
             continue
-        amount = _copy_amount(row)
-        trade_fraction = _leader_trade_fraction(row)
+        trade_fraction = _effective_trade_fraction(
+            row,
+            float(cfg["max_leader_trade_budget_fraction"]),
+        )
+        amount = _safe_float(row.get("target_budget_usd")) * trade_fraction
         min_order = _min_order(row, float(cfg["min_order_usd"]))
         row["economic_copy_amount_usd"] = amount
         row["economic_trade_fraction"] = trade_fraction
@@ -245,6 +359,7 @@ def compute_economic_copyability_by_wallet(
         batch_count = 0
         copy_amounts: list[float] = []
         trade_fractions: list[float] = []
+        signal_required_budgets: list[float] = []
 
         for row in wallet_rows:
             signal_id = str(row.get("selected_signal_id") or "")
@@ -254,6 +369,7 @@ def compute_economic_copyability_by_wallet(
             copy_amounts.append(amount)
             if trade_fraction > 0:
                 trade_fractions.append(trade_fraction)
+                signal_required_budgets.append(min_order / trade_fraction)
             if amount >= min_order:
                 now_count += 1
                 batch_count += 1
@@ -274,6 +390,14 @@ def compute_economic_copyability_by_wallet(
         mean_trade_fraction = (
             sum(trade_fractions) / len(trade_fractions) if trade_fractions else 0.0
         )
+        batch_requirements = _batch_requirement_pairs(
+            wallet_rows,
+            batch_window_sec=float(cfg["batch_window_sec"]),
+            default_min_order_usd=float(cfg["min_order_usd"]),
+            max_trade_fraction=float(cfg["max_leader_trade_budget_fraction"]),
+        )
+        batch_required_budgets = [required for required, _weight in batch_requirements]
+        batch_required_weights = [weight for _required, weight in batch_requirements]
 
         if buy_signals < int(cfg["min_buy_signals"]):
             status = "UNKNOWN"
@@ -315,12 +439,68 @@ def compute_economic_copyability_by_wallet(
             median_trade_fraction=round(median_trade_fraction, 8),
             mean_trade_fraction=round(mean_trade_fraction, 8),
             median_copy_amount_usd=round(median(copy_amounts), 6) if copy_amounts else 0.0,
+            required_bankroll_p95_signals_usd=round(_quantile(signal_required_budgets, 0.95), 2),
+            required_bankroll_p99_signals_usd=round(_quantile(signal_required_budgets, 0.99), 2),
+            required_bankroll_p95_batch_usd=round(_quantile(batch_required_budgets, 0.95), 2),
+            required_bankroll_p99_batch_usd=round(_quantile(batch_required_budgets, 0.99), 2),
+            required_bankroll_p95_volume_usd=round(
+                _weighted_quantile(batch_required_budgets, batch_required_weights, 0.95),
+                2,
+            ),
+            required_bankroll_p99_volume_usd=round(
+                _weighted_quantile(batch_required_budgets, batch_required_weights, 0.99),
+                2,
+            ),
             executable_ratio=round(executable_ratio, 6),
             batchable_ratio=round(batchable_ratio, 6),
             dust_ratio=round(dust_ratio, 6),
             status=status,
             reason=reason,
         )
+    return out
+
+
+def compute_budget_volume_coverage_by_wallet(
+    *,
+    config: dict[str, Any],
+    budget_by_wallet: dict[str, float],
+) -> dict[str, dict[str, float]]:
+    cfg = _metric_cfg(config)
+    if not cfg["enabled"] or not budget_by_wallet:
+        return {}
+
+    rows = _load_buy_observations(float(cfg["lookback_hours"]))
+    by_wallet: dict[str, list[dict[str, Any]]] = {}
+    for row in rows:
+        wallet = str(row.get("leader_wallet") or "").lower()
+        if wallet in budget_by_wallet:
+            by_wallet.setdefault(wallet, []).append(row)
+
+    out: dict[str, dict[str, float]] = {}
+    max_round_up_multiple = float(cfg["max_round_up_multiple"])
+    for wallet, wallet_rows in by_wallet.items():
+        requirements = _batch_requirement_pairs(
+            wallet_rows,
+            batch_window_sec=float(cfg["batch_window_sec"]),
+            default_min_order_usd=float(cfg["min_order_usd"]),
+            max_trade_fraction=float(cfg["max_leader_trade_budget_fraction"]),
+        )
+        budget = _safe_float(budget_by_wallet.get(wallet))
+        if max_round_up_multiple > 0:
+            roundup_requirements = [
+                (required / max_round_up_multiple, weight)
+                for required, weight in requirements
+            ]
+        else:
+            roundup_requirements = requirements
+        out[wallet] = {
+            "budget_usd": round(budget, 2),
+            "volume_coverage": round(_volume_coverage(requirements, budget), 6),
+            "volume_coverage_with_roundup": round(
+                _volume_coverage(roundup_requirements, budget),
+                6,
+            ),
+        }
     return out
 
 

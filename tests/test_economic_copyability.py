@@ -8,6 +8,7 @@ import execution.state_store as state_store
 from execution.signal_observation_store import init_signal_observation_table, log_signal_observation
 from signals.economic_copyability import (
     annotate_rows_with_economic_copyability,
+    compute_budget_volume_coverage_by_wallet,
     compute_economic_copyability_by_wallet,
 )
 
@@ -93,6 +94,10 @@ class EconomicCopyabilityTests(unittest.TestCase):
         self.assertEqual(metrics["copyable-wallet"].status, "PASS")
         self.assertAlmostEqual(metrics["copyable-wallet"].median_trade_fraction, 0.1)
         self.assertAlmostEqual(metrics["copyable-wallet"].mean_trade_fraction, 0.1)
+        self.assertAlmostEqual(
+            metrics["copyable-wallet"].required_bankroll_p95_volume_usd,
+            10.0,
+        )
 
         rows = [
             {"wallet": "dust-wallet", "eligible": True, "filter_reasons": ""},
@@ -141,6 +146,52 @@ class EconomicCopyabilityTests(unittest.TestCase):
         self.assertIn("trade fraction", metrics["spiky-wallet"].reason)
         self.assertAlmostEqual(metrics["spiky-wallet"].median_trade_fraction, 0.0005)
         self.assertAlmostEqual(metrics["spiky-wallet"].executable_ratio, 0.15)
+
+    def test_budget_volume_coverage_uses_trade_fraction_volume(self) -> None:
+        for idx in range(10):
+            self._log_buy(
+                wallet="mixed-wallet",
+                signal_id=f"large-{idx}",
+                token_id=f"large-token-{idx}",
+                target_budget_usd=20.0,
+                trade_notional_usd=10.0,
+                portfolio_value_usd=100.0,
+            )
+            self._log_buy(
+                wallet="mixed-wallet",
+                signal_id=f"small-{idx}",
+                token_id=f"small-token-{idx}",
+                target_budget_usd=20.0,
+                trade_notional_usd=1.0,
+                portfolio_value_usd=100.0,
+            )
+
+        config = {
+            "risk": {"min_order_size_usd": 1.0},
+            "sizing": {"max_min_order_round_up_multiple": 3.0},
+            "signal_batch_coalescer": {"window_sec": 30.0},
+            "economic_copyability": {
+                "enabled": True,
+                "lookback_hours": 168.0,
+                "min_buy_signals": 1,
+                "min_executable_ratio": 0.0,
+                "min_batchable_ratio": 0.0,
+            },
+        }
+
+        metrics = compute_economic_copyability_by_wallet(config=config)["mixed-wallet"]
+        coverage = compute_budget_volume_coverage_by_wallet(
+            config=config,
+            budget_by_wallet={"mixed-wallet": 10.0},
+        )["mixed-wallet"]
+
+        self.assertAlmostEqual(metrics.required_bankroll_p95_volume_usd, 100.0)
+        self.assertAlmostEqual(coverage["volume_coverage"], 10 / 11, places=6)
+        self.assertAlmostEqual(
+            coverage["volume_coverage_with_roundup"],
+            10 / 11,
+            places=6,
+        )
 
 
 if __name__ == "__main__":

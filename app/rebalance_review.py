@@ -19,8 +19,12 @@ if str(ROOT) not in sys.path:
 import app.build_live_universe_stable as stable_universe
 from app import final_portfolio_candidates_demo, multi_category_shortlist_demo, portfolio_allocation_demo
 from app.apply_rebalance_lifecycle import main as apply_rebalance_lifecycle
+from app.allocation_runtime import resolve_leader_budget_usd, resolve_total_capital_usd
 from execution.builder_auth import load_executor_config
-from signals.economic_copyability import annotate_rows_with_economic_copyability
+from signals.economic_copyability import (
+    annotate_rows_with_economic_copyability,
+    compute_budget_volume_coverage_by_wallet,
+)
 
 
 SHORTLIST_DIR = Path("data/shortlists")
@@ -83,6 +87,15 @@ REVIEW_COLUMNS = [
     "economic_copyability_median_trade_fraction",
     "economic_copyability_mean_trade_fraction",
     "economic_copyability_median_copy_amount_usd",
+    "economic_copyability_required_bankroll_p95_signals_usd",
+    "economic_copyability_required_bankroll_p99_signals_usd",
+    "economic_copyability_required_bankroll_p95_batch_usd",
+    "economic_copyability_required_bankroll_p99_batch_usd",
+    "economic_copyability_required_bankroll_p95_volume_usd",
+    "economic_copyability_required_bankroll_p99_volume_usd",
+    "economic_copyability_budget_usd",
+    "economic_copyability_volume_coverage",
+    "economic_copyability_volume_coverage_with_roundup",
     "economic_copyability_executable_now",
     "economic_copyability_executable_with_roundup",
     "economic_copyability_executable_after_batch",
@@ -189,12 +202,38 @@ def _manual_selection_reason(row: dict[str, Any], base_reason: str) -> str:
 
 def format_manual_candidate_line(index: int, row: dict[str, Any]) -> str:
     econ = ""
-    if str(row.get("economic_copyability_median_trade_fraction") or "").strip():
-        econ = (
-            " | econ med/avg "
-            f"{_safe_float(row.get('economic_copyability_median_trade_fraction')):.2%}/"
-            f"{_safe_float(row.get('economic_copyability_mean_trade_fraction')):.2%}"
+    has_econ = any(
+        str(row.get(key) or "").strip()
+        for key in (
+            "economic_copyability_median_trade_fraction",
+            "economic_copyability_required_bankroll_p95_volume_usd",
+            "economic_copyability_volume_coverage",
         )
+    )
+    if has_econ:
+        req95 = _safe_float(row.get("economic_copyability_required_bankroll_p95_volume_usd"))
+        req99 = _safe_float(row.get("economic_copyability_required_bankroll_p99_volume_usd"))
+        req = ""
+        if req95 > 0:
+            req = f" | req vol95 ${req95:.0f}"
+            if req99 > 0:
+                req += f" / vol99 ${req99:.0f}"
+        coverage = ""
+        if str(row.get("economic_copyability_volume_coverage") or "").strip():
+            coverage = (
+                " | current vol "
+                f"{_safe_float(row.get('economic_copyability_volume_coverage')):.0%}"
+                "/"
+                f"{_safe_float(row.get('economic_copyability_volume_coverage_with_roundup')):.0%} round"
+            )
+        fraction = ""
+        if str(row.get("economic_copyability_median_trade_fraction") or "").strip():
+            fraction = (
+                " | econ med/avg "
+                f"{_safe_float(row.get('economic_copyability_median_trade_fraction')):.2%}/"
+                f"{_safe_float(row.get('economic_copyability_mean_trade_fraction')):.2%}"
+            )
+        econ = f"{fraction}{req}{coverage}"
     line = (
         f"{index}. {row.get('user_name')} | WSS {row.get('final_wss')} | "
         f"copy {row.get('copyability_score')} | "
@@ -215,9 +254,11 @@ def format_manual_candidate_line(index: int, row: dict[str, Any]) -> str:
 
 def format_manual_candidate_button_label(index: int, row: dict[str, Any]) -> str:
     suffix = "" if _is_eligible(row) else " | ineligible"
+    req95 = _safe_float(row.get("economic_copyability_required_bankroll_p95_volume_usd"))
+    req = f" | req ${req95:.0f}" if req95 > 0 else ""
     return (
         f"{index}. {row.get('user_name')} | WSS {row.get('final_wss')} | "
-        f"copy {row.get('copyability_score')}{suffix}"
+        f"copy {row.get('copyability_score')}{req}{suffix}"
     )
 
 
@@ -469,6 +510,54 @@ def _apply_economic_copyability_annotations(config: dict[str, Any]) -> None:
         _write_csv(rows, path, _append_fieldnames(original_fieldnames, rows))
 
 
+def _review_total_capital_usd(config: dict[str, Any]) -> float:
+    try:
+        return resolve_total_capital_usd(
+            executor_config=config,
+            default=0.0,
+            allow_zero_collateral_balance=True,
+        )
+    except Exception:
+        return _safe_float(config.get("capital", {}).get("total_capital_usd"))
+
+
+def _annotate_budget_volume_coverage(
+    rows: list[dict[str, Any]],
+    *,
+    config: dict[str, Any],
+) -> list[dict[str, Any]]:
+    if not rows:
+        return rows
+    total_capital_usd = _review_total_capital_usd(config)
+    budget_by_wallet: dict[str, float] = {}
+    for row in rows:
+        wallet = str(row.get("wallet") or "").lower()
+        if not wallet:
+            continue
+        budget_by_wallet[wallet] = resolve_leader_budget_usd(
+            row,
+            total_capital_usd=total_capital_usd,
+        )
+
+    coverage_by_wallet = compute_budget_volume_coverage_by_wallet(
+        config=config,
+        budget_by_wallet=budget_by_wallet,
+    )
+    for row in rows:
+        wallet = str(row.get("wallet") or "").lower()
+        budget = budget_by_wallet.get(wallet)
+        if budget is not None:
+            row["economic_copyability_budget_usd"] = round(budget, 2)
+        coverage = coverage_by_wallet.get(wallet)
+        if not coverage:
+            continue
+        row["economic_copyability_volume_coverage"] = coverage["volume_coverage"]
+        row["economic_copyability_volume_coverage_with_roundup"] = coverage[
+            "volume_coverage_with_roundup"
+        ]
+    return rows
+
+
 def _copy_required(src: Path, dst: Path) -> None:
     if not src.exists():
         raise FileNotFoundError(f"Missing expected file: {src}")
@@ -533,9 +622,23 @@ def _summarize_live_rows(rows: list[dict[str, str]]) -> str:
         eligibility = ""
         if "eligible" in row and not _is_eligible(row):
             eligibility = " | manual ineligible"
+        copyability = ""
+        budget = _safe_float(row.get("economic_copyability_budget_usd"))
+        volume_coverage = _safe_float(row.get("economic_copyability_volume_coverage"))
+        volume_coverage_round = _safe_float(
+            row.get("economic_copyability_volume_coverage_with_roundup")
+        )
+        req95 = _safe_float(row.get("economic_copyability_required_bankroll_p95_volume_usd"))
+        if budget > 0 and (volume_coverage > 0 or volume_coverage_round > 0):
+            copyability = (
+                f" | budget ${budget:.0f} | vol {volume_coverage:.0%}"
+                f"/{volume_coverage_round:.0%} round"
+            )
+        elif req95 > 0:
+            copyability = f" | req vol95 ${req95:.0f}"
         lines.append(
             f"{idx}. {row.get('user_name')} | {row.get('category')} | "
-            f"WSS {row.get('final_wss')} | {weight:.2f}%{eligibility}"
+            f"WSS {row.get('final_wss')} | {weight:.2f}%{copyability}{eligibility}"
         )
     return "\n".join(lines)
 
@@ -570,6 +673,9 @@ def create_rebalance_review(*, refresh: bool = True) -> dict[str, Any]:
     )
 
     live_rows = _read_csv(paths["live"])
+    config = load_executor_config()
+    live_rows = _annotate_budget_volume_coverage(live_rows, config=config)
+    _write_csv(live_rows, paths["live"], _live_fieldnames(live_rows))
     review = {
         "review_id": review_id,
         "scoring_version": SCORING_VERSION,
@@ -641,6 +747,15 @@ def _live_fieldnames(rows: list[dict[str, Any]]) -> list[str]:
         "economic_copyability_trade_fraction_samples",
         "economic_copyability_median_trade_fraction",
         "economic_copyability_mean_trade_fraction",
+        "economic_copyability_required_bankroll_p95_signals_usd",
+        "economic_copyability_required_bankroll_p99_signals_usd",
+        "economic_copyability_required_bankroll_p95_batch_usd",
+        "economic_copyability_required_bankroll_p99_batch_usd",
+        "economic_copyability_required_bankroll_p95_volume_usd",
+        "economic_copyability_required_bankroll_p99_volume_usd",
+        "economic_copyability_budget_usd",
+        "economic_copyability_volume_coverage",
+        "economic_copyability_volume_coverage_with_roundup",
         "economic_copyability_reason",
         "days_since_last_trade",
         "median_spread",
@@ -765,6 +880,7 @@ def apply_manual_pick(
     live_row["all_categories"] = chosen.get("all_categories") or chosen.get("category")
     live_rows[replace_idx] = live_row
     live_rows = _reweight_live_rows(live_rows)
+    live_rows = _annotate_budget_volume_coverage(live_rows, config=load_executor_config())
     _write_csv(live_rows, live_path, _live_fieldnames(live_rows))
     _write_csv(
         [
@@ -855,6 +971,7 @@ def apply_manual_replacement(
     live_row["all_categories"] = chosen.get("all_categories") or chosen.get("category")
     live_rows[replace_idx] = live_row
     live_rows = _reweight_live_rows(live_rows)
+    live_rows = _annotate_budget_volume_coverage(live_rows, config=load_executor_config())
     _write_csv(live_rows, live_path, _live_fieldnames(live_rows))
     _write_csv(
         [

@@ -57,6 +57,24 @@ class RebalanceReviewTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "missing scoring columns"):
             rebalance_review._validate_review_rows(rows)
 
+    def test_live_summary_includes_budget_volume_coverage(self) -> None:
+        text = rebalance_review._summarize_live_rows(
+            [
+                {
+                    "user_name": "Copyable",
+                    "category": "SPORTS",
+                    "final_wss": "70",
+                    "weight": "0.5",
+                    "economic_copyability_budget_usd": "75",
+                    "economic_copyability_volume_coverage": "0.82",
+                    "economic_copyability_volume_coverage_with_roundup": "0.94",
+                }
+            ]
+        )
+
+        self.assertIn("budget $75", text)
+        self.assertIn("vol 82%/94% round", text)
+
     def test_manual_pick_replaces_category_and_reweights(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

@@ -213,6 +213,12 @@ def save_csv(rows: list[dict], path: Path) -> None:
         "economic_copyability_median_trade_fraction",
         "economic_copyability_mean_trade_fraction",
         "economic_copyability_median_copy_amount_usd",
+        "economic_copyability_required_bankroll_p95_signals_usd",
+        "economic_copyability_required_bankroll_p99_signals_usd",
+        "economic_copyability_required_bankroll_p95_batch_usd",
+        "economic_copyability_required_bankroll_p99_batch_usd",
+        "economic_copyability_required_bankroll_p95_volume_usd",
+        "economic_copyability_required_bankroll_p99_volume_usd",
         "days_since_last_trade",
         "median_spread",
         "slippage_proxy",
@@ -279,6 +285,30 @@ def save_csv(rows: list[dict], path: Path) -> None:
                     ),
                     "economic_copyability_median_copy_amount_usd": row.get(
                         "economic_copyability_median_copy_amount_usd",
+                        "",
+                    ),
+                    "economic_copyability_required_bankroll_p95_signals_usd": row.get(
+                        "economic_copyability_required_bankroll_p95_signals_usd",
+                        "",
+                    ),
+                    "economic_copyability_required_bankroll_p99_signals_usd": row.get(
+                        "economic_copyability_required_bankroll_p99_signals_usd",
+                        "",
+                    ),
+                    "economic_copyability_required_bankroll_p95_batch_usd": row.get(
+                        "economic_copyability_required_bankroll_p95_batch_usd",
+                        "",
+                    ),
+                    "economic_copyability_required_bankroll_p99_batch_usd": row.get(
+                        "economic_copyability_required_bankroll_p99_batch_usd",
+                        "",
+                    ),
+                    "economic_copyability_required_bankroll_p95_volume_usd": row.get(
+                        "economic_copyability_required_bankroll_p95_volume_usd",
+                        "",
+                    ),
+                    "economic_copyability_required_bankroll_p99_volume_usd": row.get(
+                        "economic_copyability_required_bankroll_p99_volume_usd",
                         "",
                     ),
                     "days_since_last_trade": row.get("days_since_last_trade", ""),
