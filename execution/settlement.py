@@ -87,6 +87,9 @@ class SettlementCandidate:
     exchange_position_present: bool | None
 
 
+LOCAL_LOSER_CONDITION_PREFIX = "local-loser-token:"
+
+
 def _safe_float(value: Any) -> float | None:
     try:
         return float(value) if value is not None else None
@@ -489,11 +492,13 @@ def build_settlement_candidates(
 
         token_id = str(marked.get("token_id") or "")
         market = market_lookup(token_id)
+        settlement_price = _safe_float(marked.get("settlement_price"))
         condition_id = str((market or {}).get("condition_id") or "").strip()
+        if not condition_id and settlement_price == 0.0:
+            condition_id = f"{LOCAL_LOSER_CONDITION_PREFIX}{token_id}"
         if not condition_id:
             continue
 
-        settlement_price = _safe_float(marked.get("settlement_price"))
         position_usd = _safe_float(marked.get("position_usd")) or 0.0
         avg_entry_price = _safe_float(marked.get("avg_entry_price"))
         qty = _safe_float(marked.get("qty"))
@@ -558,6 +563,12 @@ def build_settlement_candidates(
         )
     rows.sort(key=lambda row: row.expected_payout_usd, reverse=True)
     return rows
+
+
+def _candidate_requires_redeem(candidate: SettlementCandidate) -> bool:
+    if candidate.condition_id.startswith(LOCAL_LOSER_CONDITION_PREFIX):
+        return False
+    return any(position.settlement_price > 0 for position in candidate.positions)
 
 
 def _finalize_candidate(
@@ -868,6 +879,31 @@ def run_settlement_cycle(
                 mode=mode,
                 status="PAPER_SETTLED",
                 reason="paper settlement applied",
+                expected_payout_usd=candidate.expected_payout_usd,
+                position_count=len(candidate.positions),
+                raw_response={
+                    "candidate": asdict(candidate),
+                    "finalized": finalized,
+                },
+            )
+            closed_rows += finalized["closed_rows"]
+            processed += 1
+            continue
+
+        if not _candidate_requires_redeem(candidate):
+            finalized = _finalize_candidate(
+                config=config,
+                candidate=candidate,
+                mode="LIVE_EXTERNAL",
+            )
+            record_processed_settlement(
+                candidate.condition_id,
+                market_slug=candidate.market_slug,
+                question=candidate.question,
+                token_ids=candidate.token_ids,
+                mode=mode,
+                status="LIVE_EXTERNAL_SETTLED",
+                reason="resolved losing token has no redeemable payout; finalized local position",
                 expected_payout_usd=candidate.expected_payout_usd,
                 position_count=len(candidate.positions),
                 raw_response={

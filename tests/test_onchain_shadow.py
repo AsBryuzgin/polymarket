@@ -17,6 +17,7 @@ from execution.onchain_shadow import (
     _decode_orders_matched_log,
     init_onchain_shadow_tables,
     list_recent_onchain_shadow_trades,
+    onchain_shadow_summary,
     _rpc_url_label,
     poll_onchain_shadow_once,
 )
@@ -362,6 +363,80 @@ class OnchainShadowTests(unittest.TestCase):
         self.assertAlmostEqual(trades[0]["size"], 30.0)
         self.assertAlmostEqual(trades[0]["price"], 0.5)
         self.assertEqual(trades[0]["rawFills"], 2)
+
+    def test_summary_counts_deduped_trade_groups_not_raw_rows(self) -> None:
+        leader = "0x1234567890abcdef1234567890abcdef12345678"
+        token_id = "12345"
+        block_timestamp = int(time.time()) - 10
+
+        with tempfile.TemporaryDirectory() as tmp:
+            state_store.DB_PATH = Path(tmp) / "executor_state.db"
+            state_store.init_db()
+            init_onchain_shadow_tables()
+            conn = state_store.get_connection()
+            cur = conn.cursor()
+            rows = [
+                (10, "0xorder-a", 10.0, 5.0, "5000000", "10000000"),
+                (11, "0xorder-a", 10.0, 5.0, "5000000", "10000000"),
+                (12, "0xorder-b", 20.0, 10.0, "10000000", "20000000"),
+            ]
+            cur.executemany(
+                """
+                INSERT INTO onchain_shadow_fills (
+                    exchange_address,
+                    transaction_hash,
+                    log_index,
+                    block_number,
+                    block_timestamp,
+                    leader_wallet,
+                    order_hash,
+                    side,
+                    token_id,
+                    size,
+                    price,
+                    notional_usd,
+                    maker_asset_id,
+                    taker_asset_id,
+                    maker_amount_filled,
+                    taker_amount_filled,
+                    observed_at,
+                    raw_log_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), ?)
+                """,
+                [
+                    (
+                        "0xe111180000d2663c0091e4f400237545b87b996b",
+                        "0xtx",
+                        log_index,
+                        100,
+                        block_timestamp,
+                        leader.lower(),
+                        order_hash,
+                        "BUY",
+                        token_id,
+                        size,
+                        0.5,
+                        notional,
+                        "0",
+                        token_id,
+                        maker_amount,
+                        taker_amount,
+                        "{}",
+                    )
+                    for log_index, order_hash, size, notional, maker_amount, taker_amount in rows
+                ],
+            )
+            conn.commit()
+            conn.close()
+
+            summary = onchain_shadow_summary(hours=24)
+
+        self.assertEqual(summary["fills"], 1)
+        self.assertEqual(summary["transactions"], 1)
+        self.assertEqual(summary["tokens"], 1)
+        self.assertEqual(summary["raw_rows"], 3)
+        self.assertAlmostEqual(summary["notional_usd"], 15.0)
+        self.assertEqual(summary["by_leader"][0]["fills"], 1)
 
 
 if __name__ == "__main__":

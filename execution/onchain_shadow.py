@@ -940,10 +940,75 @@ def onchain_shadow_summary(*, hours: int = 24) -> dict[str, Any]:
     init_onchain_shadow_tables()
     conn = get_connection()
     cur = conn.cursor()
+    deduped_cte = """
+        WITH deduped_fills AS (
+            SELECT
+                leader_wallet,
+                transaction_hash,
+                token_id,
+                side,
+                MAX(
+                    COALESCE(
+                        block_timestamp,
+                        data_api_trade_timestamp,
+                        CAST(strftime('%s', observed_at) AS INTEGER)
+                    )
+                ) AS trade_timestamp,
+                MIN(observed_at) AS observed_at,
+                MIN(data_api_seen_at) AS data_api_seen_at,
+                MAX(block_timestamp) AS block_timestamp,
+                MAX(data_api_trade_timestamp) AS data_api_trade_timestamp,
+                MAX(size) AS size,
+                MAX(notional_usd) AS notional_usd,
+                COUNT(*) AS duplicate_rows
+            FROM onchain_shadow_fills
+            WHERE datetime(observed_at) >= datetime('now', ?)
+              AND transaction_hash IS NOT NULL
+              AND transaction_hash != ''
+              AND token_id IS NOT NULL
+              AND token_id != ''
+              AND side IN ('BUY', 'SELL')
+            GROUP BY
+                leader_wallet,
+                transaction_hash,
+                token_id,
+                side,
+                COALESCE(order_hash, ''),
+                COALESCE(maker_asset_id, ''),
+                COALESCE(taker_asset_id, ''),
+                COALESCE(maker_amount_filled, ''),
+                COALESCE(taker_amount_filled, ''),
+                ROUND(COALESCE(size, 0), 12),
+                ROUND(COALESCE(notional_usd, 0), 12)
+        ),
+        trade_groups AS (
+            SELECT
+                leader_wallet,
+                transaction_hash,
+                token_id,
+                side,
+                MAX(trade_timestamp) AS trade_timestamp,
+                MIN(observed_at) AS observed_at,
+                MIN(data_api_seen_at) AS data_api_seen_at,
+                MAX(block_timestamp) AS block_timestamp,
+                MAX(data_api_trade_timestamp) AS data_api_trade_timestamp,
+                SUM(size) AS size,
+                SUM(notional_usd) AS notional_usd,
+                COUNT(*) AS unique_fills,
+                SUM(duplicate_rows) AS raw_rows
+            FROM deduped_fills
+            GROUP BY leader_wallet, transaction_hash, token_id, side
+        )
+    """
     cur.execute(
-        """
+        deduped_cte
+        + """
         SELECT
             COUNT(*) AS fills,
+            COUNT(DISTINCT transaction_hash) AS transactions,
+            COUNT(DISTINCT token_id) AS tokens,
+            SUM(COALESCE(notional_usd, 0)) AS notional_usd,
+            SUM(COALESCE(raw_rows, 0)) AS raw_rows,
             SUM(CASE WHEN data_api_seen_at IS NOT NULL THEN 1 ELSE 0 END) AS matched,
             SUM(CASE WHEN data_api_seen_at IS NULL THEN 1 ELSE 0 END) AS unmatched,
             AVG(
@@ -953,17 +1018,23 @@ def onchain_shadow_summary(*, hours: int = 24) -> dict[str, Any]:
                     ELSE NULL
                 END
             ) AS avg_data_api_lag_sec
-        FROM onchain_shadow_fills
-        WHERE datetime(observed_at) >= datetime('now', ?)
+        FROM trade_groups
         """,
         (f"-{int(hours)} hours",),
     )
     row = dict(cur.fetchone() or {})
     cur.execute(
-        """
-        SELECT leader_wallet, side, COUNT(*) AS fills
-        FROM onchain_shadow_fills
-        WHERE datetime(observed_at) >= datetime('now', ?)
+        deduped_cte
+        + """
+        SELECT
+            leader_wallet,
+            side,
+            COUNT(*) AS fills,
+            COUNT(DISTINCT transaction_hash) AS transactions,
+            COUNT(DISTINCT token_id) AS tokens,
+            SUM(COALESCE(notional_usd, 0)) AS notional_usd,
+            SUM(COALESCE(raw_rows, 0)) AS raw_rows
+        FROM trade_groups
         GROUP BY leader_wallet, side
         ORDER BY fills DESC
         LIMIT 20
@@ -975,6 +1046,10 @@ def onchain_shadow_summary(*, hours: int = 24) -> dict[str, Any]:
     return {
         "hours": hours,
         "fills": _safe_int(row.get("fills")),
+        "transactions": _safe_int(row.get("transactions")),
+        "tokens": _safe_int(row.get("tokens")),
+        "notional_usd": round(_safe_float(row.get("notional_usd")), 6),
+        "raw_rows": _safe_int(row.get("raw_rows")),
         "matched_data_api": _safe_int(row.get("matched")),
         "unmatched_data_api": _safe_int(row.get("unmatched")),
         "avg_data_api_lag_sec": (

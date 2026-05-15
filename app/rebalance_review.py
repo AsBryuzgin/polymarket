@@ -562,17 +562,96 @@ def _capital_required_p95_volume(row: dict[str, Any]) -> float:
     return _safe_float(row.get("economic_copyability_required_bankroll_p95_volume_usd"))
 
 
-def _capital_copy_rank(row: dict[str, Any], *, total_capital_usd: float) -> tuple[float, float, float]:
+def _capital_copy_rank(row: dict[str, Any], *, total_capital_usd: float) -> tuple[float, float, float, float, float]:
     required = _capital_required_p95_volume(row)
-    affordability = total_capital_usd / required if required > 0 else 0.0
+    affordability = min(total_capital_usd / required, 1.0) if required > 0 else 0.0
+    status = str(row.get("economic_copyability_status") or "").upper()
+    status_score = {"PASS": 1.0, "UNKNOWN": 0.35, "FAIL": -1.0}.get(status, 0.0)
+    wss = _safe_float(row.get("final_wss")) / 100.0
+    batchable = _safe_float(row.get("economic_copyability_batchable_ratio"))
+    executable = _safe_float(row.get("economic_copyability_executable_ratio"))
+    dust = _safe_float(row.get("economic_copyability_dust_ratio"))
+    score = (
+        0.36 * wss
+        + 0.24 * batchable
+        + 0.16 * executable
+        + 0.14 * affordability
+        + 0.10 * status_score
+        - 0.12 * dust
+    )
     return (
+        score,
+        status_score,
+        batchable,
+        executable,
         affordability,
-        1.0 if required > 0 else 0.0,
-        _safe_float(row.get("final_wss")),
     )
 
 
-def _capital_fit_note(
+def _capital_capacity_summary(
+    rows: list[dict[str, Any]],
+    *,
+    total_capital_usd: float,
+) -> dict[str, Any]:
+    budgets = [max(resolve_leader_budget_usd(row, total_capital_usd=total_capital_usd), 0.0) for row in rows]
+    budget_total = sum(budgets)
+
+    def weighted_average(key: str) -> float:
+        if budget_total <= 0:
+            return 0.0
+        return sum(
+            budget * max(_safe_float(row.get(key)), 0.0)
+            for row, budget in zip(rows, budgets)
+        ) / budget_total
+
+    unknown = sum(
+        1
+        for row in rows
+        if str(row.get("economic_copyability_status") or "").upper() == "UNKNOWN"
+    )
+    failures = sum(
+        1
+        for row in rows
+        if str(row.get("economic_copyability_status") or "").upper() == "FAIL"
+    )
+    return {
+        "leader_count": len(rows),
+        "total_capital_usd": round(total_capital_usd, 2),
+        "allocated_budget_usd": round(budget_total, 2),
+        "executable_ratio": round(weighted_average("economic_copyability_executable_ratio"), 6),
+        "batchable_ratio": round(weighted_average("economic_copyability_batchable_ratio"), 6),
+        "dust_ratio": round(weighted_average("economic_copyability_dust_ratio"), 6),
+        "volume_coverage": round(weighted_average("economic_copyability_volume_coverage"), 6),
+        "volume_coverage_with_roundup": round(
+            weighted_average("economic_copyability_volume_coverage_with_roundup"),
+            6,
+        ),
+        "estimated_idle_ratio": round(
+            max(0.0, 1.0 - weighted_average("economic_copyability_volume_coverage_with_roundup")),
+            6,
+        ),
+        "unknown_leaders": unknown,
+        "failed_leaders": failures,
+    }
+
+
+def _capital_summary_text(summary: dict[str, Any] | None) -> str:
+    if not summary:
+        return ""
+    return (
+        "Ожидаемая копируемость при текущем банкролле:\n"
+        f"leaders: {summary.get('leader_count')} | "
+        f"allocated: ${_safe_float(summary.get('allocated_budget_usd')):.0f} / "
+        f"${_safe_float(summary.get('total_capital_usd')):.0f}\n"
+        f">= min сейчас: {_safe_float(summary.get('executable_ratio')):.0%} | "
+        f"после short batch: {_safe_float(summary.get('batchable_ratio')):.0%}\n"
+        f"volume coverage: {_safe_float(summary.get('volume_coverage')):.0%} | "
+        f"с round-up: {_safe_float(summary.get('volume_coverage_with_roundup')):.0%}\n"
+        f"примерно простаивает/dust: {_safe_float(summary.get('estimated_idle_ratio')):.0%}"
+    )
+
+
+def _strict_capital_fit_note(
     rows: list[dict[str, Any]],
     *,
     total_capital_usd: float,
@@ -595,28 +674,13 @@ def _capital_fit_note(
     return None
 
 
-def _capital_prune_live_rows(
+def _strict_capital_prune_live_rows(
     rows: list[dict[str, Any]],
     *,
     config: dict[str, Any],
-) -> tuple[list[dict[str, Any]], str]:
-    if not rows:
-        return rows, ""
-
+    total_capital_usd: float,
+) -> tuple[list[dict[str, Any]], str, dict[str, Any]]:
     cfg = config.get("economic_copyability", {})
-    enabled = str(cfg.get("capital_aware_rebalance", "true")).strip().lower() not in {
-        "0",
-        "false",
-        "no",
-        "off",
-    }
-    if not enabled:
-        return rows, ""
-
-    total_capital_usd = _review_total_capital_usd(config)
-    if total_capital_usd <= 0:
-        return rows, ""
-
     min_live_leaders = max(1, _safe_int(cfg.get("min_live_leaders"), 1))
     ranked = sorted(
         (dict(row) for row in rows),
@@ -628,30 +692,170 @@ def _capital_prune_live_rows(
     best_subset: list[dict[str, Any]] | None = None
     best_note = ""
     for size in range(original_count, min_live_leaders - 1, -1):
-        subset = _reweight_live_rows([dict(row) for row in ranked[:size]])
-        note = _capital_fit_note(subset, total_capital_usd=total_capital_usd)
+        subset = _annotate_budget_volume_coverage(
+            _reweight_live_rows([dict(row) for row in ranked[:size]]),
+            config=config,
+        )
+        note = _strict_capital_fit_note(subset, total_capital_usd=total_capital_usd)
         if note is None:
             best_subset = subset
             break
         best_note = note
 
     if best_subset is None:
-        best_subset = _reweight_live_rows([dict(ranked[0])])
-        note = _capital_fit_note(best_subset, total_capital_usd=total_capital_usd)
+        best_subset = _annotate_budget_volume_coverage(
+            _reweight_live_rows([dict(ranked[0])]),
+            config=config,
+        )
+        note = _strict_capital_fit_note(best_subset, total_capital_usd=total_capital_usd)
         if note:
             best_note = note
 
+    summary = _capital_capacity_summary(best_subset, total_capital_usd=total_capital_usd)
     if len(best_subset) == original_count:
-        return best_subset, ""
+        return best_subset, "", summary
 
     return (
         best_subset,
         (
-            "Capital-aware pruning: "
+            "Capital-aware strict pruning: "
             f"${total_capital_usd:.0f} bankroll reduced proposed universe "
             f"from {original_count} to {len(best_subset)} leader(s). "
             f"{best_note}"
         ),
+        summary,
+    )
+
+
+def _balanced_subset_score(
+    rows: list[dict[str, Any]],
+    *,
+    total_capital_usd: float,
+    target_live_leaders: int,
+) -> tuple[float, dict[str, Any]]:
+    summary = _capital_capacity_summary(rows, total_capital_usd=total_capital_usd)
+    avg_wss = (
+        sum(_safe_float(row.get("final_wss")) for row in rows) / len(rows)
+        if rows
+        else 0.0
+    )
+    count_score = 1.0 - min(
+        abs(len(rows) - target_live_leaders) / max(target_live_leaders, 1),
+        1.0,
+    )
+    score = (
+        0.30 * (avg_wss / 100.0)
+        + 0.25 * _safe_float(summary.get("volume_coverage_with_roundup"))
+        + 0.18 * _safe_float(summary.get("batchable_ratio"))
+        + 0.12 * _safe_float(summary.get("executable_ratio"))
+        + 0.15 * count_score
+        - 0.16 * _safe_float(summary.get("dust_ratio"))
+        - 0.12 * _safe_float(summary.get("unknown_leaders")) / max(len(rows), 1)
+        - 0.50 * _safe_float(summary.get("failed_leaders")) / max(len(rows), 1)
+    )
+    return score, summary
+
+
+def _balanced_capital_select_live_rows(
+    rows: list[dict[str, Any]],
+    *,
+    config: dict[str, Any],
+    total_capital_usd: float,
+) -> tuple[list[dict[str, Any]], str, dict[str, Any]]:
+    cfg = config.get("economic_copyability", {})
+    original_count = len(rows)
+    min_live_leaders = max(1, _safe_int(cfg.get("min_live_leaders"), 2))
+    target_live_leaders = max(
+        min_live_leaders,
+        _safe_int(cfg.get("target_live_leaders"), _safe_int(cfg.get("preferred_live_leaders"), 3)),
+    )
+    max_live_leaders = max(
+        min_live_leaders,
+        _safe_int(cfg.get("max_live_leaders"), target_live_leaders),
+    )
+    max_live_leaders = min(max_live_leaders, original_count)
+    min_live_leaders = min(min_live_leaders, max_live_leaders)
+
+    ranked = sorted(
+        (dict(row) for row in rows),
+        key=lambda row: _capital_copy_rank(row, total_capital_usd=total_capital_usd),
+        reverse=True,
+    )
+    best_rows: list[dict[str, Any]] | None = None
+    best_summary: dict[str, Any] = {}
+    best_score = float("-inf")
+
+    for size in range(min_live_leaders, max_live_leaders + 1):
+        subset = _annotate_budget_volume_coverage(
+            _reweight_live_rows([dict(row) for row in ranked[:size]]),
+            config=config,
+        )
+        score, summary = _balanced_subset_score(
+            subset,
+            total_capital_usd=total_capital_usd,
+            target_live_leaders=target_live_leaders,
+        )
+        if score > best_score:
+            best_score = score
+            best_rows = subset
+            best_summary = summary
+
+    assert best_rows is not None
+    note_parts = [
+        "Capital-aware balanced selection: "
+        f"${total_capital_usd:.0f} bankroll chose {len(best_rows)} of {original_count} leader(s)"
+    ]
+    if len(best_rows) != original_count:
+        note_parts.append("instead of requiring strict p95 fit for every leader")
+    note_parts.append(
+        "volume coverage "
+        f"{_safe_float(best_summary.get('volume_coverage')):.0%}/"
+        f"{_safe_float(best_summary.get('volume_coverage_with_roundup')):.0%} with round-up"
+    )
+    note_parts.append(
+        "batchable "
+        f"{_safe_float(best_summary.get('batchable_ratio')):.0%}; "
+        "estimated idle/dust "
+        f"{_safe_float(best_summary.get('estimated_idle_ratio')):.0%}"
+    )
+    return best_rows, "; ".join(note_parts) + ".", best_summary
+
+
+def _capital_prune_live_rows(
+    rows: list[dict[str, Any]],
+    *,
+    config: dict[str, Any],
+) -> tuple[list[dict[str, Any]], str, dict[str, Any]]:
+    if not rows:
+        return rows, "", {}
+
+    cfg = config.get("economic_copyability", {})
+    enabled = str(cfg.get("capital_aware_rebalance", "true")).strip().lower() not in {
+        "0",
+        "false",
+        "no",
+        "off",
+    }
+    if not enabled:
+        annotated = _annotate_budget_volume_coverage(rows, config=config)
+        return annotated, "", {}
+
+    total_capital_usd = _review_total_capital_usd(config)
+    if total_capital_usd <= 0:
+        annotated = _annotate_budget_volume_coverage(rows, config=config)
+        return annotated, "", {}
+
+    mode = str(cfg.get("capital_aware_rebalance_mode") or "balanced").strip().lower()
+    if mode == "strict":
+        return _strict_capital_prune_live_rows(
+            rows,
+            config=config,
+            total_capital_usd=total_capital_usd,
+        )
+    return _balanced_capital_select_live_rows(
+        rows,
+        config=config,
+        total_capital_usd=total_capital_usd,
     )
 
 
@@ -771,8 +975,10 @@ def create_rebalance_review(*, refresh: bool = True) -> dict[str, Any]:
 
     live_rows = _read_csv(paths["live"])
     config = load_executor_config()
-    live_rows, capital_pruning_note = _capital_prune_live_rows(live_rows, config=config)
-    live_rows = _annotate_budget_volume_coverage(live_rows, config=config)
+    live_rows, capital_pruning_note, capital_fit_summary = _capital_prune_live_rows(
+        live_rows,
+        config=config,
+    )
     _write_csv(live_rows, paths["live"], _live_fieldnames(live_rows))
     review = {
         "review_id": review_id,
@@ -783,6 +989,7 @@ def create_rebalance_review(*, refresh: bool = True) -> dict[str, Any]:
         "files": {key: str(path) for key, path in paths.items() if key != "root"},
         "proposed_live": live_rows,
         "capital_pruning_note": capital_pruning_note,
+        "capital_fit_summary": capital_fit_summary,
         "refresh_log_tail": refresh_log[-4000:],
         "preview_log_tail": preview_log[-4000:],
     }
@@ -810,12 +1017,15 @@ def _set_pending_review(review: dict[str, Any]) -> None:
 def build_review_message(review: dict[str, Any]) -> str:
     pruning = str(review.get("capital_pruning_note") or "").strip()
     pruning_text = f"\n\n{pruning}" if pruning else ""
+    capital_summary = _capital_summary_text(review.get("capital_fit_summary"))
+    capital_summary_text = f"\n\n{capital_summary}" if capital_summary else ""
     return (
         "Rebalance review готов\n"
         f"id: {review['review_id']}\n\n"
         "Предложенный live-universe:\n"
         f"{_summarize_live_rows(review.get('proposed_live') or [])}"
         f"{pruning_text}\n\n"
+        f"{capital_summary_text}\n\n"
         "Файлы с top-30 и формулами приложены. Execution не меняется до подтверждения."
     )
 
@@ -982,11 +1192,11 @@ def apply_manual_pick(
     live_row["all_categories"] = chosen.get("all_categories") or chosen.get("category")
     live_rows[replace_idx] = live_row
     live_rows = _reweight_live_rows(live_rows)
-    live_rows, capital_pruning_note = _capital_prune_live_rows(
+    config = load_executor_config()
+    live_rows, capital_pruning_note, capital_fit_summary = _capital_prune_live_rows(
         live_rows,
-        config=load_executor_config(),
+        config=config,
     )
-    live_rows = _annotate_budget_volume_coverage(live_rows, config=load_executor_config())
     _write_csv(live_rows, live_path, _live_fieldnames(live_rows))
     _write_csv(
         [
@@ -1023,6 +1233,7 @@ def apply_manual_pick(
     }
     review["proposed_live"] = live_rows
     review["capital_pruning_note"] = capital_pruning_note
+    review["capital_fit_summary"] = capital_fit_summary
     _set_pending_review(review)
 
     return {
@@ -1078,11 +1289,11 @@ def apply_manual_replacement(
     live_row["all_categories"] = chosen.get("all_categories") or chosen.get("category")
     live_rows[replace_idx] = live_row
     live_rows = _reweight_live_rows(live_rows)
-    live_rows, capital_pruning_note = _capital_prune_live_rows(
+    config = load_executor_config()
+    live_rows, capital_pruning_note, capital_fit_summary = _capital_prune_live_rows(
         live_rows,
-        config=load_executor_config(),
+        config=config,
     )
-    live_rows = _annotate_budget_volume_coverage(live_rows, config=load_executor_config())
     _write_csv(live_rows, live_path, _live_fieldnames(live_rows))
     _write_csv(
         [
@@ -1122,6 +1333,7 @@ def apply_manual_replacement(
     }
     review["proposed_live"] = live_rows
     review["capital_pruning_note"] = capital_pruning_note
+    review["capital_fit_summary"] = capital_fit_summary
     _set_pending_review(review)
 
     return {

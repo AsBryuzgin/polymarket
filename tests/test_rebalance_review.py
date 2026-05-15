@@ -75,7 +75,7 @@ class RebalanceReviewTests(unittest.TestCase):
         self.assertIn("budget $75", text)
         self.assertIn("vol 82%/94% round", text)
 
-    def test_capital_pruning_reduces_universe_when_bankroll_is_too_small(self) -> None:
+    def test_strict_capital_pruning_reduces_universe_when_bankroll_is_too_small(self) -> None:
         rows = [
             {
                 "user_name": "A",
@@ -103,11 +103,14 @@ class RebalanceReviewTests(unittest.TestCase):
             },
         ]
 
-        pruned, note = rebalance_review._capital_prune_live_rows(
+        pruned, note, summary = rebalance_review._capital_prune_live_rows(
             rows,
             config={
                 "capital": {"total_capital_usd": 160.0},
-                "economic_copyability": {"capital_aware_rebalance": True},
+                "economic_copyability": {
+                    "capital_aware_rebalance": True,
+                    "capital_aware_rebalance_mode": "strict",
+                },
             },
         )
 
@@ -115,6 +118,88 @@ class RebalanceReviewTests(unittest.TestCase):
         self.assertEqual(pruned[0]["user_name"], "A")
         self.assertEqual(pruned[0]["weight"], 1.0)
         self.assertIn("reduced proposed universe from 3 to 1", note)
+        self.assertEqual(summary["leader_count"], 1)
+
+    def test_balanced_capital_selection_keeps_compromise_universe(self) -> None:
+        rows = [
+            {
+                "user_name": "StrongSmall",
+                "wallet": "wallet-a",
+                "category": "SPORTS",
+                "final_wss": "80",
+                "weight": "0.34",
+                "economic_copyability_status": "PASS",
+                "economic_copyability_executable_ratio": "0.35",
+                "economic_copyability_batchable_ratio": "0.70",
+                "economic_copyability_dust_ratio": "0.20",
+                "economic_copyability_required_bankroll_p95_volume_usd": "400",
+            },
+            {
+                "user_name": "GoodSmall",
+                "wallet": "wallet-b",
+                "category": "CULTURE",
+                "final_wss": "76",
+                "weight": "0.33",
+                "economic_copyability_status": "PASS",
+                "economic_copyability_executable_ratio": "0.20",
+                "economic_copyability_batchable_ratio": "0.55",
+                "economic_copyability_dust_ratio": "0.30",
+                "economic_copyability_required_bankroll_p95_volume_usd": "700",
+            },
+            {
+                "user_name": "Huge",
+                "wallet": "wallet-c",
+                "category": "POLITICS",
+                "final_wss": "78",
+                "weight": "0.33",
+                "economic_copyability_status": "PASS",
+                "economic_copyability_executable_ratio": "0.02",
+                "economic_copyability_batchable_ratio": "0.08",
+                "economic_copyability_dust_ratio": "0.90",
+                "economic_copyability_required_bankroll_p95_volume_usd": "2000",
+            },
+        ]
+
+        with patch.object(
+            rebalance_review,
+            "compute_budget_volume_coverage_by_wallet",
+            return_value={
+                "wallet-a": {
+                    "budget_usd": 80.0,
+                    "volume_coverage": 0.25,
+                    "volume_coverage_with_roundup": 0.55,
+                },
+                "wallet-b": {
+                    "budget_usd": 80.0,
+                    "volume_coverage": 0.18,
+                    "volume_coverage_with_roundup": 0.42,
+                },
+                "wallet-c": {
+                    "budget_usd": 0.0,
+                    "volume_coverage": 0.01,
+                    "volume_coverage_with_roundup": 0.05,
+                },
+            },
+        ):
+            selected, note, summary = rebalance_review._capital_prune_live_rows(
+                rows,
+                config={
+                    "capital": {"total_capital_usd": 160.0},
+                    "economic_copyability": {
+                        "capital_aware_rebalance": True,
+                        "capital_aware_rebalance_mode": "balanced",
+                        "min_live_leaders": 2,
+                        "target_live_leaders": 2,
+                        "max_live_leaders": 3,
+                    },
+                },
+            )
+
+        self.assertEqual(len(selected), 2)
+        self.assertEqual([row["user_name"] for row in selected], ["StrongSmall", "GoodSmall"])
+        self.assertIn("balanced selection", note)
+        self.assertEqual(summary["leader_count"], 2)
+        self.assertGreater(summary["volume_coverage_with_roundup"], 0)
 
     def test_review_message_includes_capital_pruning_note(self) -> None:
         text = rebalance_review.build_review_message(
@@ -129,10 +214,22 @@ class RebalanceReviewTests(unittest.TestCase):
                     }
                 ],
                 "capital_pruning_note": "Capital-aware pruning: test note",
+                "capital_fit_summary": {
+                    "leader_count": 1,
+                    "total_capital_usd": 160,
+                    "allocated_budget_usd": 160,
+                    "executable_ratio": 0.2,
+                    "batchable_ratio": 0.5,
+                    "volume_coverage": 0.3,
+                    "volume_coverage_with_roundup": 0.6,
+                    "estimated_idle_ratio": 0.4,
+                },
             }
         )
 
         self.assertIn("Capital-aware pruning: test note", text)
+        self.assertIn("Ожидаемая копируемость", text)
+        self.assertIn("после short batch: 50%", text)
 
     def test_manual_pick_replaces_category_and_reweights(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

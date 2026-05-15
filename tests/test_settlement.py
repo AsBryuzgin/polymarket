@@ -143,6 +143,74 @@ class SettlementTests(unittest.TestCase):
             self.assertEqual(history[0]["side"], "SELL")
             self.assertAlmostEqual(float(history[0]["realized_pnl_usd"]), 5.0, places=6)
 
+    def test_paper_settlement_closes_resolved_loser_without_condition_id(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            state_store.DB_PATH = Path(tmp) / "executor_state.db"
+            init_db()
+            upsert_buy_position(
+                leader_wallet="wallet1",
+                token_id="tokenA",
+                amount_usd=5.0,
+                entry_price=0.5,
+                signal_id="sig-entry",
+            )
+            upsert_leader_registry_row(
+                wallet="wallet1",
+                category="CULTURE",
+                user_name="dudukos",
+                leader_status="EXIT_ONLY",
+                target_weight=0.0,
+                target_budget_usd=0.0,
+                grace_until=None,
+                source_tag="test",
+            )
+
+            def fake_mark_position(position, **_kwargs):  # type: ignore[no-untyped-def]
+                return {
+                    **position,
+                    "qty": 10.0,
+                    "snapshot_status": "SETTLED",
+                    "mark_source": "SETTLEMENT",
+                    "settlement_price": 0.0,
+                    "mark_value_mid_usd": 0.0,
+                    "mark_value_bid_usd": 0.0,
+                }
+
+            config = {
+                "global": {
+                    "preview_mode": False,
+                    "simulation": True,
+                    "execution_mode": "paper",
+                },
+                "settlement": {
+                    "enabled": True,
+                },
+            }
+
+            with (
+                patch("execution.settlement.mark_position", side_effect=fake_mark_position),
+                patch("execution.settlement.send_trade_notification", return_value=[]),
+            ):
+                report = run_settlement_cycle(
+                    config=config,
+                    snapshot_loader=lambda _token_id, _side: {},
+                    market_lookup=lambda _token_id: {
+                        "question": "Already resolved loser",
+                        "slug": "already-resolved-loser",
+                    },
+                    sleep_fn=lambda _seconds: None,
+                )
+
+            self.assertEqual(report["closed_rows"], 1)
+            self.assertEqual(list_open_positions(limit=10), [])
+            settlement_row = get_processed_settlement("local-loser-token:tokenA")
+            self.assertIsNotNone(settlement_row)
+            self.assertEqual(settlement_row["status"], "PAPER_SETTLED")
+
+            history = list_trade_history(limit=10)
+            self.assertEqual(len(history), 1)
+            self.assertAlmostEqual(float(history[0]["realized_pnl_usd"]), -5.0, places=6)
+
     def test_live_external_settlement_closes_missing_exchange_position_when_enabled(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             state_store.DB_PATH = Path(tmp) / "executor_state.db"

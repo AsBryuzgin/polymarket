@@ -214,6 +214,11 @@ min_buy_signals = 20
 min_executable_ratio = 0.10
 min_batchable_ratio = 0.35
 min_median_trade_fraction = 0.001
+capital_aware_rebalance = true
+capital_aware_rebalance_mode = "balanced"
+min_live_leaders = 2
+target_live_leaders = 3
+max_live_leaders = 3
 
 [signal_freshness]
 preferred_signal_age_sec = 30
