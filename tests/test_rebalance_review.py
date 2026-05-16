@@ -129,6 +129,7 @@ class RebalanceReviewTests(unittest.TestCase):
                 "final_wss": "80",
                 "weight": "0.34",
                 "economic_copyability_status": "PASS",
+                "economic_copyability_buy_signals": "20",
                 "economic_copyability_executable_ratio": "0.35",
                 "economic_copyability_batchable_ratio": "0.70",
                 "economic_copyability_dust_ratio": "0.20",
@@ -141,6 +142,7 @@ class RebalanceReviewTests(unittest.TestCase):
                 "final_wss": "76",
                 "weight": "0.33",
                 "economic_copyability_status": "PASS",
+                "economic_copyability_buy_signals": "20",
                 "economic_copyability_executable_ratio": "0.20",
                 "economic_copyability_batchable_ratio": "0.55",
                 "economic_copyability_dust_ratio": "0.30",
@@ -153,6 +155,7 @@ class RebalanceReviewTests(unittest.TestCase):
                 "final_wss": "78",
                 "weight": "0.33",
                 "economic_copyability_status": "PASS",
+                "economic_copyability_buy_signals": "20",
                 "economic_copyability_executable_ratio": "0.02",
                 "economic_copyability_batchable_ratio": "0.08",
                 "economic_copyability_dust_ratio": "0.90",
@@ -218,6 +221,8 @@ class RebalanceReviewTests(unittest.TestCase):
                     "leader_count": 1,
                     "total_capital_usd": 160,
                     "allocated_budget_usd": 160,
+                    "known_leaders": 1,
+                    "known_budget_usd": 160,
                     "executable_ratio": 0.2,
                     "batchable_ratio": 0.5,
                     "volume_coverage": 0.3,
@@ -230,6 +235,42 @@ class RebalanceReviewTests(unittest.TestCase):
         self.assertIn("Capital-aware pruning: test note", text)
         self.assertIn("Ожидаемая копируемость", text)
         self.assertIn("после short batch: 50%", text)
+
+    def test_review_message_does_not_report_unknown_copyability_as_zero_coverage(self) -> None:
+        text = rebalance_review.build_review_message(
+            {
+                "review_id": "review-unknown",
+                "proposed_live": [
+                    {
+                        "user_name": "Unknown",
+                        "category": "POLITICS",
+                        "final_wss": "70",
+                        "weight": "1.0",
+                    }
+                ],
+                "capital_pruning_note": (
+                    "Capital-aware balanced selection: runtime economic-copyability is unknown"
+                ),
+                "capital_fit_summary": {
+                    "leader_count": 1,
+                    "total_capital_usd": 150,
+                    "allocated_budget_usd": 150,
+                    "known_leaders": 0,
+                    "known_budget_usd": 0,
+                    "executable_ratio": None,
+                    "batchable_ratio": None,
+                    "volume_coverage": None,
+                    "volume_coverage_with_roundup": None,
+                    "estimated_idle_ratio": None,
+                    "unknown_leaders": 1,
+                },
+            }
+        )
+
+        self.assertIn(">= min сейчас: n/a", text)
+        self.assertIn("после short batch: n/a", text)
+        self.assertIn("это WSS-only выбор", text)
+        self.assertNotIn("примерно простаивает/dust: 100%", text)
 
     def test_manual_pick_replaces_category_and_reweights(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -595,14 +595,21 @@ def _capital_capacity_summary(
 ) -> dict[str, Any]:
     budgets = [max(resolve_leader_budget_usd(row, total_capital_usd=total_capital_usd), 0.0) for row in rows]
     budget_total = sum(budgets)
+    known_pairs = [
+        (row, budget)
+        for row, budget in zip(rows, budgets)
+        if str(row.get("economic_copyability_status") or "").upper() != "UNKNOWN"
+        and _safe_float(row.get("economic_copyability_buy_signals")) > 0
+    ]
+    known_budget_total = sum(budget for _row, budget in known_pairs)
 
-    def weighted_average(key: str) -> float:
-        if budget_total <= 0:
-            return 0.0
+    def weighted_average(key: str) -> float | None:
+        if known_budget_total <= 0:
+            return None
         return sum(
             budget * max(_safe_float(row.get(key)), 0.0)
-            for row, budget in zip(rows, budgets)
-        ) / budget_total
+            for row, budget in known_pairs
+        ) / known_budget_total
 
     unknown = sum(
         1
@@ -614,40 +621,72 @@ def _capital_capacity_summary(
         for row in rows
         if str(row.get("economic_copyability_status") or "").upper() == "FAIL"
     )
+    volume_coverage = weighted_average("economic_copyability_volume_coverage")
+    volume_coverage_round = weighted_average("economic_copyability_volume_coverage_with_roundup")
     return {
         "leader_count": len(rows),
         "total_capital_usd": round(total_capital_usd, 2),
         "allocated_budget_usd": round(budget_total, 2),
-        "executable_ratio": round(weighted_average("economic_copyability_executable_ratio"), 6),
-        "batchable_ratio": round(weighted_average("economic_copyability_batchable_ratio"), 6),
-        "dust_ratio": round(weighted_average("economic_copyability_dust_ratio"), 6),
-        "volume_coverage": round(weighted_average("economic_copyability_volume_coverage"), 6),
-        "volume_coverage_with_roundup": round(
-            weighted_average("economic_copyability_volume_coverage_with_roundup"),
-            6,
+        "known_leaders": len(known_pairs),
+        "known_budget_usd": round(known_budget_total, 2),
+        "executable_ratio": (
+            round(value, 6)
+            if (value := weighted_average("economic_copyability_executable_ratio")) is not None
+            else None
+        ),
+        "batchable_ratio": (
+            round(value, 6)
+            if (value := weighted_average("economic_copyability_batchable_ratio")) is not None
+            else None
+        ),
+        "dust_ratio": (
+            round(value, 6)
+            if (value := weighted_average("economic_copyability_dust_ratio")) is not None
+            else None
+        ),
+        "volume_coverage": round(volume_coverage, 6) if volume_coverage is not None else None,
+        "volume_coverage_with_roundup": (
+            round(volume_coverage_round, 6) if volume_coverage_round is not None else None
         ),
         "estimated_idle_ratio": round(
-            max(0.0, 1.0 - weighted_average("economic_copyability_volume_coverage_with_roundup")),
+            max(0.0, 1.0 - volume_coverage_round),
             6,
-        ),
+        )
+        if volume_coverage_round is not None
+        else None,
         "unknown_leaders": unknown,
         "failed_leaders": failures,
     }
 
 
+def _pct_or_na(value: Any) -> str:
+    if value is None:
+        return "n/a"
+    return f"{_safe_float(value):.0%}"
+
+
 def _capital_summary_text(summary: dict[str, Any] | None) -> str:
     if not summary:
         return ""
+    unknown_note = ""
+    if _safe_int(summary.get("known_leaders")) == 0:
+        unknown_note = "\nважно: по выбранным лидерам нет runtime-истории, это WSS-only выбор"
+    elif _safe_int(summary.get("unknown_leaders")) > 0:
+        unknown_note = (
+            "\nважно: часть лидеров без runtime-истории, проценты считаются только по известным"
+        )
     return (
         "Ожидаемая копируемость при текущем банкролле:\n"
         f"leaders: {summary.get('leader_count')} | "
+        f"known: {summary.get('known_leaders')} | "
         f"allocated: ${_safe_float(summary.get('allocated_budget_usd')):.0f} / "
         f"${_safe_float(summary.get('total_capital_usd')):.0f}\n"
-        f">= min сейчас: {_safe_float(summary.get('executable_ratio')):.0%} | "
-        f"после short batch: {_safe_float(summary.get('batchable_ratio')):.0%}\n"
-        f"volume coverage: {_safe_float(summary.get('volume_coverage')):.0%} | "
-        f"с round-up: {_safe_float(summary.get('volume_coverage_with_roundup')):.0%}\n"
-        f"примерно простаивает/dust: {_safe_float(summary.get('estimated_idle_ratio')):.0%}"
+        f">= min сейчас: {_pct_or_na(summary.get('executable_ratio'))} | "
+        f"после short batch: {_pct_or_na(summary.get('batchable_ratio'))}\n"
+        f"volume coverage: {_pct_or_na(summary.get('volume_coverage'))} | "
+        f"с round-up: {_pct_or_na(summary.get('volume_coverage_with_roundup'))}\n"
+        f"примерно простаивает/dust: {_pct_or_na(summary.get('estimated_idle_ratio'))}"
+        f"{unknown_note}"
     )
 
 
@@ -807,17 +846,23 @@ def _balanced_capital_select_live_rows(
     ]
     if len(best_rows) != original_count:
         note_parts.append("instead of requiring strict p95 fit for every leader")
-    note_parts.append(
-        "volume coverage "
-        f"{_safe_float(best_summary.get('volume_coverage')):.0%}/"
-        f"{_safe_float(best_summary.get('volume_coverage_with_roundup')):.0%} with round-up"
-    )
-    note_parts.append(
-        "batchable "
-        f"{_safe_float(best_summary.get('batchable_ratio')):.0%}; "
-        "estimated idle/dust "
-        f"{_safe_float(best_summary.get('estimated_idle_ratio')):.0%}"
-    )
+    if _safe_int(best_summary.get("known_leaders")) == 0:
+        note_parts.append(
+            "runtime economic-copyability is unknown for all selected leaders; "
+            "treat this as WSS-only until paper discovery collects signals"
+        )
+    else:
+        note_parts.append(
+            "volume coverage "
+            f"{_pct_or_na(best_summary.get('volume_coverage'))}/"
+            f"{_pct_or_na(best_summary.get('volume_coverage_with_roundup'))} with round-up"
+        )
+        note_parts.append(
+            "batchable "
+            f"{_pct_or_na(best_summary.get('batchable_ratio'))}; "
+            "estimated idle/dust "
+            f"{_pct_or_na(best_summary.get('estimated_idle_ratio'))}"
+        )
     return best_rows, "; ".join(note_parts) + ".", best_summary
 
 
