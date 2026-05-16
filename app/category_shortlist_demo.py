@@ -1,5 +1,12 @@
 from __future__ import annotations
 
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
 from collectors.leaderboard import LeaderboardClient
 from collectors.wallet_profiles import WalletProfilesClient
 from signals.wallet_metrics_builder import build_wallet_metrics
@@ -8,6 +15,12 @@ from signals.shortlist_helpers import (
     paginate_recent_closed_positions,
     estimate_copyability_inputs,
 )
+
+
+def _require_profile_pnl(value: float | None, label: str) -> float:
+    if value is None:
+        raise RuntimeError(f"{label} unavailable")
+    return value
 
 
 def score_wallet_from_category_entry(
@@ -23,7 +36,8 @@ def score_wallet_from_category_entry(
     current_positions = wallet_client.paginate_current_positions(
         wallet,
         page_size=100,
-        max_pages=3,
+        max_pages=20,
+        sort_by="CURRENT",
     )
     trades = wallet_client.paginate_trades(
         wallet,
@@ -42,6 +56,10 @@ def score_wallet_from_category_entry(
         current_positions=current_positions,
         trades=trades,
     )
+    profile_week_pnl = wallet_client.get_user_pnl_delta(wallet, interval="1w", fidelity="3h")
+    profile_month_pnl = wallet_client.get_user_pnl_delta(wallet, interval="1m", fidelity="1d")
+    profile_week_pnl = _require_profile_pnl(profile_week_pnl, "profile_week_pnl")
+    profile_month_pnl = _require_profile_pnl(profile_month_pnl, "profile_month_pnl")
 
     metrics = build_wallet_metrics(
         profile=profile,
@@ -53,6 +71,8 @@ def score_wallet_from_category_entry(
         median_liquidity=median_liquidity,
         slippage_proxy=slippage_proxy,
         delay_sec=delay_sec,
+        profile_week_pnl=profile_week_pnl,
+        profile_month_pnl=profile_month_pnl,
     )
 
     score = score_wallet(metrics)
@@ -63,14 +83,33 @@ def score_wallet_from_category_entry(
         "wallet": wallet,
         "leaderboard_pnl": entry["pnl"],
         "leaderboard_volume": entry["volume"],
+        "profile_week_pnl": profile_week_pnl,
+        "profile_month_pnl": profile_month_pnl,
         "eligible": score.eligible,
         "final_wss": score.final_wss,
         "raw_wss": score.raw_wss,
+        "consistency_score": score.consistency_score,
+        "drawdown_score": score.drawdown_score,
+        "specialization_score": score.specialization_score,
+        "copyability_score": score.copyability_score,
+        "activity_score": score.activity_score,
+        "return_quality_score": score.return_quality_score,
+        "track_record_multiplier": score.track_record_multiplier,
+        "data_depth_multiplier": score.data_depth_multiplier,
         "filter_reasons": score.filter_reasons,
         "closed_positions_used": len(closed_positions),
+        "trades_30d": metrics.trades_30d,
+        "trades_90d": metrics.trades_90d,
+        "buy_trades_30d": metrics.buy_trades_30d,
+        "sell_trades_30d": metrics.sell_trades_30d,
+        "buy_trade_share_30d": metrics.buy_trade_share_30d,
+        "days_since_last_trade": metrics.days_since_last_trade,
         "median_spread": median_spread,
         "median_liquidity": median_liquidity,
         "slippage_proxy": slippage_proxy,
+        "current_position_pnl_ratio": metrics.current_position_pnl_ratio,
+        "total_pnl_ratio": metrics.total_pnl_ratio,
+        "open_loss_exposure": metrics.open_loss_exposure,
     }
 
 
@@ -116,14 +155,26 @@ def main() -> None:
                     "wallet": wallet,
                     "leaderboard_pnl": entry["pnl"],
                     "leaderboard_volume": entry["volume"],
+                    "profile_week_pnl": None,
+                    "profile_month_pnl": None,
                     "eligible": False,
                     "final_wss": -1.0,
                     "raw_wss": -1.0,
+                    "activity_score": -1.0,
                     "filter_reasons": [f"error: {e}"],
                     "closed_positions_used": 0,
+                    "trades_30d": 0,
+                    "trades_90d": 0,
+                    "buy_trades_30d": 0,
+                    "sell_trades_30d": 0,
+                    "buy_trade_share_30d": 0.0,
+                    "days_since_last_trade": 9999,
                     "median_spread": None,
                     "median_liquidity": None,
                     "slippage_proxy": None,
+                    "current_position_pnl_ratio": 0.0,
+                    "total_pnl_ratio": 0.0,
+                    "open_loss_exposure": 0.0,
                 }
             )
 
@@ -145,9 +196,17 @@ def main() -> None:
             f"user={item['user_name']} | "
             f"wss={item['final_wss']:>6} | "
             f"eligible={item['eligible']} | "
+            f"activity={item['activity_score']} | "
+            f"trades30={item['trades_30d']} | "
+            f"profile_week={item.get('profile_week_pnl')} | "
+            f"profile_month={item.get('profile_month_pnl')} | "
+            f"buy30={item.get('buy_trades_30d', '')} | "
+            f"sell30={item.get('sell_trades_30d', '')} | "
             f"closed_used={item['closed_positions_used']:>4} | "
             f"spread={item['median_spread']} | "
             f"slip={item['slippage_proxy']} | "
+            f"open_pnl={item['current_position_pnl_ratio']} | "
+            f"total_pnl={item.get('total_pnl_ratio')} | "
             f"pnl={round(float(item['leaderboard_pnl']), 2)} | "
             f"wallet={item['wallet']}"
         )

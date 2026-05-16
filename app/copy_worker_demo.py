@@ -1,10 +1,16 @@
 from __future__ import annotations
 
 import os
+import sys
 import time
+from pathlib import Path
 from pprint import pprint
 
 from dotenv import load_dotenv
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 from execution.copy_worker import LeaderSignal, process_signal
 from execution.state_store import init_db, list_recent_signals

@@ -1,12 +1,17 @@
+import sys
+from pathlib import Path
 from pprint import pprint
 
-from execution.builder_auth import health_snapshot
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from execution.health_check import executor_health_report
 
 
 def main() -> None:
     print("=== Executor Health Check ===")
-    snapshot = health_snapshot()
-    pprint(snapshot)
+    pprint(executor_health_report())
 
 
 if __name__ == "__main__":

@@ -1,11 +1,17 @@
 from __future__ import annotations
 
 import csv
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from pprint import pprint
 
-from execution.polymarket_executor import fetch_market_snapshot, preview_market_order
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from execution.polymarket_executor import preview_market_order
+from execution.position_marking import mark_position
 from execution.state_store import init_db, list_open_positions, list_leader_registry
 
 
@@ -100,14 +106,22 @@ def main() -> None:
             "preview_order": "",
         }
 
-        try:
-            snapshot = fetch_market_snapshot(token_id=token_id, side="BUY")
-            row["best_bid"] = snapshot.get("best_bid")
-            row["midpoint"] = snapshot.get("midpoint")
-            row["best_ask"] = snapshot.get("best_ask")
-        except Exception as e:
+        marked = mark_position(pos)
+        row["best_bid"] = marked.get("best_bid") or ""
+        row["midpoint"] = marked.get("midpoint") or ""
+        row["best_ask"] = marked.get("best_ask") or ""
+        row["mark_source"] = marked.get("mark_source") or ""
+        row["settlement_price"] = marked.get("settlement_price") or ""
+
+        if marked.get("snapshot_status") == "SETTLED":
+            row["preview_status"] = "SETTLEMENT_REQUIRED"
+            row["preview_reason"] = str(marked.get("snapshot_reason") or "resolved market requires settlement")
+            rows.append(row)
+            continue
+
+        if marked.get("snapshot_status") != "OK":
             row["preview_status"] = "SNAPSHOT_ERROR"
-            row["preview_reason"] = str(e)
+            row["preview_reason"] = str(marked.get("snapshot_reason") or "snapshot failed")
             rows.append(row)
             continue
 

@@ -1,9 +1,16 @@
 from __future__ import annotations
 
 import csv
+import sys
 from pathlib import Path
 from pprint import pprint
 
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from app.allocation_runtime import resolve_leader_budget_usd, resolve_total_capital_usd
+from execution.builder_auth import load_executor_config
 from execution.leader_signal_source import latest_fresh_copyable_signal_from_wallet
 
 
@@ -28,6 +35,8 @@ def load_allocation(path: Path) -> list[dict]:
 
 
 def main() -> None:
+    config = load_executor_config()
+    total_capital_usd = resolve_total_capital_usd(executor_config=config)
     rows = load_allocation(INPUT_FILE)
 
     print("=== Multi-Leader Fresh Signal Scan ===\n")
@@ -38,7 +47,10 @@ def main() -> None:
         wallet = row["wallet"]
         user_name = row["user_name"]
         category = row["category"]
-        leader_budget_usd = round(100.0 * row["weight"], 2)
+        leader_budget_usd = resolve_leader_budget_usd(
+            row,
+            total_capital_usd=total_capital_usd,
+        )
 
         print(f"[{idx}/{len(rows)}] scanning {user_name} | {category} | budget=${leader_budget_usd} | {wallet}")
 

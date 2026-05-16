@@ -1,11 +1,16 @@
 from __future__ import annotations
 
 import csv
+import sys
 from collections import defaultdict
 from pathlib import Path
 from pprint import pprint
 
-from execution.polymarket_executor import fetch_market_snapshot
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from execution.position_marking import mark_position
 from execution.state_store import (
     init_db,
     list_open_positions,
@@ -64,7 +69,8 @@ def build_open_position_rows() -> list[dict]:
         category = registry["category"] if registry else "UNKNOWN"
         leader_status = registry["leader_status"] if registry else "UNKNOWN"
 
-        qty = position_usd / avg_entry_price if avg_entry_price > 0 else 0.0
+        marked = mark_position(pos)
+        qty = safe_float(marked.get("qty"))
 
         row = {
             "leader_wallet": leader_wallet,
@@ -79,26 +85,19 @@ def build_open_position_rows() -> list[dict]:
             "mark_value_bid_usd": 0.0,
             "unrealized_pnl_mid_usd": 0.0,
             "unrealized_pnl_bid_usd": 0.0,
-            "snapshot_status": "OK",
-            "snapshot_reason": "",
+            "snapshot_status": marked.get("snapshot_status") or "OK",
+            "snapshot_reason": marked.get("snapshot_reason") or "",
+            "mark_source": marked.get("mark_source") or "",
+            "settlement_price": marked.get("settlement_price") or "",
         }
 
-        try:
-            snapshot = fetch_market_snapshot(token_id=token_id, side="BUY")
-            midpoint = safe_float(snapshot.get("midpoint"))
-            best_bid = safe_float(snapshot.get("best_bid"))
-
-            mark_value_mid = qty * midpoint if midpoint > 0 else 0.0
-            mark_value_bid = qty * best_bid if best_bid > 0 else 0.0
-
-            row["mark_value_mid_usd"] = mark_value_mid
-            row["mark_value_bid_usd"] = mark_value_bid
-            row["unrealized_pnl_mid_usd"] = mark_value_mid - position_usd
-            row["unrealized_pnl_bid_usd"] = mark_value_bid - position_usd
-
-        except Exception as e:
-            row["snapshot_status"] = "ERROR"
-            row["snapshot_reason"] = str(e)
+        mark_value_mid = marked.get("mark_value_mid_usd")
+        mark_value_bid = marked.get("mark_value_bid_usd")
+        if mark_value_mid is not None:
+            row["mark_value_mid_usd"] = safe_float(mark_value_mid)
+            row["mark_value_bid_usd"] = safe_float(mark_value_bid)
+            row["unrealized_pnl_mid_usd"] = safe_float(marked.get("unrealized_pnl_mid_usd"))
+            row["unrealized_pnl_bid_usd"] = safe_float(marked.get("unrealized_pnl_bid_usd"))
 
         rows.append(row)
 

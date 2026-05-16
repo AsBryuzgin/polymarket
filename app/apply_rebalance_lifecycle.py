@@ -1,12 +1,20 @@
 from __future__ import annotations
 
 import csv
+import sys
 import tomllib
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from pprint import pprint
 
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from execution.budget_accounting import compute_active_budget_plan, resolve_budget_total_capital_usd
+from execution.builder_auth import load_executor_config
 from execution.state_store import (
+    delete_leader_registry_row,
     init_db,
     list_leader_registry,
     list_open_positions,
@@ -16,7 +24,6 @@ from execution.state_store import (
 
 LIVE_FILE = Path("data/shortlists/live_portfolio_allocation.csv")
 REBALANCE_CONFIG = Path("config/rebalance.toml")
-TOTAL_CAPITAL_USD = 100.0
 
 
 def load_live_rows(path: Path) -> list[dict]:
@@ -30,19 +37,40 @@ def load_live_rows(path: Path) -> list[dict]:
     return rows
 
 
-def load_grace_days(path: Path) -> int:
+def load_rebalance_config(path: Path) -> dict:
     if not path.exists():
-        return 14
+        return {}
     with path.open("rb") as f:
-        cfg = tomllib.load(f)
+        return tomllib.load(f)
+
+
+def load_grace_days(cfg: dict) -> int:
     return int(cfg.get("lifecycle", {}).get("exit_grace_days", 14))
+
+
+def load_total_capital_usd(cfg: dict) -> float:
+    return float(cfg.get("capital", {}).get("total_capital_usd", 0.0))
 
 
 def main() -> None:
     init_db()
 
     live_rows = load_live_rows(LIVE_FILE)
-    grace_days = load_grace_days(REBALANCE_CONFIG)
+    executor_cfg = load_executor_config()
+    rebalance_cfg = load_rebalance_config(REBALANCE_CONFIG)
+    grace_days = load_grace_days(rebalance_cfg)
+    total_capital_usd = resolve_budget_total_capital_usd(
+        executor_config=executor_cfg,
+        rebalance_config=rebalance_cfg,
+        open_positions=list_open_positions(limit=100000),
+        allow_zero_collateral_balance=True,
+    )
+    if total_capital_usd <= 0:
+        print(
+            "WARNING: account collateral balance is zero; leader registry will be "
+            "bootstrapped with target_budget_usd=0.0. Re-run this command after funding "
+            "to refresh live budgets from the real account balance."
+        )
 
     now = datetime.now(timezone.utc)
     grace_until = (now + timedelta(days=grace_days)).isoformat()
@@ -52,6 +80,20 @@ def main() -> None:
     open_positions = list_open_positions(limit=100000)
 
     open_position_wallets = {row["leader_wallet"] for row in open_positions}
+    active_budget_rows = [
+        {
+            **row,
+            "leader_status": "ACTIVE",
+            "target_weight": float(row["weight"]),
+        }
+        for row in live_rows
+    ]
+    budget_plan = compute_active_budget_plan(
+        total_capital_usd=total_capital_usd,
+        registry_rows=active_budget_rows,
+        open_positions=open_positions,
+    )
+    budget_by_wallet = {row["wallet"]: row for row in budget_plan["allocations"]}
 
     report = []
 
@@ -60,8 +102,9 @@ def main() -> None:
         wallet = row["wallet"]
         category = row["category"]
         user_name = row["user_name"]
-        weight = float(row["weight"])
-        budget = round(TOTAL_CAPITAL_USD * weight, 2)
+        allocation = budget_by_wallet.get(wallet, {})
+        weight = float(allocation.get("target_weight", row["weight"]))
+        budget = float(allocation.get("target_budget_usd", 0.0))
 
         previous = current_registry.get(wallet)
         previous_status = previous["leader_status"] if previous else None
@@ -87,13 +130,27 @@ def main() -> None:
             "has_open_position": wallet in open_position_wallets,
         })
 
-    # Step 2: mark dropped leaders as EXIT_ONLY if we know them already
+    # Step 2: dropped leaders only need EXIT_ONLY if there is something to unwind.
     for wallet, row in current_registry.items():
         if wallet in desired_wallets:
             continue
 
         previous_status = row["leader_status"]
         if previous_status not in {"ACTIVE", "EXIT_ONLY"}:
+            continue
+
+        has_open_position = wallet in open_position_wallets
+        if not has_open_position:
+            delete_leader_registry_row(wallet)
+            report.append({
+                "wallet": wallet,
+                "category": row["category"],
+                "user_name": row.get("user_name") or "",
+                "previous_status": previous_status,
+                "new_status": "REMOVED",
+                "reason": "removed from live universe; no open copied positions",
+                "has_open_position": False,
+            })
             continue
 
         upsert_leader_registry_row(
@@ -114,11 +171,13 @@ def main() -> None:
             "previous_status": previous_status,
             "new_status": "EXIT_ONLY",
             "reason": f"removed from live universe; grace until {grace_until}",
-            "has_open_position": wallet in open_position_wallets,
+            "has_open_position": has_open_position,
         })
 
     print("=== APPLY REBALANCE LIFECYCLE ===")
     pprint(report)
+    print("\n=== ACTIVE BUDGET PLAN ===")
+    pprint(budget_plan)
     print("\n=== CURRENT LEADER REGISTRY ===")
     pprint(list_leader_registry(limit=500))
 
