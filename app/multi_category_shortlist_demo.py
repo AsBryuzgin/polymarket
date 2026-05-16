@@ -11,6 +11,8 @@ if str(ROOT) not in sys.path:
 
 from collectors.leaderboard import LeaderboardClient
 from collectors.wallet_profiles import WalletProfilesClient
+from execution.builder_auth import load_executor_config
+from app.allocation_runtime import resolve_total_capital_usd
 from signals.wallet_metrics_builder import build_wallet_metrics
 from signals.wallet_scoring import score_wallet
 from signals.shortlist_helpers import (
@@ -18,6 +20,7 @@ from signals.shortlist_helpers import (
     estimate_copyability_inputs,
 )
 from signals.copyability_history import record_copyability_score
+from signals.economic_copyability import historical_economic_copyability_fields
 
 OUTPUT_DIR = Path("data/shortlists")
 
@@ -41,6 +44,29 @@ CANDIDATE_LIMIT = 30
 WEEK_LOOKUP_LIMIT = 250
 
 
+def _economic_target_budget_usd(config: dict) -> float:
+    try:
+        total_capital = resolve_total_capital_usd(
+            executor_config=config,
+            default=0.0,
+            allow_zero_collateral_balance=True,
+        )
+    except Exception:
+        total_capital = 0.0
+    if total_capital <= 0:
+        total_capital = float(config.get("capital", {}).get("total_capital_usd", 0.0) or 0.0)
+    econ = config.get("economic_copyability", {})
+    target_leaders = int(
+        float(
+            econ.get("target_live_leaders")
+            or econ.get("preferred_live_leaders")
+            or econ.get("max_live_leaders")
+            or 3
+        )
+    )
+    return total_capital / max(target_leaders, 1) if total_capital > 0 else 0.0
+
+
 def _require_profile_pnl(value: float | None, label: str) -> float:
     if value is None:
         raise RuntimeError(f"{label} unavailable")
@@ -52,6 +78,8 @@ def score_wallet_from_category_entry(
     entry: dict,
     *,
     leaderboard_week_pnl: float | None = None,
+    executor_config: dict | None = None,
+    economic_target_budget_usd: float = 0.0,
 ) -> dict:
     wallet = entry["proxy_wallet"]
 
@@ -106,8 +134,15 @@ def score_wallet_from_category_entry(
     )
     metrics = replace(metrics, copyability_score_override=smoothed_copyability_score)
     score = score_wallet(metrics)
+    economic_fields = historical_economic_copyability_fields(
+        wallet=wallet,
+        current_positions=current_positions,
+        trades=trades,
+        config=executor_config or {},
+        target_budget_usd=economic_target_budget_usd,
+    )
 
-    return {
+    result = {
         "rank": entry["rank"],
         "category": entry["leaderboard_category"],
         "time_period": entry["leaderboard_time_period"],
@@ -149,6 +184,8 @@ def score_wallet_from_category_entry(
         "days_since_last_trade": metrics.days_since_last_trade,
         "closed_positions_used": len(closed_positions),
     }
+    result.update(economic_fields)
+    return result
 
 
 def run_category(
@@ -188,6 +225,8 @@ def run_category(
     results = []
 
     print(f"\nScoring category={category} top-{CANDIDATE_LIMIT}")
+    executor_config = load_executor_config()
+    economic_target_budget_usd = _economic_target_budget_usd(executor_config)
 
     for idx, entry in enumerate(candidates, start=1):
         wallet = entry["proxy_wallet"]
@@ -200,6 +239,8 @@ def run_category(
                 wallet_client,
                 entry,
                 leaderboard_week_pnl=week_pnl_by_wallet.get(str(wallet).lower()),
+                executor_config=executor_config,
+                economic_target_budget_usd=economic_target_budget_usd,
             )
             results.append(result)
         except Exception as e:
@@ -301,6 +342,28 @@ def save_csv(rows: list[dict], path: Path) -> None:
         "buy_trades_30d",
         "sell_trades_30d",
         "buy_trade_share_30d",
+        "economic_copyability_status",
+        "economic_copyability_source",
+        "economic_copyability_reason",
+        "economic_copyability_buy_signals",
+        "economic_copyability_executable_ratio",
+        "economic_copyability_batchable_ratio",
+        "economic_copyability_dust_ratio",
+        "economic_copyability_trade_fraction_samples",
+        "economic_copyability_median_trade_fraction",
+        "economic_copyability_mean_trade_fraction",
+        "economic_copyability_median_copy_amount_usd",
+        "economic_copyability_required_bankroll_p95_signals_usd",
+        "economic_copyability_required_bankroll_p99_signals_usd",
+        "economic_copyability_required_bankroll_p95_batch_usd",
+        "economic_copyability_required_bankroll_p99_batch_usd",
+        "economic_copyability_required_bankroll_p95_volume_usd",
+        "economic_copyability_required_bankroll_p99_volume_usd",
+        "economic_copyability_executable_now",
+        "economic_copyability_executable_with_roundup",
+        "economic_copyability_executable_after_batch",
+        "economic_copyability_dust_signals",
+        "economic_copyability_requirement_samples_json",
         "days_since_last_trade",
         "closed_positions_used",
     ]

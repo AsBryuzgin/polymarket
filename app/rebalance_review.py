@@ -22,8 +22,10 @@ from app.apply_rebalance_lifecycle import main as apply_rebalance_lifecycle
 from app.allocation_runtime import resolve_leader_budget_usd, resolve_total_capital_usd
 from execution.builder_auth import load_executor_config
 from signals.economic_copyability import (
+    ECONOMIC_COPYABILITY_REQUIREMENT_SAMPLES_FIELD,
     annotate_rows_with_economic_copyability,
     compute_budget_volume_coverage_by_wallet,
+    requirement_samples_volume_coverage,
 )
 
 
@@ -78,6 +80,7 @@ REVIEW_COLUMNS = [
     "sell_trades_30d",
     "buy_trade_share_30d",
     "economic_copyability_status",
+    "economic_copyability_source",
     "economic_copyability_reason",
     "economic_copyability_buy_signals",
     "economic_copyability_executable_ratio",
@@ -431,8 +434,8 @@ def write_review_xlsx(rows: list[dict[str, Any]], path: Path) -> None:
         ],
         [
             "economic copyability",
-            "runtime gate only; not included in WSS",
-            "when enough paper history exists, rejects leaders whose BUY signals are mostly too small for the current bankroll/min-order model even after short batching; median leader trade fraction is used as an additional dust-risk diagnostic/gate",
+            "historical/runtime gate only; not included in WSS",
+            "uses recent wallet trades for new candidates and runtime signal observations when available; rejects leaders whose BUY flow is mostly too small for the current bankroll/min-order model even after short batching",
         ],
         [
             "hard gates",
@@ -543,12 +546,23 @@ def _annotate_budget_volume_coverage(
         config=config,
         budget_by_wallet=budget_by_wallet,
     )
+    sizing_cfg = config.get("sizing", {})
+    max_round_up_multiple = _safe_float(
+        sizing_cfg.get("max_min_order_round_up_multiple"),
+        3.0,
+    )
     for row in rows:
         wallet = str(row.get("wallet") or "").lower()
         budget = budget_by_wallet.get(wallet)
         if budget is not None:
             row["economic_copyability_budget_usd"] = round(budget, 2)
         coverage = coverage_by_wallet.get(wallet)
+        if not coverage and budget is not None:
+            coverage = requirement_samples_volume_coverage(
+                row.get(ECONOMIC_COPYABILITY_REQUIREMENT_SAMPLES_FIELD),
+                budget_usd=budget,
+                max_round_up_multiple=max_round_up_multiple,
+            )
         if not coverage:
             continue
         row["economic_copyability_volume_coverage"] = coverage["volume_coverage"]
@@ -1002,7 +1016,7 @@ def create_rebalance_review(*, refresh: bool = True) -> dict[str, Any]:
 
     all_rows = _all_review_rows()
     _validate_review_rows(all_rows)
-    _write_csv(all_rows, paths["all_csv"], REVIEW_COLUMNS)
+    _write_csv(all_rows, paths["all_csv"], _append_fieldnames(REVIEW_COLUMNS, all_rows))
     write_review_xlsx(all_rows, paths["xlsx"])
 
     with redirect_stdout(StringIO()):
@@ -1097,6 +1111,7 @@ def _live_fieldnames(rows: list[dict[str, Any]]) -> list[str]:
         "sell_trades_30d",
         "buy_trade_share_30d",
         "economic_copyability_status",
+        "economic_copyability_source",
         "economic_copyability_buy_signals",
         "economic_copyability_executable_ratio",
         "economic_copyability_batchable_ratio",

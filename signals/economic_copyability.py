@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
@@ -22,6 +23,7 @@ DEFAULT_MIN_MEDIAN_TRADE_FRACTION = 0.001
 _METRIC_FIELD_DEFAULTS: dict[str, Any] = {
     "status": "UNKNOWN",
     "reason": "no runtime economic copyability history for wallet",
+    "source": "none",
     "buy_signals": 0,
     "executable_ratio": 0.0,
     "batchable_ratio": 0.0,
@@ -41,6 +43,9 @@ _METRIC_FIELD_DEFAULTS: dict[str, Any] = {
     "executable_after_batch": 0,
     "dust_signals": 0,
 }
+
+
+ECONOMIC_COPYABILITY_REQUIREMENT_SAMPLES_FIELD = "economic_copyability_requirement_samples_json"
 
 
 @dataclass(frozen=True)
@@ -339,20 +344,15 @@ def _volume_coverage(requirements: list[tuple[float, float]], budget_usd: float)
     return covered / total_weight
 
 
-def compute_economic_copyability_by_wallet(
+def _prepare_metric_rows(
+    rows: list[dict[str, Any]],
     *,
-    config: dict[str, Any],
-) -> dict[str, EconomicCopyabilityMetrics]:
-    cfg = _metric_cfg(config)
-    if not cfg["enabled"]:
-        return {}
-
-    rows = _load_buy_observations(float(cfg["lookback_hours"]))
+    cfg: dict[str, Any],
+) -> dict[str, list[dict[str, Any]]]:
     by_wallet: dict[str, list[dict[str, Any]]] = {}
-    amounts: dict[str, float] = {}
-    min_orders: dict[str, float] = {}
 
     for row in rows:
+        row = dict(row)
         wallet = str(row.get("leader_wallet") or "").lower()
         signal_id = str(row.get("selected_signal_id") or "")
         if not wallet or not signal_id:
@@ -367,123 +367,326 @@ def compute_economic_copyability_by_wallet(
         row["economic_trade_fraction"] = trade_fraction
         row["economic_min_order_usd"] = min_order
         by_wallet.setdefault(wallet, []).append(row)
-        amounts[signal_id] = amount
-        min_orders[signal_id] = min_order
 
+    return by_wallet
+
+
+def _compute_wallet_metrics(
+    *,
+    wallet: str,
+    wallet_rows: list[dict[str, Any]],
+    cfg: dict[str, Any],
+    source_label: str,
+) -> EconomicCopyabilityMetrics:
+    amounts = {
+        str(row.get("selected_signal_id") or ""): float(row.get("economic_copy_amount_usd") or 0.0)
+        for row in wallet_rows
+    }
+    min_orders = {
+        str(row.get("selected_signal_id") or ""): float(row.get("economic_min_order_usd") or DEFAULT_MIN_ORDER_USD)
+        for row in wallet_rows
+    }
     batchable_ids = _batchable_signal_ids(
-        rows,
+        wallet_rows,
         amounts=amounts,
         min_orders=min_orders,
         batch_window_sec=float(cfg["batch_window_sec"]),
     )
 
+    buy_signals = len(wallet_rows)
+    now_count = 0
+    roundup_count = 0
+    batch_count = 0
+    copy_amounts: list[float] = []
+    trade_fractions: list[float] = []
+    signal_required_budgets: list[float] = []
+
+    for row in wallet_rows:
+        signal_id = str(row.get("selected_signal_id") or "")
+        amount = float(row["economic_copy_amount_usd"])
+        trade_fraction = float(row["economic_trade_fraction"])
+        min_order = float(row["economic_min_order_usd"])
+        copy_amounts.append(amount)
+        if trade_fraction > 0:
+            trade_fractions.append(trade_fraction)
+            signal_required_budgets.append(min_order / trade_fraction)
+        if amount >= min_order:
+            now_count += 1
+            batch_count += 1
+            continue
+        if amount > 0 and min_order / amount <= float(cfg["max_round_up_multiple"]):
+            roundup_count += 1
+            batch_count += 1
+            continue
+        if signal_id in batchable_ids:
+            batch_count += 1
+
+    dust_count = max(buy_signals - batch_count, 0)
+    executable_count = now_count + roundup_count
+    executable_ratio = executable_count / buy_signals if buy_signals else 0.0
+    batchable_ratio = batch_count / buy_signals if buy_signals else 0.0
+    dust_ratio = dust_count / buy_signals if buy_signals else 0.0
+    median_trade_fraction = median(trade_fractions) if trade_fractions else 0.0
+    mean_trade_fraction = (
+        sum(trade_fractions) / len(trade_fractions) if trade_fractions else 0.0
+    )
+    batch_requirements = _batch_requirement_pairs(
+        wallet_rows,
+        batch_window_sec=float(cfg["batch_window_sec"]),
+        default_min_order_usd=float(cfg["min_order_usd"]),
+        max_trade_fraction=float(cfg["max_leader_trade_budget_fraction"]),
+    )
+    batch_required_budgets = [required for required, _weight in batch_requirements]
+    batch_required_weights = [weight for _required, weight in batch_requirements]
+
+    if buy_signals < int(cfg["min_buy_signals"]):
+        status = "UNKNOWN"
+        reason = f"insufficient {source_label} buy samples: {buy_signals}/{cfg['min_buy_signals']}"
+    elif (
+        executable_ratio < float(cfg["min_executable_ratio"])
+        and batchable_ratio < float(cfg["min_batchable_ratio"])
+    ):
+        status = "FAIL"
+        reason = (
+            f"{source_label} economic copyability below thresholds: "
+            f"exec {executable_ratio:.2f} < {cfg['min_executable_ratio']:.2f}, "
+            f"batch {batchable_ratio:.2f} < {cfg['min_batchable_ratio']:.2f}"
+        )
+    elif (
+        len(trade_fractions) >= int(cfg["min_buy_signals"])
+        and median_trade_fraction < float(cfg["min_median_trade_fraction"])
+        and batchable_ratio < float(cfg["min_batchable_ratio"])
+    ):
+        status = "FAIL"
+        reason = (
+            f"{source_label} leader trade fraction below threshold: "
+            f"median {median_trade_fraction:.4%} < "
+            f"{float(cfg['min_median_trade_fraction']):.4%}, "
+            f"batch {batchable_ratio:.2f} < {cfg['min_batchable_ratio']:.2f}"
+        )
+    else:
+        status = "PASS"
+        reason = f"{source_label} economic copyability ok"
+
+    return EconomicCopyabilityMetrics(
+        wallet=wallet,
+        buy_signals=buy_signals,
+        executable_now=now_count,
+        executable_with_roundup=roundup_count,
+        executable_after_batch=batch_count,
+        dust_signals=dust_count,
+        trade_fraction_samples=len(trade_fractions),
+        median_trade_fraction=round(median_trade_fraction, 8),
+        mean_trade_fraction=round(mean_trade_fraction, 8),
+        median_copy_amount_usd=round(median(copy_amounts), 6) if copy_amounts else 0.0,
+        required_bankroll_p95_signals_usd=round(_quantile(signal_required_budgets, 0.95), 2),
+        required_bankroll_p99_signals_usd=round(_quantile(signal_required_budgets, 0.99), 2),
+        required_bankroll_p95_batch_usd=round(_quantile(batch_required_budgets, 0.95), 2),
+        required_bankroll_p99_batch_usd=round(_quantile(batch_required_budgets, 0.99), 2),
+        required_bankroll_p95_volume_usd=round(
+            _weighted_quantile(batch_required_budgets, batch_required_weights, 0.95),
+            2,
+        ),
+        required_bankroll_p99_volume_usd=round(
+            _weighted_quantile(batch_required_budgets, batch_required_weights, 0.99),
+            2,
+        ),
+        executable_ratio=round(executable_ratio, 6),
+        batchable_ratio=round(batchable_ratio, 6),
+        dust_ratio=round(dust_ratio, 6),
+        status=status,
+        reason=reason,
+    )
+
+
+def compute_economic_copyability_by_wallet(
+    *,
+    config: dict[str, Any],
+) -> dict[str, EconomicCopyabilityMetrics]:
+    cfg = _metric_cfg(config)
+    if not cfg["enabled"]:
+        return {}
+
+    rows = _load_buy_observations(float(cfg["lookback_hours"]))
+    by_wallet = _prepare_metric_rows(rows, cfg=cfg)
+
     out: dict[str, EconomicCopyabilityMetrics] = {}
     for wallet, wallet_rows in by_wallet.items():
-        buy_signals = len(wallet_rows)
-        now_count = 0
-        roundup_count = 0
-        batch_count = 0
-        copy_amounts: list[float] = []
-        trade_fractions: list[float] = []
-        signal_required_budgets: list[float] = []
-
-        for row in wallet_rows:
-            signal_id = str(row.get("selected_signal_id") or "")
-            amount = float(row["economic_copy_amount_usd"])
-            trade_fraction = float(row["economic_trade_fraction"])
-            min_order = float(row["economic_min_order_usd"])
-            copy_amounts.append(amount)
-            if trade_fraction > 0:
-                trade_fractions.append(trade_fraction)
-                signal_required_budgets.append(min_order / trade_fraction)
-            if amount >= min_order:
-                now_count += 1
-                batch_count += 1
-                continue
-            if amount > 0 and min_order / amount <= float(cfg["max_round_up_multiple"]):
-                roundup_count += 1
-                batch_count += 1
-                continue
-            if signal_id in batchable_ids:
-                batch_count += 1
-
-        dust_count = max(buy_signals - batch_count, 0)
-        executable_count = now_count + roundup_count
-        executable_ratio = executable_count / buy_signals if buy_signals else 0.0
-        batchable_ratio = batch_count / buy_signals if buy_signals else 0.0
-        dust_ratio = dust_count / buy_signals if buy_signals else 0.0
-        median_trade_fraction = median(trade_fractions) if trade_fractions else 0.0
-        mean_trade_fraction = (
-            sum(trade_fractions) / len(trade_fractions) if trade_fractions else 0.0
-        )
-        batch_requirements = _batch_requirement_pairs(
-            wallet_rows,
-            batch_window_sec=float(cfg["batch_window_sec"]),
-            default_min_order_usd=float(cfg["min_order_usd"]),
-            max_trade_fraction=float(cfg["max_leader_trade_budget_fraction"]),
-        )
-        batch_required_budgets = [required for required, _weight in batch_requirements]
-        batch_required_weights = [weight for _required, weight in batch_requirements]
-
-        if buy_signals < int(cfg["min_buy_signals"]):
-            status = "UNKNOWN"
-            reason = f"insufficient runtime buy samples: {buy_signals}/{cfg['min_buy_signals']}"
-        elif (
-            executable_ratio < float(cfg["min_executable_ratio"])
-            and batchable_ratio < float(cfg["min_batchable_ratio"])
-        ):
-            status = "FAIL"
-            reason = (
-                "runtime economic copyability below thresholds: "
-                f"exec {executable_ratio:.2f} < {cfg['min_executable_ratio']:.2f}, "
-                f"batch {batchable_ratio:.2f} < {cfg['min_batchable_ratio']:.2f}"
-            )
-        elif (
-            len(trade_fractions) >= int(cfg["min_buy_signals"])
-            and median_trade_fraction < float(cfg["min_median_trade_fraction"])
-            and batchable_ratio < float(cfg["min_batchable_ratio"])
-        ):
-            status = "FAIL"
-            reason = (
-                "runtime leader trade fraction below threshold: "
-                f"median {median_trade_fraction:.4%} < "
-                f"{float(cfg['min_median_trade_fraction']):.4%}, "
-                f"batch {batchable_ratio:.2f} < {cfg['min_batchable_ratio']:.2f}"
-            )
-        else:
-            status = "PASS"
-            reason = "runtime economic copyability ok"
-
-        out[wallet] = EconomicCopyabilityMetrics(
+        out[wallet] = _compute_wallet_metrics(
             wallet=wallet,
-            buy_signals=buy_signals,
-            executable_now=now_count,
-            executable_with_roundup=roundup_count,
-            executable_after_batch=batch_count,
-            dust_signals=dust_count,
-            trade_fraction_samples=len(trade_fractions),
-            median_trade_fraction=round(median_trade_fraction, 8),
-            mean_trade_fraction=round(mean_trade_fraction, 8),
-            median_copy_amount_usd=round(median(copy_amounts), 6) if copy_amounts else 0.0,
-            required_bankroll_p95_signals_usd=round(_quantile(signal_required_budgets, 0.95), 2),
-            required_bankroll_p99_signals_usd=round(_quantile(signal_required_budgets, 0.99), 2),
-            required_bankroll_p95_batch_usd=round(_quantile(batch_required_budgets, 0.95), 2),
-            required_bankroll_p99_batch_usd=round(_quantile(batch_required_budgets, 0.99), 2),
-            required_bankroll_p95_volume_usd=round(
-                _weighted_quantile(batch_required_budgets, batch_required_weights, 0.95),
-                2,
-            ),
-            required_bankroll_p99_volume_usd=round(
-                _weighted_quantile(batch_required_budgets, batch_required_weights, 0.99),
-                2,
-            ),
-            executable_ratio=round(executable_ratio, 6),
-            batchable_ratio=round(batchable_ratio, 6),
-            dust_ratio=round(dust_ratio, 6),
-            status=status,
-            reason=reason,
+            wallet_rows=wallet_rows,
+            cfg=cfg,
+            source_label="runtime",
         )
     return out
+
+
+def _trade_token_id(item: dict[str, Any]) -> str:
+    for key in ("asset", "assetId", "token_id", "tokenId"):
+        value = item.get(key)
+        if value:
+            return str(value)
+    return ""
+
+
+def _trade_signal_id(item: dict[str, Any], *, wallet: str, index: int) -> str:
+    for key in ("transactionHash", "hash", "txHash", "transaction_hash"):
+        value = item.get(key)
+        if value:
+            return f"historical:{value}:{index}"
+    token_id = _trade_token_id(item)
+    return f"historical:{wallet}:{token_id}:{item.get('timestamp') or item.get('createdAt') or index}:{index}"
+
+
+def _trade_observed_at(item: dict[str, Any]) -> str:
+    timestamp = item.get("timestamp")
+    if timestamp not in (None, ""):
+        try:
+            return datetime.fromtimestamp(int(timestamp), tz=timezone.utc).isoformat()
+        except (TypeError, ValueError, OSError):
+            pass
+    for key in ("createdAt", "created_at", "updatedAt"):
+        value = item.get(key)
+        if value:
+            text = str(value).replace("Z", "+00:00")
+            try:
+                dt = datetime.fromisoformat(text)
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=timezone.utc)
+                return dt.astimezone(timezone.utc).isoformat()
+            except ValueError:
+                continue
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _positions_value_usd(positions: list[dict[str, Any]]) -> float:
+    return sum(max(_safe_float(item.get("currentValue")), 0.0) for item in positions)
+
+
+def _historical_requirement_samples(wallet_rows: list[dict[str, Any]], cfg: dict[str, Any]) -> str:
+    pairs = _batch_requirement_pairs(
+        wallet_rows,
+        batch_window_sec=float(cfg["batch_window_sec"]),
+        default_min_order_usd=float(cfg["min_order_usd"]),
+        max_trade_fraction=float(cfg["max_leader_trade_budget_fraction"]),
+    )
+    compact = [
+        [round(required, 6), round(weight, 8)]
+        for required, weight in pairs
+        if required > 0 and weight > 0
+    ]
+    return json.dumps(compact, separators=(",", ":"))
+
+
+def requirement_samples_volume_coverage(
+    samples_json: Any,
+    *,
+    budget_usd: float,
+    max_round_up_multiple: float,
+) -> dict[str, float] | None:
+    if not samples_json:
+        return None
+    try:
+        raw = json.loads(str(samples_json))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return None
+    requirements: list[tuple[float, float]] = []
+    for item in raw:
+        if not isinstance(item, (list, tuple)) or len(item) < 2:
+            continue
+        required = _safe_float(item[0])
+        weight = _safe_float(item[1])
+        if required > 0 and weight > 0:
+            requirements.append((required, weight))
+    if not requirements:
+        return None
+    if max_round_up_multiple > 0:
+        roundup_requirements = [
+            (required / max_round_up_multiple, weight)
+            for required, weight in requirements
+        ]
+    else:
+        roundup_requirements = requirements
+    return {
+        "budget_usd": round(budget_usd, 2),
+        "volume_coverage": round(_volume_coverage(requirements, budget_usd), 6),
+        "volume_coverage_with_roundup": round(
+            _volume_coverage(roundup_requirements, budget_usd),
+            6,
+        ),
+    }
+
+
+def historical_economic_copyability_fields(
+    *,
+    wallet: str,
+    current_positions: list[dict[str, Any]],
+    trades: list[dict[str, Any]],
+    config: dict[str, Any],
+    target_budget_usd: float,
+) -> dict[str, Any]:
+    cfg = _metric_cfg(config)
+    if not cfg["enabled"]:
+        return {}
+
+    wallet = wallet.lower()
+    portfolio_value = _positions_value_usd(current_positions)
+    if portfolio_value <= 0:
+        data = dict(_METRIC_FIELD_DEFAULTS)
+        data["source"] = "historical_trades"
+        data["reason"] = "historical economic copyability unavailable: leader portfolio value missing"
+        return {f"economic_copyability_{key}": value for key, value in data.items()}
+
+    rows: list[dict[str, Any]] = []
+    for index, trade in enumerate(trades):
+        side = str(trade.get("side") or "").strip().upper()
+        if side != "BUY":
+            continue
+        size = abs(_safe_float(trade.get("size")))
+        price = abs(_safe_float(trade.get("price")))
+        notional = size * price
+        token_id = _trade_token_id(trade)
+        if notional <= 0 or not token_id:
+            continue
+        rows.append(
+            {
+                "leader_wallet": wallet,
+                "selected_signal_id": _trade_signal_id(trade, wallet=wallet, index=index),
+                "selected_side": "BUY",
+                "token_id": token_id,
+                "observed_at": _trade_observed_at(trade),
+                "target_budget_usd": target_budget_usd,
+                "selected_trade_notional_usd": notional,
+                "selected_leader_portfolio_value_usd": portfolio_value,
+                "snapshot_min_order_usd": float(cfg["min_order_usd"]),
+            }
+        )
+
+    by_wallet = _prepare_metric_rows(rows, cfg=cfg)
+    wallet_rows = by_wallet.get(wallet, [])
+    if not wallet_rows:
+        data = dict(_METRIC_FIELD_DEFAULTS)
+        data["source"] = "historical_trades"
+        data["reason"] = "insufficient historical buy samples: 0/{cfg}".format(
+            cfg=cfg["min_buy_signals"]
+        )
+        return {f"economic_copyability_{key}": value for key, value in data.items()}
+
+    metrics = _compute_wallet_metrics(
+        wallet=wallet,
+        wallet_rows=wallet_rows,
+        cfg=cfg,
+        source_label="historical",
+    )
+    data = asdict(metrics)
+    data["source"] = "historical_trades"
+    fields = {
+        f"economic_copyability_{key}": value
+        for key, value in data.items()
+        if key != "wallet"
+    }
+    fields[ECONOMIC_COPYABILITY_REQUIREMENT_SAMPLES_FIELD] = _historical_requirement_samples(wallet_rows, cfg)
+    return fields
 
 
 def compute_budget_volume_coverage_by_wallet(
@@ -545,18 +748,24 @@ def annotate_rows_with_economic_copyability(
         wallet = str(row.get("wallet") or "").lower()
         metrics = metrics_by_wallet.get(wallet)
         if metrics is None:
-            data = dict(_METRIC_FIELD_DEFAULTS)
+            if str(row.get("economic_copyability_status") or "").strip():
+                data = {}
+            else:
+                data = dict(_METRIC_FIELD_DEFAULTS)
         else:
             data = asdict(metrics)
+            data["source"] = "runtime_observations"
         for key, value in data.items():
             if key == "wallet":
                 continue
             row[f"economic_copyability_{key}"] = value
         for key in ("budget_usd", "volume_coverage", "volume_coverage_with_roundup"):
             row.setdefault(f"economic_copyability_{key}", "n/a")
-        if metrics is not None and metrics.status == "FAIL":
+        if str(row.get("economic_copyability_status") or "").upper() == "FAIL":
             row["eligible"] = False
             existing_reason = str(row.get("filter_reasons") or "").strip()
-            reason = f"economic_copyability: {metrics.reason}"
-            row["filter_reasons"] = f"{existing_reason}; {reason}" if existing_reason else reason
+            reason_text = str(row.get("economic_copyability_reason") or "").strip()
+            reason = f"economic_copyability: {reason_text}" if reason_text else "economic_copyability"
+            if reason not in existing_reason:
+                row["filter_reasons"] = f"{existing_reason}; {reason}" if existing_reason else reason
     return rows

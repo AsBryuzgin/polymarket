@@ -10,6 +10,8 @@ from signals.economic_copyability import (
     annotate_rows_with_economic_copyability,
     compute_budget_volume_coverage_by_wallet,
     compute_economic_copyability_by_wallet,
+    historical_economic_copyability_fields,
+    requirement_samples_volume_coverage,
 )
 
 
@@ -213,6 +215,88 @@ class EconomicCopyabilityTests(unittest.TestCase):
         self.assertEqual(rows[0]["economic_copyability_budget_usd"], "n/a")
         self.assertEqual(rows[0]["economic_copyability_volume_coverage"], "n/a")
         self.assertTrue(rows[0]["eligible"])
+
+    def test_annotation_preserves_historical_fields_when_runtime_is_missing(self) -> None:
+        rows = [
+            {
+                "wallet": "historical-wallet",
+                "eligible": True,
+                "filter_reasons": "",
+                "economic_copyability_status": "PASS",
+                "economic_copyability_source": "historical_trades",
+                "economic_copyability_reason": "historical economic copyability ok",
+                "economic_copyability_buy_signals": 20,
+                "economic_copyability_required_bankroll_p95_volume_usd": 25.0,
+            }
+        ]
+        config = {
+            "risk": {"min_order_size_usd": 1.0},
+            "sizing": {"max_min_order_round_up_multiple": 3.0},
+            "signal_batch_coalescer": {"window_sec": 30.0},
+            "economic_copyability": {"enabled": True, "lookback_hours": 168.0},
+        }
+
+        annotate_rows_with_economic_copyability(rows, config=config)
+
+        self.assertEqual(rows[0]["economic_copyability_status"], "PASS")
+        self.assertEqual(rows[0]["economic_copyability_source"], "historical_trades")
+        self.assertEqual(rows[0]["economic_copyability_buy_signals"], 20)
+        self.assertEqual(
+            rows[0]["economic_copyability_required_bankroll_p95_volume_usd"],
+            25.0,
+        )
+        self.assertTrue(rows[0]["eligible"])
+
+    def test_historical_candidate_trades_fill_copyability_without_runtime_history(self) -> None:
+        config = {
+            "risk": {"min_order_size_usd": 1.0},
+            "sizing": {
+                "max_min_order_round_up_multiple": 3.0,
+                "max_leader_trade_budget_fraction": 1.0,
+            },
+            "signal_batch_coalescer": {"window_sec": 30.0},
+            "economic_copyability": {
+                "enabled": True,
+                "lookback_hours": 168.0,
+                "min_buy_signals": 3,
+                "min_executable_ratio": 0.10,
+                "min_batchable_ratio": 0.35,
+            },
+        }
+        fields = historical_economic_copyability_fields(
+            wallet="candidate-wallet",
+            current_positions=[{"currentValue": 100.0}],
+            trades=[
+                {
+                    "side": "BUY",
+                    "asset": f"token-{idx}",
+                    "size": 10.0,
+                    "price": 1.0,
+                    "timestamp": 1_700_000_000 + idx,
+                    "transactionHash": f"0x{idx}",
+                }
+                for idx in range(3)
+            ],
+            config=config,
+            target_budget_usd=20.0,
+        )
+
+        self.assertEqual(fields["economic_copyability_status"], "PASS")
+        self.assertEqual(fields["economic_copyability_source"], "historical_trades")
+        self.assertEqual(fields["economic_copyability_buy_signals"], 3)
+        self.assertAlmostEqual(fields["economic_copyability_median_trade_fraction"], 0.1)
+        self.assertAlmostEqual(
+            fields["economic_copyability_required_bankroll_p95_volume_usd"],
+            10.0,
+        )
+        coverage = requirement_samples_volume_coverage(
+            fields["economic_copyability_requirement_samples_json"],
+            budget_usd=10.0,
+            max_round_up_multiple=3.0,
+        )
+        self.assertIsNotNone(coverage)
+        assert coverage is not None
+        self.assertAlmostEqual(coverage["volume_coverage"], 1.0)
 
 
 if __name__ == "__main__":
