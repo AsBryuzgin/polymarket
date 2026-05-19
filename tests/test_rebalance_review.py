@@ -272,6 +272,28 @@ class RebalanceReviewTests(unittest.TestCase):
         self.assertIn("это WSS-only выбор", text)
         self.assertNotIn("примерно простаивает/dust: 100%", text)
 
+    def test_capital_summary_does_not_turn_missing_coverage_into_zero(self) -> None:
+        summary = rebalance_review._capital_capacity_summary(
+            [
+                {
+                    "weight": 1.0,
+                    "economic_copyability_status": "PASS",
+                    "economic_copyability_buy_signals": "20",
+                    "economic_copyability_executable_ratio": "0.5",
+                    "economic_copyability_batchable_ratio": "0.7",
+                    "economic_copyability_dust_ratio": "0.3",
+                    "economic_copyability_volume_coverage": "",
+                    "economic_copyability_volume_coverage_with_roundup": "",
+                }
+            ],
+            total_capital_usd=150.0,
+        )
+
+        self.assertEqual(summary["known_leaders"], 1)
+        self.assertIsNone(summary["volume_coverage"])
+        self.assertIsNone(summary["volume_coverage_with_roundup"])
+        self.assertIsNone(summary["estimated_idle_ratio"])
+
     def test_manual_pick_replaces_category_and_reweights(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

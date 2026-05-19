@@ -11,6 +11,7 @@ from app.final_portfolio_candidates_demo import (
     select_by_category,
 )
 from app.portfolio_allocation_demo import load_csv as load_allocation_csv
+from app.portfolio_allocation_demo import save_csv as save_allocation_csv
 
 
 class PortfolioPipelineTests(unittest.TestCase):
@@ -62,6 +63,39 @@ class PortfolioPipelineTests(unittest.TestCase):
         self.assertEqual(rows[0]["open_loss_exposure"], "0.2")
         self.assertEqual(rows[0]["profile_week_pnl"], "8.0")
         self.assertEqual(rows[0]["profile_month_pnl"], "22.0")
+
+    def test_economic_copyability_source_and_samples_survive_csv_hops(self) -> None:
+        row = {
+            "wallet": "wallet1",
+            "user_name": "Leader",
+            "category": "CRYPTO",
+            "all_categories": "CRYPTO",
+            "final_wss": 70.0,
+            "raw_wss": 72.0,
+            "leaderboard_pnl": 123.0,
+            "leaderboard_volume": 456.0,
+            "raw_weight": 1.0,
+            "weight": 1.0,
+            "eligible": True,
+            "economic_copyability_status": "PASS",
+            "economic_copyability_source": "historical_trades",
+            "economic_copyability_reason": "historical economic copyability ok",
+            "economic_copyability_requirement_samples_json": "[[10,0.1]]",
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            candidates_path = Path(tmp) / "final_portfolio_candidates.csv"
+            allocation_path = Path(tmp) / "final_portfolio_allocation.csv"
+            save_candidates_csv([row], candidates_path)
+            with candidates_path.open("r", encoding="utf-8", newline="") as f:
+                candidate_rows = list(csv.DictReader(f))
+            save_allocation_csv([row], allocation_path)
+            with allocation_path.open("r", encoding="utf-8", newline="") as f:
+                allocation_rows = list(csv.DictReader(f))
+
+        self.assertEqual(candidate_rows[0]["economic_copyability_source"], "historical_trades")
+        self.assertEqual(candidate_rows[0]["economic_copyability_requirement_samples_json"], "[[10,0.1]]")
+        self.assertEqual(allocation_rows[0]["economic_copyability_source"], "historical_trades")
+        self.assertEqual(allocation_rows[0]["economic_copyability_requirement_samples_json"], "[[10,0.1]]")
 
     def test_allocation_loader_defensively_filters_ineligible_rows(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

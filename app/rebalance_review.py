@@ -618,12 +618,16 @@ def _capital_capacity_summary(
     known_budget_total = sum(budget for _row, budget in known_pairs)
 
     def weighted_average(key: str) -> float | None:
-        if known_budget_total <= 0:
+        pairs: list[tuple[float, float]] = []
+        for row, budget in known_pairs:
+            raw = row.get(key)
+            if raw in (None, "", "n/a", "N/A"):
+                continue
+            pairs.append((budget, max(_safe_float(raw), 0.0)))
+        denominator = sum(budget for budget, _value in pairs)
+        if denominator <= 0:
             return None
-        return sum(
-            budget * max(_safe_float(row.get(key)), 0.0)
-            for row, budget in known_pairs
-        ) / known_budget_total
+        return sum(budget * value for budget, value in pairs) / denominator
 
     unknown = sum(
         1
@@ -1128,6 +1132,7 @@ def _live_fieldnames(rows: list[dict[str, Any]]) -> list[str]:
         "economic_copyability_budget_usd",
         "economic_copyability_volume_coverage",
         "economic_copyability_volume_coverage_with_roundup",
+        "economic_copyability_requirement_samples_json",
         "economic_copyability_reason",
         "days_since_last_trade",
         "median_spread",

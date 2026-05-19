@@ -132,6 +132,7 @@ def save_csv(rows: list[dict], path: Path) -> None:
         "sell_trades_30d",
         "buy_trade_share_30d",
         "economic_copyability_status",
+        "economic_copyability_source",
         "economic_copyability_reason",
         "economic_copyability_buy_signals",
         "economic_copyability_executable_ratio",
@@ -151,6 +152,7 @@ def save_csv(rows: list[dict], path: Path) -> None:
         "economic_copyability_executable_with_roundup",
         "economic_copyability_executable_after_batch",
         "economic_copyability_dust_signals",
+        "economic_copyability_requirement_samples_json",
         "days_since_last_trade",
         "closed_positions_used",
     ]
