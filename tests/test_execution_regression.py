@@ -864,6 +864,66 @@ class ExecutionRegressionTests(unittest.TestCase):
         self.assertIsNotNone(pos)
         self.assertEqual(float(pos["position_usd"]), 1.0)
 
+    def test_sell_can_close_dust_position_below_buy_min_order(self) -> None:
+        state_store.upsert_buy_position(
+            leader_wallet="wallet-dust",
+            token_id="tokenDust",
+            amount_usd=0.50,
+            entry_price=0.50,
+            signal_id="seed-dust-buy",
+        )
+
+        signal = LeaderSignal(
+            signal_id="sig-sell-dust",
+            leader_wallet="wallet-dust",
+            token_id="tokenDust",
+            side="SELL",
+            leader_budget_usd=50.0,
+            leader_trade_notional_usd=1.0,
+            leader_exit_fraction=0.5,
+        )
+
+        config = {
+            "risk": {
+                "min_order_size_usd": 1.0,
+                "max_per_trade_usd": 100.0,
+                "skip_if_spread_gt": 0.02,
+            },
+            "filters": {
+                "buy_min_price": 0.05,
+                "buy_max_price": 0.95,
+            },
+            "exit": {
+                "exit_max_spread": 0.05,
+            },
+            "sizing": {
+                "leader_trade_notional_copy_fraction": 0.20,
+                "round_up_to_min_order": True,
+                "max_min_order_round_up_multiple": 3.0,
+            },
+        }
+
+        snapshot = {
+            "midpoint": 0.60,
+            "spread": 0.01,
+            "price_quote": 0.60,
+            "best_bid": 0.59,
+            "best_ask": 0.61,
+        }
+
+        with patch("execution.copy_worker.load_executor_config", return_value=config), \
+             patch("execution.copy_worker.fetch_market_snapshot", return_value=snapshot), \
+             patch("execution.copy_worker.preview_market_order", return_value={"ok": True}) as preview:
+            result = process_signal(signal)
+
+        self.assertEqual(result["status"], "PREVIEW_READY_EXIT")
+        self.assertEqual(result["suggested_amount_usd"], 0.5)
+        preview.assert_called_once()
+
+        pos = state_store.get_position_any_status("wallet-dust", "tokenDust")
+        self.assertIsNotNone(pos)
+        self.assertEqual(pos["status"], "CLOSED")
+
 
 if __name__ == "__main__":
     unittest.main()

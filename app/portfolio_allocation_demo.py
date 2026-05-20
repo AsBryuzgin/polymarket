@@ -220,6 +220,16 @@ def save_csv(rows: list[dict], path: Path) -> None:
         "economic_copyability_required_bankroll_p99_batch_usd",
         "economic_copyability_required_bankroll_p95_volume_usd",
         "economic_copyability_required_bankroll_p99_volume_usd",
+        "economic_copyability_budget_usd",
+        "economic_copyability_volume_coverage",
+        "economic_copyability_volume_coverage_with_roundup",
+        "economic_copyability_runtime_processed_signals",
+        "economic_copyability_runtime_batch_expired",
+        "economic_copyability_runtime_batch_expired_ratio",
+        "economic_copyability_runtime_roundup_multiple_median",
+        "economic_copyability_runtime_roundup_multiple_p75",
+        "economic_copyability_capital_filter_status",
+        "economic_copyability_capital_filter_reason",
         "economic_copyability_executable_now",
         "economic_copyability_executable_with_roundup",
         "economic_copyability_executable_after_batch",
@@ -316,6 +326,46 @@ def save_csv(rows: list[dict], path: Path) -> None:
                     ),
                     "economic_copyability_required_bankroll_p99_volume_usd": row.get(
                         "economic_copyability_required_bankroll_p99_volume_usd",
+                        "",
+                    ),
+                    "economic_copyability_budget_usd": row.get(
+                        "economic_copyability_budget_usd",
+                        "",
+                    ),
+                    "economic_copyability_volume_coverage": row.get(
+                        "economic_copyability_volume_coverage",
+                        "",
+                    ),
+                    "economic_copyability_volume_coverage_with_roundup": row.get(
+                        "economic_copyability_volume_coverage_with_roundup",
+                        "",
+                    ),
+                    "economic_copyability_runtime_processed_signals": row.get(
+                        "economic_copyability_runtime_processed_signals",
+                        "",
+                    ),
+                    "economic_copyability_runtime_batch_expired": row.get(
+                        "economic_copyability_runtime_batch_expired",
+                        "",
+                    ),
+                    "economic_copyability_runtime_batch_expired_ratio": row.get(
+                        "economic_copyability_runtime_batch_expired_ratio",
+                        "",
+                    ),
+                    "economic_copyability_runtime_roundup_multiple_median": row.get(
+                        "economic_copyability_runtime_roundup_multiple_median",
+                        "",
+                    ),
+                    "economic_copyability_runtime_roundup_multiple_p75": row.get(
+                        "economic_copyability_runtime_roundup_multiple_p75",
+                        "",
+                    ),
+                    "economic_copyability_capital_filter_status": row.get(
+                        "economic_copyability_capital_filter_status",
+                        "",
+                    ),
+                    "economic_copyability_capital_filter_reason": row.get(
+                        "economic_copyability_capital_filter_reason",
                         "",
                     ),
                     "economic_copyability_executable_now": row.get(

@@ -204,6 +204,76 @@ class RebalanceReviewTests(unittest.TestCase):
         self.assertEqual(summary["leader_count"], 2)
         self.assertGreater(summary["volume_coverage_with_roundup"], 0)
 
+    def test_capital_filters_remove_runtime_batch_expiry_leader(self) -> None:
+        rows = [
+            {
+                "user_name": "RuntimeDust",
+                "wallet": "wallet-dust",
+                "category": "CULTURE",
+                "final_wss": "82",
+                "weight": "0.5",
+                "economic_copyability_status": "PASS",
+                "economic_copyability_buy_signals": "30",
+                "economic_copyability_executable_ratio": "0.40",
+                "economic_copyability_batchable_ratio": "0.65",
+                "economic_copyability_dust_ratio": "0.20",
+                "economic_copyability_runtime_processed_signals": "30",
+                "economic_copyability_runtime_batch_expired_ratio": "0.90",
+                "economic_copyability_required_bankroll_p95_volume_usd": "300",
+            },
+            {
+                "user_name": "Copyable",
+                "wallet": "wallet-copy",
+                "category": "TECH",
+                "final_wss": "76",
+                "weight": "0.5",
+                "economic_copyability_status": "PASS",
+                "economic_copyability_buy_signals": "30",
+                "economic_copyability_executable_ratio": "0.25",
+                "economic_copyability_batchable_ratio": "0.55",
+                "economic_copyability_dust_ratio": "0.30",
+                "economic_copyability_runtime_processed_signals": "30",
+                "economic_copyability_runtime_batch_expired_ratio": "0.20",
+                "economic_copyability_required_bankroll_p95_volume_usd": "350",
+            },
+        ]
+
+        with patch.object(
+            rebalance_review,
+            "compute_budget_volume_coverage_by_wallet",
+            return_value={
+                "wallet-dust": {
+                    "budget_usd": 75.0,
+                    "volume_coverage": 0.30,
+                    "volume_coverage_with_roundup": 0.60,
+                },
+                "wallet-copy": {
+                    "budget_usd": 150.0,
+                    "volume_coverage": 0.35,
+                    "volume_coverage_with_roundup": 0.70,
+                },
+            },
+        ):
+            selected, note, summary = rebalance_review._capital_prune_live_rows(
+                rows,
+                config={
+                    "capital": {"total_capital_usd": 150.0},
+                    "economic_copyability": {
+                        "capital_aware_rebalance": True,
+                        "capital_aware_rebalance_mode": "balanced",
+                        "min_live_leaders": 1,
+                        "target_live_leaders": 2,
+                        "max_live_leaders": 2,
+                        "min_runtime_execution_filter_samples": 10,
+                        "max_runtime_batch_expired_ratio": 0.60,
+                    },
+                },
+            )
+
+        self.assertEqual([row["user_name"] for row in selected], ["Copyable"])
+        self.assertIn("filters removed 1", note)
+        self.assertEqual(summary["leader_count"], 1)
+
     def test_review_message_includes_capital_pruning_note(self) -> None:
         text = rebalance_review.build_review_message(
             {

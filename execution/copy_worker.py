@@ -965,11 +965,12 @@ def process_signal(signal: LeaderSignal) -> dict:
             config,
             position_usd=position_usd,
         )
+        sell_min_order_size_usd = min(min_order_size_usd, position_usd)
         size_decision = compute_signal_copy_amount(
             leader_budget_usd=position_usd,
             remaining_leader_budget_usd=position_usd,
             leader_trade_notional_usd=signal.leader_trade_notional_usd,
-            min_order_size_usd=min_order_size_usd,
+            min_order_size_usd=sell_min_order_size_usd,
             max_per_trade_usd=max_per_trade_usd,
             leader_trade_notional_copy_fraction=leader_trade_notional_copy_fraction,
             side=signal.side,

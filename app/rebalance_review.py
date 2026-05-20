@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import csv
 import json
+import re
 import shutil
 import sys
 import zipfile
 from contextlib import redirect_stdout
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from html import escape
 from io import StringIO
 from pathlib import Path
@@ -21,6 +22,7 @@ from app import final_portfolio_candidates_demo, multi_category_shortlist_demo, 
 from app.apply_rebalance_lifecycle import main as apply_rebalance_lifecycle
 from app.allocation_runtime import resolve_leader_budget_usd, resolve_total_capital_usd
 from execution.builder_auth import load_executor_config
+from execution import state_store
 from signals.economic_copyability import (
     ECONOMIC_COPYABILITY_REQUIREMENT_SAMPLES_FIELD,
     annotate_rows_with_economic_copyability,
@@ -99,6 +101,13 @@ REVIEW_COLUMNS = [
     "economic_copyability_budget_usd",
     "economic_copyability_volume_coverage",
     "economic_copyability_volume_coverage_with_roundup",
+    "economic_copyability_runtime_processed_signals",
+    "economic_copyability_runtime_batch_expired",
+    "economic_copyability_runtime_batch_expired_ratio",
+    "economic_copyability_runtime_roundup_multiple_median",
+    "economic_copyability_runtime_roundup_multiple_p75",
+    "economic_copyability_capital_filter_status",
+    "economic_copyability_capital_filter_reason",
     "economic_copyability_executable_now",
     "economic_copyability_executable_with_roundup",
     "economic_copyability_executable_after_batch",
@@ -181,6 +190,21 @@ def _safe_int(value: Any, default: int = 0) -> int:
         return int(value)
     except (TypeError, ValueError):
         return default
+
+
+def _parse_dt(value: Any) -> datetime | None:
+    if value in (None, ""):
+        return None
+    text = str(value)
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(text.replace(" ", "T"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
 
 
 def _is_eligible(row: dict[str, Any]) -> bool:
@@ -435,7 +459,7 @@ def write_review_xlsx(rows: list[dict[str, Any]], path: Path) -> None:
         [
             "economic copyability",
             "historical/runtime gate only; not included in WSS",
-            "uses recent wallet trades for new candidates and runtime signal observations when available; rejects leaders whose BUY flow is mostly too small for the current bankroll/min-order model even after short batching",
+            "uses recent wallet trades, runtime observations, batch expiry and round-up multiples; rejects leaders whose BUY flow is too small for the current bankroll/min-order model even after short batching",
         ],
         [
             "hard gates",
@@ -510,7 +534,125 @@ def _apply_economic_copyability_annotations(config: dict[str, Any]) -> None:
             continue
         original_fieldnames = list(rows[0].keys())
         annotate_rows_with_economic_copyability(rows, config=config)
+        _annotate_rows_with_runtime_execution_copyability(rows, config=config)
         _write_csv(rows, path, _append_fieldnames(original_fieldnames, rows))
+
+
+_ROUND_UP_RE = re.compile(r"round-up multiple\s+([0-9]+(?:\.[0-9]+)?)")
+
+
+def _quantile(values: list[float], q: float) -> float | None:
+    vals = sorted(value for value in values if value > 0)
+    if not vals:
+        return None
+    if len(vals) == 1:
+        return vals[0]
+    pos = (len(vals) - 1) * q
+    lo = int(pos)
+    hi = min(lo + 1, len(vals) - 1)
+    if lo == hi:
+        return vals[lo]
+    frac = pos - lo
+    return vals[lo] * (1.0 - frac) + vals[hi] * frac
+
+
+def _runtime_execution_copyability_by_wallet(
+    *,
+    config: dict[str, Any],
+) -> dict[str, dict[str, Any]]:
+    cfg = config.get("economic_copyability", {})
+    lookback_hours = _safe_float(
+        cfg.get("runtime_execution_lookback_hours"),
+        _safe_float(cfg.get("lookback_hours"), 168.0),
+    )
+    since = datetime.now(timezone.utc) - timedelta(hours=max(lookback_hours, 1.0))
+    try:
+        state_store.init_db()
+        processed = state_store.list_processed_signals(limit=200000)
+    except Exception:
+        return {}
+
+    by_wallet: dict[str, dict[str, Any]] = {}
+    tracked_statuses = {
+        "BATCH_EXPIRED",
+        "BATCH_BLOCKED",
+        "BATCH_EXECUTION_ERROR",
+        "BATCH_EXECUTED",
+        "PAPER_FILLED_ENTRY",
+        "LIVE_FILLED_ENTRY",
+        "PREVIEW_READY_ENTRY",
+        "SKIPPED_SIZING",
+    }
+    for row in processed:
+        created_at = _parse_dt(row.get("created_at"))
+        if created_at is None or created_at < since:
+            continue
+        if str(row.get("side") or "").upper() != "BUY":
+            continue
+        status = str(row.get("status") or "").upper()
+        if status not in tracked_statuses:
+            continue
+        wallet = str(row.get("leader_wallet") or "").lower()
+        if not wallet:
+            continue
+        item = by_wallet.setdefault(
+            wallet,
+            {
+                "processed": 0,
+                "batch_expired": 0,
+                "round_up_multiples": [],
+            },
+        )
+        item["processed"] += 1
+        if status == "BATCH_EXPIRED":
+            item["batch_expired"] += 1
+        match = _ROUND_UP_RE.search(str(row.get("reason") or ""))
+        if match:
+            item["round_up_multiples"].append(_safe_float(match.group(1)))
+
+    out: dict[str, dict[str, Any]] = {}
+    for wallet, item in by_wallet.items():
+        processed_count = int(item["processed"])
+        expired_count = int(item["batch_expired"])
+        multiples = list(item["round_up_multiples"])
+        out[wallet] = {
+            "processed": processed_count,
+            "batch_expired": expired_count,
+            "batch_expired_ratio": (
+                round(expired_count / processed_count, 6) if processed_count > 0 else 0.0
+            ),
+            "roundup_multiple_median": (
+                round(_quantile(multiples, 0.50), 6) if _quantile(multiples, 0.50) else ""
+            ),
+            "roundup_multiple_p75": (
+                round(_quantile(multiples, 0.75), 6) if _quantile(multiples, 0.75) else ""
+            ),
+        }
+    return out
+
+
+def _annotate_rows_with_runtime_execution_copyability(
+    rows: list[dict[str, Any]],
+    *,
+    config: dict[str, Any],
+) -> None:
+    metrics = _runtime_execution_copyability_by_wallet(config=config)
+    for row in rows:
+        wallet = str(row.get("wallet") or "").lower()
+        item = metrics.get(wallet)
+        if not item:
+            continue
+        row["economic_copyability_runtime_processed_signals"] = item["processed"]
+        row["economic_copyability_runtime_batch_expired"] = item["batch_expired"]
+        row["economic_copyability_runtime_batch_expired_ratio"] = item[
+            "batch_expired_ratio"
+        ]
+        row["economic_copyability_runtime_roundup_multiple_median"] = item[
+            "roundup_multiple_median"
+        ]
+        row["economic_copyability_runtime_roundup_multiple_p75"] = item[
+            "roundup_multiple_p75"
+        ]
 
 
 def _review_total_capital_usd(config: dict[str, Any]) -> float:
@@ -574,6 +716,141 @@ def _annotate_budget_volume_coverage(
 
 def _capital_required_p95_volume(row: dict[str, Any]) -> float:
     return _safe_float(row.get("economic_copyability_required_bankroll_p95_volume_usd"))
+
+
+def _requirement_sample_roundup_multiples(
+    row: dict[str, Any],
+    *,
+    budget_usd: float,
+) -> list[tuple[float, float]]:
+    if budget_usd <= 0:
+        return []
+    raw = row.get(ECONOMIC_COPYABILITY_REQUIREMENT_SAMPLES_FIELD)
+    if not raw:
+        return []
+    try:
+        parsed = json.loads(str(raw))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return []
+    out: list[tuple[float, float]] = []
+    for item in parsed:
+        if not isinstance(item, (list, tuple)) or len(item) < 2:
+            continue
+        required = _safe_float(item[0])
+        weight = _safe_float(item[1])
+        if required > 0 and weight > 0:
+            out.append((required / budget_usd, weight))
+    return out
+
+
+def _weighted_quantile(values: list[tuple[float, float]], q: float) -> float | None:
+    pairs = sorted((value, weight) for value, weight in values if value > 0 and weight > 0)
+    if not pairs:
+        return None
+    total = sum(weight for _value, weight in pairs)
+    threshold = total * q
+    running = 0.0
+    for value, weight in pairs:
+        running += weight
+        if running >= threshold:
+            return value
+    return pairs[-1][0]
+
+
+def _capital_filter_reason(
+    row: dict[str, Any],
+    *,
+    config: dict[str, Any],
+    total_capital_usd: float,
+) -> str | None:
+    cfg = config.get("economic_copyability", {})
+    if str(row.get("economic_copyability_status") or "").upper() == "FAIL":
+        return str(row.get("economic_copyability_reason") or "economic copyability status FAIL")
+
+    buy_signals = _safe_int(row.get("economic_copyability_buy_signals"))
+    min_samples = max(1, _safe_int(cfg.get("min_buy_signals"), 20))
+    budget = resolve_leader_budget_usd(row, total_capital_usd=total_capital_usd)
+
+    if buy_signals >= min_samples:
+        executable = _safe_float(row.get("economic_copyability_executable_ratio"))
+        batchable = _safe_float(row.get("economic_copyability_batchable_ratio"))
+        dust = _safe_float(row.get("economic_copyability_dust_ratio"))
+        min_executable = _safe_float(
+            cfg.get("min_rebalance_executable_ratio"),
+            _safe_float(cfg.get("min_executable_ratio"), 0.10),
+        )
+        min_batchable = _safe_float(
+            cfg.get("min_rebalance_batchable_ratio"),
+            _safe_float(cfg.get("min_batchable_ratio"), 0.35),
+        )
+        max_dust = _safe_float(cfg.get("max_rebalance_dust_ratio"), 0.75)
+        if executable < min_executable and batchable < min_batchable:
+            return (
+                f"signal executable share too low: direct {executable:.0%} "
+                f"< {min_executable:.0%} and batch {batchable:.0%} < {min_batchable:.0%}"
+            )
+        if batchable < min_batchable:
+            return f"batchable signal share too low: {batchable:.0%} < {min_batchable:.0%}"
+        if dust > max_dust:
+            return f"dust signal share too high: {dust:.0%} > {max_dust:.0%}"
+
+    volume_round = row.get("economic_copyability_volume_coverage_with_roundup")
+    if volume_round not in (None, "", "n/a", "N/A"):
+        idle = max(0.0, 1.0 - _safe_float(volume_round))
+        max_idle = _safe_float(cfg.get("max_rebalance_idle_ratio"), 0.80)
+        if idle > max_idle:
+            return f"expected idle/dust too high: {idle:.0%} > {max_idle:.0%}"
+
+    multiples = _requirement_sample_roundup_multiples(row, budget_usd=budget)
+    p50 = _weighted_quantile(multiples, 0.50)
+    p75 = _weighted_quantile(multiples, 0.75)
+    max_p50 = _safe_float(cfg.get("max_rebalance_roundup_multiple_median"), 25.0)
+    max_p75 = _safe_float(cfg.get("max_rebalance_roundup_multiple_p75"), 50.0)
+    if p50 is not None and p50 > max_p50:
+        return f"median round-up multiple too high: {p50:.1f}x > {max_p50:.1f}x"
+    if p75 is not None and p75 > max_p75:
+        return f"p75 round-up multiple too high: {p75:.1f}x > {max_p75:.1f}x"
+
+    runtime_samples = _safe_int(row.get("economic_copyability_runtime_processed_signals"))
+    min_runtime_samples = _safe_int(cfg.get("min_runtime_execution_filter_samples"), 10)
+    if runtime_samples >= min_runtime_samples:
+        expired_ratio = _safe_float(row.get("economic_copyability_runtime_batch_expired_ratio"))
+        max_expired = _safe_float(cfg.get("max_runtime_batch_expired_ratio"), 0.60)
+        if expired_ratio > max_expired:
+            return (
+                f"runtime batch expired ratio too high: "
+                f"{expired_ratio:.0%} > {max_expired:.0%}"
+            )
+        runtime_p50 = _safe_float(row.get("economic_copyability_runtime_roundup_multiple_median"))
+        runtime_p75 = _safe_float(row.get("economic_copyability_runtime_roundup_multiple_p75"))
+        if runtime_p50 > 0 and runtime_p50 > max_p50:
+            return f"runtime median round-up multiple too high: {runtime_p50:.1f}x > {max_p50:.1f}x"
+        if runtime_p75 > 0 and runtime_p75 > max_p75:
+            return f"runtime p75 round-up multiple too high: {runtime_p75:.1f}x > {max_p75:.1f}x"
+
+    return None
+
+
+def _annotate_capital_filters(
+    rows: list[dict[str, Any]],
+    *,
+    config: dict[str, Any],
+    total_capital_usd: float,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    passed: list[dict[str, Any]] = []
+    filtered: list[dict[str, Any]] = []
+    for row in rows:
+        row = dict(row)
+        reason = _capital_filter_reason(row, config=config, total_capital_usd=total_capital_usd)
+        if reason:
+            row["economic_copyability_capital_filter_status"] = "FAIL"
+            row["economic_copyability_capital_filter_reason"] = reason
+            filtered.append(row)
+        else:
+            row["economic_copyability_capital_filter_status"] = "PASS"
+            row["economic_copyability_capital_filter_reason"] = ""
+            passed.append(row)
+    return passed, filtered
 
 
 def _capital_copy_rank(row: dict[str, Any], *, total_capital_usd: float) -> tuple[float, float, float, float, float]:
@@ -641,6 +918,11 @@ def _capital_capacity_summary(
     )
     volume_coverage = weighted_average("economic_copyability_volume_coverage")
     volume_coverage_round = weighted_average("economic_copyability_volume_coverage_with_roundup")
+    runtime_batch_expired = weighted_average("economic_copyability_runtime_batch_expired_ratio")
+    runtime_roundup_median = weighted_average(
+        "economic_copyability_runtime_roundup_multiple_median"
+    )
+    runtime_roundup_p75 = weighted_average("economic_copyability_runtime_roundup_multiple_p75")
     return {
         "leader_count": len(rows),
         "total_capital_usd": round(total_capital_usd, 2),
@@ -672,6 +954,15 @@ def _capital_capacity_summary(
         )
         if volume_coverage_round is not None
         else None,
+        "runtime_batch_expired_ratio": (
+            round(runtime_batch_expired, 6) if runtime_batch_expired is not None else None
+        ),
+        "runtime_roundup_multiple_median": (
+            round(runtime_roundup_median, 6) if runtime_roundup_median is not None else None
+        ),
+        "runtime_roundup_multiple_p75": (
+            round(runtime_roundup_p75, 6) if runtime_roundup_p75 is not None else None
+        ),
         "unknown_leaders": unknown,
         "failed_leaders": failures,
     }
@@ -693,6 +984,17 @@ def _capital_summary_text(summary: dict[str, Any] | None) -> str:
         unknown_note = (
             "\nважно: часть лидеров без runtime-истории, проценты считаются только по известным"
         )
+    runtime_note = ""
+    if summary.get("runtime_batch_expired_ratio") is not None:
+        runtime_note = (
+            "\nпо runtime: batch expired "
+            f"{_pct_or_na(summary.get('runtime_batch_expired_ratio'))}"
+        )
+        if _safe_float(summary.get("runtime_roundup_multiple_p75")) > 0:
+            runtime_note += (
+                " | p75 round-up "
+                f"{_safe_float(summary.get('runtime_roundup_multiple_p75')):.1f}x"
+            )
     return (
         "Ожидаемая копируемость при текущем банкролле:\n"
         f"leaders: {summary.get('leader_count')} | "
@@ -704,6 +1006,7 @@ def _capital_summary_text(summary: dict[str, Any] | None) -> str:
         f"volume coverage: {_pct_or_na(summary.get('volume_coverage'))} | "
         f"с round-up: {_pct_or_na(summary.get('volume_coverage_with_roundup'))}\n"
         f"примерно простаивает/dust: {_pct_or_na(summary.get('estimated_idle_ratio'))}"
+        f"{runtime_note}"
         f"{unknown_note}"
     )
 
@@ -801,12 +1104,14 @@ def _balanced_subset_score(
         1.0,
     )
     score = (
-        0.30 * (avg_wss / 100.0)
-        + 0.25 * _safe_float(summary.get("volume_coverage_with_roundup"))
-        + 0.18 * _safe_float(summary.get("batchable_ratio"))
-        + 0.12 * _safe_float(summary.get("executable_ratio"))
-        + 0.15 * count_score
-        - 0.16 * _safe_float(summary.get("dust_ratio"))
+        0.24 * (avg_wss / 100.0)
+        + 0.20 * _safe_float(summary.get("volume_coverage_with_roundup"))
+        + 0.24 * _safe_float(summary.get("batchable_ratio"))
+        + 0.14 * _safe_float(summary.get("executable_ratio"))
+        + 0.06 * count_score
+        - 0.18 * _safe_float(summary.get("dust_ratio"))
+        - 0.16 * _safe_float(summary.get("estimated_idle_ratio"))
+        - 0.12 * _safe_float(summary.get("runtime_batch_expired_ratio"))
         - 0.12 * _safe_float(summary.get("unknown_leaders")) / max(len(rows), 1)
         - 0.50 * _safe_float(summary.get("failed_leaders")) / max(len(rows), 1)
     )
@@ -888,6 +1193,7 @@ def _capital_prune_live_rows(
     rows: list[dict[str, Any]],
     *,
     config: dict[str, Any],
+    enforce_capital_filters: bool = True,
 ) -> tuple[list[dict[str, Any]], str, dict[str, Any]]:
     if not rows:
         return rows, "", {}
@@ -908,18 +1214,59 @@ def _capital_prune_live_rows(
         annotated = _annotate_budget_volume_coverage(rows, config=config)
         return annotated, "", {}
 
+    filter_note = ""
+    filters_enabled = enforce_capital_filters and (
+        str(cfg.get("capital_filters_enabled", "true")).strip().lower()
+        not in {"0", "false", "no", "off"}
+    )
+    if filters_enabled:
+        filtered_input = _annotate_budget_volume_coverage(
+            _reweight_live_rows([dict(row) for row in rows]),
+            config=config,
+        )
+        passed, filtered = _annotate_capital_filters(
+            filtered_input,
+            config=config,
+            total_capital_usd=total_capital_usd,
+        )
+        if passed:
+            rows = passed
+            if filtered:
+                examples = ", ".join(
+                    f"{row.get('user_name')}: {row.get('economic_copyability_capital_filter_reason')}"
+                    for row in filtered[:3]
+                )
+                filter_note = (
+                    f"Capital-aware filters removed {len(filtered)} candidate(s): {examples}."
+                )
+        else:
+            rows = filtered_input
+            if filtered:
+                examples = ", ".join(
+                    f"{row.get('user_name')}: {row.get('economic_copyability_capital_filter_reason')}"
+                    for row in filtered[:3]
+                )
+                filter_note = (
+                    "Capital-aware filters found no passing candidates; "
+                    f"fallback kept ranked candidates for manual review. Examples: {examples}."
+                )
+
     mode = str(cfg.get("capital_aware_rebalance_mode") or "balanced").strip().lower()
     if mode == "strict":
-        return _strict_capital_prune_live_rows(
+        selected, note, summary = _strict_capital_prune_live_rows(
             rows,
             config=config,
             total_capital_usd=total_capital_usd,
         )
-    return _balanced_capital_select_live_rows(
-        rows,
-        config=config,
-        total_capital_usd=total_capital_usd,
-    )
+    else:
+        selected, note, summary = _balanced_capital_select_live_rows(
+            rows,
+            config=config,
+            total_capital_usd=total_capital_usd,
+        )
+    if filter_note:
+        note = f"{filter_note} {note}".strip()
+    return selected, note, summary
 
 
 def _copy_required(src: Path, dst: Path) -> None:
@@ -992,12 +1339,19 @@ def _summarize_live_rows(rows: list[dict[str, str]]) -> str:
         volume_coverage_round = _safe_float(
             row.get("economic_copyability_volume_coverage_with_roundup")
         )
+        executable = _safe_float(row.get("economic_copyability_executable_ratio"))
+        batchable = _safe_float(row.get("economic_copyability_batchable_ratio"))
+        batch_expired = row.get("economic_copyability_runtime_batch_expired_ratio")
         req95 = _safe_float(row.get("economic_copyability_required_bankroll_p95_volume_usd"))
         if budget > 0 and (volume_coverage > 0 or volume_coverage_round > 0):
             copyability = (
                 f" | budget ${budget:.0f} | vol {volume_coverage:.0%}"
                 f"/{volume_coverage_round:.0%} round"
             )
+            if executable > 0 or batchable > 0:
+                copyability += f" | sig {executable:.0%}/{batchable:.0%} batch"
+            if batch_expired not in (None, "", "n/a", "N/A"):
+                copyability += f" | expired {_safe_float(batch_expired):.0%}"
         elif req95 > 0:
             copyability = f" | req vol95 ${req95:.0f}"
         lines.append(
@@ -1036,8 +1390,17 @@ def create_rebalance_review(*, refresh: bool = True) -> dict[str, Any]:
         output_state=paths["state"],
     )
 
-    live_rows = _read_csv(paths["live"])
     config = load_executor_config()
+    econ_cfg = config.get("economic_copyability", {})
+    live_rows = _read_csv(paths["live"])
+    if str(econ_cfg.get("capital_aware_candidate_pool", "allocation")).strip().lower() in {
+        "allocation",
+        "all",
+        "final_allocation",
+    }:
+        allocation_rows = _read_csv(paths["final_allocation"])
+        if allocation_rows:
+            live_rows = allocation_rows
     live_rows, capital_pruning_note, capital_fit_summary = _capital_prune_live_rows(
         live_rows,
         config=config,
@@ -1132,6 +1495,13 @@ def _live_fieldnames(rows: list[dict[str, Any]]) -> list[str]:
         "economic_copyability_budget_usd",
         "economic_copyability_volume_coverage",
         "economic_copyability_volume_coverage_with_roundup",
+        "economic_copyability_runtime_processed_signals",
+        "economic_copyability_runtime_batch_expired",
+        "economic_copyability_runtime_batch_expired_ratio",
+        "economic_copyability_runtime_roundup_multiple_median",
+        "economic_copyability_runtime_roundup_multiple_p75",
+        "economic_copyability_capital_filter_status",
+        "economic_copyability_capital_filter_reason",
         "economic_copyability_requirement_samples_json",
         "economic_copyability_reason",
         "days_since_last_trade",
@@ -1261,6 +1631,7 @@ def apply_manual_pick(
     live_rows, capital_pruning_note, capital_fit_summary = _capital_prune_live_rows(
         live_rows,
         config=config,
+        enforce_capital_filters=False,
     )
     _write_csv(live_rows, live_path, _live_fieldnames(live_rows))
     _write_csv(
@@ -1358,6 +1729,7 @@ def apply_manual_replacement(
     live_rows, capital_pruning_note, capital_fit_summary = _capital_prune_live_rows(
         live_rows,
         config=config,
+        enforce_capital_filters=False,
     )
     _write_csv(live_rows, live_path, _live_fieldnames(live_rows))
     _write_csv(
