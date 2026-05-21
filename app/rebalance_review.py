@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import itertools
 import json
 import re
 import shutil
@@ -41,7 +42,7 @@ FINAL_ALLOCATION_FILE = SHORTLIST_DIR / "final_portfolio_allocation.csv"
 LIVE_FILE = SHORTLIST_DIR / "live_portfolio_allocation.csv"
 REPORT_FILE = SHORTLIST_DIR / "live_rebalance_report.csv"
 STATE_FILE = Path("data/rebalance_state.json")
-SCORING_VERSION = "wss_v4_profile_pnl_gates_2026_04_29"
+SCORING_VERSION = "wss_v5_runtime_capital_combo_2026_05_21"
 
 REVIEW_COLUMNS = [
     "category",
@@ -563,8 +564,13 @@ def _runtime_execution_copyability_by_wallet(
     cfg = config.get("economic_copyability", {})
     lookback_hours = _safe_float(
         cfg.get("runtime_execution_lookback_hours"),
-        _safe_float(cfg.get("lookback_hours"), 168.0),
+        24.0,
     )
+    source_filter = str(
+        cfg.get("runtime_execution_signal_source")
+        or cfg.get("runtime_signal_source")
+        or "onchain"
+    ).strip().lower()
     since = datetime.now(timezone.utc) - timedelta(hours=max(lookback_hours, 1.0))
     try:
         state_store.init_db()
@@ -586,6 +592,11 @@ def _runtime_execution_copyability_by_wallet(
     for row in processed:
         created_at = _parse_dt(row.get("created_at"))
         if created_at is None or created_at < since:
+            continue
+        signal_id = str(row.get("signal_id") or "")
+        if source_filter in {"onchain", "on-chain"} and not signal_id.startswith("onchain:"):
+            continue
+        if source_filter in {"data_api", "data-api"} and signal_id.startswith("onchain:"):
             continue
         if str(row.get("side") or "").upper() != "BUY":
             continue
@@ -1123,6 +1134,7 @@ def _balanced_capital_select_live_rows(
     *,
     config: dict[str, Any],
     total_capital_usd: float,
+    enforce_capital_filters: bool = True,
 ) -> tuple[list[dict[str, Any]], str, dict[str, Any]]:
     cfg = config.get("economic_copyability", {})
     original_count = len(rows)
@@ -1143,30 +1155,76 @@ def _balanced_capital_select_live_rows(
         key=lambda row: _capital_copy_rank(row, total_capital_usd=total_capital_usd),
         reverse=True,
     )
+    candidate_limit = max(
+        max_live_leaders,
+        _safe_int(cfg.get("capital_aware_combo_candidate_limit"), 12),
+    )
+    ranked = ranked[: min(candidate_limit, len(ranked))]
     best_rows: list[dict[str, Any]] | None = None
     best_summary: dict[str, Any] = {}
     best_score = float("-inf")
+    searched = 0
+    filtered_combinations = 0
 
     for size in range(min_live_leaders, max_live_leaders + 1):
-        subset = _annotate_budget_volume_coverage(
-            _reweight_live_rows([dict(row) for row in ranked[:size]]),
+        for combo in itertools.combinations(ranked, size):
+            searched += 1
+            subset = _annotate_budget_volume_coverage(
+                _reweight_live_rows([dict(row) for row in combo]),
+                config=config,
+            )
+            if enforce_capital_filters:
+                passed_subset, filtered_subset = _annotate_capital_filters(
+                    subset,
+                    config=config,
+                    total_capital_usd=total_capital_usd,
+                )
+                if filtered_subset:
+                    filtered_combinations += 1
+                    continue
+                subset = passed_subset
+            score, summary = _balanced_subset_score(
+                subset,
+                total_capital_usd=total_capital_usd,
+                target_live_leaders=target_live_leaders,
+            )
+            if score > best_score:
+                best_score = score
+                best_rows = subset
+                best_summary = summary
+
+    if best_rows is None:
+        fallback_ranked = ranked[:min_live_leaders]
+        best_rows = _annotate_budget_volume_coverage(
+            _reweight_live_rows([dict(row) for row in fallback_ranked]),
             config=config,
         )
-        score, summary = _balanced_subset_score(
-            subset,
+        _passed, filtered = _annotate_capital_filters(
+            best_rows,
+            config=config,
+            total_capital_usd=total_capital_usd,
+        )
+        for row in filtered:
+            row["economic_copyability_capital_filter_status"] = "FAIL"
+        _score, best_summary = _balanced_subset_score(
+            best_rows,
             total_capital_usd=total_capital_usd,
             target_live_leaders=target_live_leaders,
         )
-        if score > best_score:
-            best_score = score
-            best_rows = subset
-            best_summary = summary
-
-    assert best_rows is not None
     note_parts = [
         "Capital-aware balanced selection: "
         f"${total_capital_usd:.0f} bankroll chose {len(best_rows)} of {original_count} leader(s)"
     ]
+    note_parts.append(
+        f"searched {searched} combination(s)"
+        + (
+            f", filtered {filtered_combinations} by hard capital filters"
+            if filtered_combinations
+            else ""
+        )
+    )
+    if len(ranked) < original_count:
+        note_parts.append(f"using top {len(ranked)} capital-ranked candidates")
     if len(best_rows) != original_count:
         note_parts.append("instead of requiring strict p95 fit for every leader")
     if _safe_int(best_summary.get("known_leaders")) == 0:
@@ -1215,11 +1273,12 @@ def _capital_prune_live_rows(
         return annotated, "", {}
 
     filter_note = ""
+    mode = str(cfg.get("capital_aware_rebalance_mode") or "balanced").strip().lower()
     filters_enabled = enforce_capital_filters and (
         str(cfg.get("capital_filters_enabled", "true")).strip().lower()
         not in {"0", "false", "no", "off"}
     )
-    if filters_enabled:
+    if filters_enabled and mode != "balanced":
         filtered_input = _annotate_budget_volume_coverage(
             _reweight_live_rows([dict(row) for row in rows]),
             config=config,
@@ -1251,7 +1310,6 @@ def _capital_prune_live_rows(
                     f"fallback kept ranked candidates for manual review. Examples: {examples}."
                 )
 
-    mode = str(cfg.get("capital_aware_rebalance_mode") or "balanced").strip().lower()
     if mode == "strict":
         selected, note, summary = _strict_capital_prune_live_rows(
             rows,
@@ -1263,6 +1321,7 @@ def _capital_prune_live_rows(
             rows,
             config=config,
             total_capital_usd=total_capital_usd,
+            enforce_capital_filters=filters_enabled,
         )
     if filter_note:
         note = f"{filter_note} {note}".strip()

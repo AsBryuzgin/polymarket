@@ -204,6 +204,92 @@ class RebalanceReviewTests(unittest.TestCase):
         self.assertEqual(summary["leader_count"], 2)
         self.assertGreater(summary["volume_coverage_with_roundup"], 0)
 
+    def test_balanced_capital_selection_searches_combinations_not_only_prefix(self) -> None:
+        rows = [
+            {
+                "user_name": "Anchor",
+                "wallet": "wallet-a",
+                "category": "SPORTS",
+                "final_wss": "70",
+                "weight": "0.34",
+                "economic_copyability_status": "PASS",
+                "economic_copyability_buy_signals": "40",
+                "economic_copyability_executable_ratio": "0.70",
+                "economic_copyability_batchable_ratio": "0.80",
+                "economic_copyability_dust_ratio": "0.10",
+                "economic_copyability_required_bankroll_p95_volume_usd": "50",
+            },
+            {
+                "user_name": "HighRankLowCoverage",
+                "wallet": "wallet-b",
+                "category": "MENTIONS",
+                "final_wss": "69",
+                "weight": "0.33",
+                "economic_copyability_status": "PASS",
+                "economic_copyability_buy_signals": "40",
+                "economic_copyability_executable_ratio": "0.65",
+                "economic_copyability_batchable_ratio": "0.75",
+                "economic_copyability_dust_ratio": "0.10",
+                "economic_copyability_required_bankroll_p95_volume_usd": "50",
+            },
+            {
+                "user_name": "LowerRankBetterCoverage",
+                "wallet": "wallet-c",
+                "category": "ECONOMICS",
+                "final_wss": "60",
+                "weight": "0.33",
+                "economic_copyability_status": "PASS",
+                "economic_copyability_buy_signals": "40",
+                "economic_copyability_executable_ratio": "0.60",
+                "economic_copyability_batchable_ratio": "0.70",
+                "economic_copyability_dust_ratio": "0.10",
+                "economic_copyability_required_bankroll_p95_volume_usd": "50",
+            },
+        ]
+
+        def coverage(*, config, budget_by_wallet):
+            out = {}
+            for wallet in budget_by_wallet:
+                if wallet == "wallet-b":
+                    out[wallet] = {
+                        "budget_usd": budget_by_wallet[wallet],
+                        "volume_coverage": 0.05,
+                        "volume_coverage_with_roundup": 0.05,
+                    }
+                else:
+                    out[wallet] = {
+                        "budget_usd": budget_by_wallet[wallet],
+                        "volume_coverage": 0.95,
+                        "volume_coverage_with_roundup": 0.95,
+                    }
+            return out
+
+        with patch.object(
+            rebalance_review,
+            "compute_budget_volume_coverage_by_wallet",
+            side_effect=coverage,
+        ):
+            selected, note, summary = rebalance_review._capital_prune_live_rows(
+                rows,
+                config={
+                    "capital": {"total_capital_usd": 150.0},
+                    "economic_copyability": {
+                        "capital_aware_rebalance": True,
+                        "capital_aware_rebalance_mode": "balanced",
+                        "min_live_leaders": 2,
+                        "target_live_leaders": 2,
+                        "max_live_leaders": 2,
+                    },
+                },
+            )
+
+        self.assertEqual(
+            [row["user_name"] for row in selected],
+            ["Anchor", "LowerRankBetterCoverage"],
+        )
+        self.assertIn("searched 3 combination", note)
+        self.assertEqual(summary["leader_count"], 2)
+
     def test_capital_filters_remove_runtime_batch_expiry_leader(self) -> None:
         rows = [
             {
@@ -271,7 +357,8 @@ class RebalanceReviewTests(unittest.TestCase):
             )
 
         self.assertEqual([row["user_name"] for row in selected], ["Copyable"])
-        self.assertIn("filters removed 1", note)
+        self.assertIn("filtered", note)
+        self.assertIn("hard capital filters", note)
         self.assertEqual(summary["leader_count"], 1)
 
     def test_review_message_includes_capital_pruning_note(self) -> None:

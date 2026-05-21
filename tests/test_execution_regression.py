@@ -924,6 +924,83 @@ class ExecutionRegressionTests(unittest.TestCase):
         self.assertIsNotNone(pos)
         self.assertEqual(pos["status"], "CLOSED")
 
+    def test_short_batch_coalesces_small_sell_fills_before_exit(self) -> None:
+        state_store.upsert_buy_position(
+            leader_wallet="wallet-sell-batch",
+            token_id="tokenSellBatch",
+            amount_usd=3.0,
+            entry_price=0.50,
+            signal_id="seed-sell-batch-buy",
+        )
+
+        config = {
+            "risk": {
+                "min_order_size_usd": 1.0,
+                "max_per_trade_usd": 10.0,
+                "skip_if_spread_gt": 0.02,
+            },
+            "filters": {
+                "buy_min_price": 0.05,
+                "buy_max_price": 0.95,
+            },
+            "exit": {
+                "exit_max_spread": 0.05,
+            },
+            "sizing": {
+                "leader_trade_notional_copy_fraction": 0.20,
+                "round_up_to_min_order": True,
+                "max_min_order_round_up_multiple": 3.0,
+            },
+            "signal_batch_coalescer": {
+                "enabled": True,
+                "window_sec": 30,
+            },
+        }
+        snapshot = {
+            "side": "SELL",
+            "midpoint": 0.60,
+            "spread": 0.01,
+            "price_quote": 0.60,
+            "best_bid": 0.59,
+            "best_ask": 0.61,
+        }
+
+        def signal(signal_id: str) -> LeaderSignal:
+            return LeaderSignal(
+                signal_id=signal_id,
+                leader_wallet="wallet-sell-batch",
+                token_id="tokenSellBatch",
+                side="SELL",
+                leader_budget_usd=50.0,
+                leader_exit_fraction=0.10,
+            )
+
+        with patch("execution.copy_worker.load_executor_config", return_value=config), \
+             patch("execution.copy_worker.fetch_market_snapshot", return_value=snapshot), \
+             patch("execution.copy_worker.preview_market_order", return_value={"ok": True}) as preview:
+            first = process_signal(signal("sig-sell-batch-1"))
+            second = process_signal(signal("sig-sell-batch-2"))
+            third = process_signal(signal("sig-sell-batch-3"))
+            fourth = process_signal(signal("sig-sell-batch-4"))
+
+        self.assertEqual(first["status"], "BATCH_PENDING")
+        self.assertEqual(second["status"], "BATCH_PENDING")
+        self.assertEqual(third["status"], "BATCH_PENDING")
+        self.assertEqual(fourth["status"], "PREVIEW_READY_PARTIAL_EXIT")
+        self.assertAlmostEqual(fourth["suggested_amount_usd"], 1.2)
+        self.assertEqual(preview.call_count, 1)
+
+        statuses = {row["signal_id"]: row["status"] for row in state_store.list_processed_signals()}
+        self.assertEqual(statuses["sig-sell-batch-1"], "BATCH_EXECUTED")
+        self.assertEqual(statuses["sig-sell-batch-2"], "BATCH_EXECUTED")
+        self.assertEqual(statuses["sig-sell-batch-3"], "BATCH_EXECUTED")
+        self.assertEqual(statuses["sig-sell-batch-4"], "PREVIEW_READY_PARTIAL_EXIT")
+        self.assertEqual(state_store.list_micro_signal_buckets(), [])
+
+        pos = state_store.get_open_position("wallet-sell-batch", "tokenSellBatch")
+        self.assertIsNotNone(pos)
+        self.assertAlmostEqual(float(pos["position_usd"]), 1.8)
+
 
 if __name__ == "__main__":
     unittest.main()
